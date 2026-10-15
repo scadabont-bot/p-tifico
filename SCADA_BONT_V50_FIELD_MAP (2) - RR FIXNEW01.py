@@ -8353,6 +8353,7 @@ try:
         "ll2": ("measure_control1", "Q"),
         "ll3": ("measure_control1", "IE"),
         "ll4": ("measure_control1", "UE"),
+        "ll5": ("measure_control1", "cos"),
 
         "cm1": ("measure_control1", "Uab"),
         "cm2": ("measure_control1", "f"),
@@ -9194,12 +9195,12 @@ def run_monitor_tv_qc():
         # Remaining blocks must follow the Auxiliary/Voltage/Measure-Control map.
         gen_g1 = {"tk1":301.0, "tk2":701.0, "tk3":702.0, "tk4":703.0,
                   "ll1":507.0, "ll2":510.0, "ll3":508.0, "ll4":509.0,
-                  "cm1":502.0, "cm2":503.0, "cm3":504.0,
+                  "ll5":0.87, "cm1":502.0, "cm2":503.0, "cm3":504.0,
                   "cm4":505.0, "cm5":506.0, "rr1":304.0, "rr2":307.0,
                   "rr3":501.0}
         gen_g2 = {"tk1":401.0, "tk2":701.0, "tk3":702.0, "tk4":703.0,
                   "ll1":607.0, "ll2":610.0, "ll3":608.0, "ll4":609.0,
-                  "cm1":602.0, "cm2":603.0, "cm3":604.0,
+                  "ll5":0.92, "cm1":602.0, "cm2":603.0, "cm3":604.0,
                   "cm4":605.0, "cm5":606.0, "rr1":404.0, "rr2":407.0,
                   "rr3":601.0}
         for key, wanted in gen_g1.items():

@@ -1320,6 +1320,7 @@ body{
 #ll2-parameter .unit{ font-size:24px; }
 #ll3-parameter .unit{ font-size:24px; }
 #ll4-parameter .unit{ font-size:24px; }
+#ll5-parameter .unit{ font-size:24px; }
 
 #cm1-parameter .unit{ font-size:24px; }
 #cm2-parameter .unit{ font-size:24px; }
@@ -1654,6 +1655,19 @@ body.monitor-g1 .left-group{
     left:28px;
 }
 
+/* Cos φ sits below V on both generator monitors. */
+#ll5-parameter{
+    display:flex;
+    margin-top:28px;
+}
+
+/* Keep Cos φ aligned with the G2 meter column; lower the generator symbol instead. */
+body.monitor-g2{
+    --generator-top:1410px;
+}
+body.monitor-g2 .generator-bus{
+    height:475px;
+}
 
 body.monitor-g1 .right-group{
     left:auto;
@@ -2286,6 +2300,23 @@ body.monitor-g2 .monitor-footer{
 
     </div>
 
+    <div class="row" id="ll5-parameter">
+            <div class="box">
+
+            <span
+                class="small-value"
+                id="ll5"
+            >
+                0.00
+            </span>
+
+        </div>
+
+        <span class="unit">
+            Cos φ
+        </span>
+
+    </div>
 
 </div>
 
@@ -2907,7 +2938,7 @@ function num(v,d=2){
 const DIGIT_MAP={
     tk1:1, tk2:1, tk3:1, tk4:1,
     ct1:1, ct2:1, ct3:1, ct4:1, ct5:1,
-    ll1:1, ll2:1, ll3:1, ll4:1,
+    ll1:1, ll2:1, ll3:1, ll4:1, ll5:1,
     cm1:1, cm2:1, cm3:1, cm4:1, cm5:1,
     rr1:1, rr2:1, rr3:1
 };
@@ -2930,7 +2961,7 @@ const DIGIT_MAP={
 const FONT_SIZE_MAP={
     tk1:16, tk2:16, tk3:16, tk4:16,
     ct1:16, ct2:16, ct3:16, ct4:16, ct5:16,
-    ll1:16, ll2:16, ll3:16, ll4:16,
+    ll1:16, ll2:16, ll3:16, ll4:16, ll5:16,
     cm1:16, cm2:16, cm3:16, cm4:16, cm5:16,
     rr1:16, rr2:16, rr3:16
 };
@@ -2944,7 +2975,7 @@ const FONT_SIZE_MAP={
 const SCALE_MAP={
     tk1:1.00, tk2:1.00, tk3:1.00, tk4:1.00,
     ct1:1.00, ct2:1.00, ct3:1.00, ct4:1.00, ct5:1.00,
-    ll1:1.00, ll2:1.00, ll3:1.00, ll4:1.00,
+    ll1:1.00, ll2:1.00, ll3:1.00, ll4:1.00, ll5:1.00,
     cm1:1.00, cm2:1.00, cm3:1.00, cm4:1.00, cm5:1.00,
     rr1:1.00, rr2:1.00, rr3:1.00
 };
@@ -3065,7 +3096,7 @@ function updatePanel(p){
        ---------------------------
        KT : tk1 - tk4
        CT : ct1 - ct5
-       IL : ll1 - ll4
+       IL : ll1 - ll5
        CM : cm1 - cm5
        RR : rr1 - rr2
 
@@ -3087,6 +3118,7 @@ function updatePanel(p){
         "ll2",
         "ll3",
         "ll4",
+        "ll5",
 
         "cm1",
         "cm2",
@@ -3227,7 +3259,8 @@ function initializeSevenSegments(){
         "ll1",
         "ll2",
         "ll3",
-        "ll4"
+        "ll4",
+        "ll5"
     ].forEach(function(id){
         setSmall(id,0);
     });
@@ -3505,8 +3538,8 @@ document.addEventListener("keydown",event=>{
 });
 
 
-const TV_FIELDS=["tk1","tk2","tk3","tk4","ct1","ct2","ct3","ct4","ct5","ll1","ll2","ll3","ll4","cm1","cm2","cm3","cm4","cm5","rr1","rr2","rr3"];
-const TV_DEFAULTS={tk1:["auxiliary1","Uab"],tk2:["voltage","Uab"],tk3:["voltage","Ubc"],tk4:["voltage","Uca"],ct1:["wire1","Uab"],ct2:["wire1","f"],ct3:["wire1","Ia"],ct4:["wire1","P"],ct5:["wire1","Q"],ll1:["measure_control1","P"],ll2:["measure_control1","Q"],ll3:["measure_control1","IE"],ll4:["measure_control1","UE"],cm1:["measure_control1","Uab"],cm2:["measure_control1","f"],cm3:["measure_control1","Ia"],cm4:["measure_control1","Ib"],cm5:["measure_control1","Ic"],rr1:["auxiliary1","Ia"],rr2:["auxiliary1","P"],rr3:["measure_control1","Uab_L"]};
+const TV_FIELDS=["tk1","tk2","tk3","tk4","ct1","ct2","ct3","ct4","ct5","ll1","ll2","ll3","ll4","ll5","cm1","cm2","cm3","cm4","cm5","rr1","rr2","rr3"];
+const TV_DEFAULTS={tk1:["auxiliary1","Uab"],tk2:["voltage","Uab"],tk3:["voltage","Ubc"],tk4:["voltage","Uca"],ct1:["wire1","Uab"],ct2:["wire1","f"],ct3:["wire1","Ia"],ct4:["wire1","P"],ct5:["wire1","Q"],ll1:["measure_control1","P"],ll2:["measure_control1","Q"],ll3:["measure_control1","IE"],ll4:["measure_control1","UE"],ll5:["measure_control1","cos"],cm1:["measure_control1","Uab"],cm2:["measure_control1","f"],cm3:["measure_control1","Ia"],cm4:["measure_control1","Ib"],cm5:["measure_control1","Ic"],rr1:["auxiliary1","Ia"],rr2:["auxiliary1","P"],rr3:["measure_control1","Uab_L"]};
 const TV_RECTANGLES=["j-main","j-generator","j-transformer","j-transformer-bottom"];
 let tvConfig=null,tvEditTarget=null;
 function ensureEditor(){
@@ -3594,6 +3627,7 @@ document.addEventListener("click",event=>{const value=event.target.closest("[id]
         ll2:"Mvar",
         ll3:"A",
         ll4:"V",
+        ll5:"Cos φ",
 
         cm1:"kV",
         cm2:"Hz",
