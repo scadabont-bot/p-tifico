@@ -2245,8 +2245,8 @@ class SCADAMainUI:
         self.alarm_states = {}
         self.alarm_offline_since = {}
         self.alarm_engine_lock = threading.RLock()
-        self.alarm_history_file = "AlarmHistory.csv"
-        self.alarm_active_file = "Alarm.csv"
+        self.alarm_history_file = os.path.join(APP_DIR, "AlarmHistory.csv")
+        self.alarm_active_file = os.path.join(APP_DIR, "Alarm.csv")
         self.alarm_engine_started = False
         self.alarm_last_scan = 0.0
 
@@ -3955,276 +3955,426 @@ class SCADAMainUI:
             select_bay()
 
     def action_curve(self):
-        """ Modul Curve / Real-Time Trends Terintegrasi dengan Treeview Device & CSV Reader """
+        """Display a rolling trend sourced directly from the live IEC-104 stores."""
         curve_win = tk.Toplevel(self.root)
-        curve_win.title("Real-Time Trends & Historical Curve Visualization")
-        self._make_toplevel_responsive(curve_win, "Real-Time Trends & Historical Curve Visualization", fullscreen=True)
+        curve_win.title("Real-Time Parameter Trend")
+        self._make_toplevel_responsive(
+            curve_win, "Real-Time Parameter Trend", fullscreen=True,
+        )
         curve_win.configure(bg="#0b0e14")
-
-        curve_win.bind("<Escape>", lambda e: curve_win.destroy())
+        curve_win.bind("<Escape>", lambda _event: curve_win.destroy())
 
         header_frame = tk.Frame(curve_win, bg="#161b22", height=50)
         header_frame.pack(fill="x", side="top")
-
-        title_lbl = tk.Label(
-            header_frame, text=f"📈 REAL-TIME & HISTORICAL PARAMETER TREND CURVE",
-            font=("Segoe UI", 16, "bold"), fg="#00f0ff", bg="#161b22"
-        )
-        title_lbl.pack(side="left", padx=20, pady=10)
-
-        btn_close = tk.Button(
-            header_frame, text=f"✕ {'Close (ESC)'}", font=("Segoe UI", 10, "bold"),
-            bg="#d9534f", fg="#ffffff", bd=0, padx=15, pady=6, cursor="hand2",
-            command=curve_win.destroy
-        )
-        btn_close.pack(side="right", padx=20, pady=10)
+        tk.Label(
+            header_frame,
+            text="REAL-TIME IEC-104 PARAMETER TREND",
+            font=("Segoe UI", 16, "bold"),
+            fg="#00f0ff",
+            bg="#161b22",
+        ).pack(side="left", padx=20, pady=10)
+        tk.Button(
+            header_frame,
+            text="Close (ESC)",
+            font=("Segoe UI", 10, "bold"),
+            bg="#d9534f",
+            fg="#ffffff",
+            bd=0,
+            padx=15,
+            pady=6,
+            cursor="hand2",
+            command=curve_win.destroy,
+        ).pack(side="right", padx=20, pady=10)
 
         ctrl_frame = tk.Frame(curve_win, bg="#161b22", bd=1, relief="solid")
         ctrl_frame.pack(fill="x", padx=15, pady=(10, 0))
-
-        tk.Label(ctrl_frame, text='Start Date:', fg="#ffffff", bg="#161b22", font=("Segoe UI", 16, "bold")).pack(side="left", padx=(15, 5), pady=8)
-        dp_start = DateEntry(ctrl_frame, width=12, background="#0066cc", foreground="white", borderwidth=1, date_pattern="yyyy-mm-dd")
-        dp_start.pack(side="left", padx=5, pady=8)
-
-        tk.Label(ctrl_frame, text='End Date:', fg="#ffffff", bg="#161b22", font=("Segoe UI", 10, "bold")).pack(side="left", padx=(15, 5), pady=8)
-        dp_end = DateEntry(ctrl_frame, width=12, background="#0066cc", foreground="white", borderwidth=1, date_pattern="yyyy-mm-dd")
-        dp_end.pack(side="left", padx=5, pady=8)
-
-        lbl_selected_dev = tk.Label(ctrl_frame, text="Selected: Connection Wire I", fg="#00f0ff", bg="#161b22", font=("Segoe UI", 10, "bold"))
-        lbl_selected_dev.pack(side="right", padx=20)
+        selected_label = tk.Label(
+            ctrl_frame,
+            text="Selected: Connection Wire I",
+            fg="#00f0ff",
+            bg="#161b22",
+            font=("Segoe UI", 10, "bold"),
+        )
+        selected_label.pack(side="left", padx=15, pady=8)
+        tk.Label(
+            ctrl_frame,
+            text="Live source • 1 second interval • 120 samples",
+            fg="#8b949e",
+            bg="#161b22",
+            font=("Segoe UI", 10),
+        ).pack(side="right", padx=15)
 
         main_pane = ttk.PanedWindow(curve_win, orient="horizontal")
         main_pane.pack(fill="both", expand=True, padx=15, pady=10)
 
         left_frame = tk.Frame(main_pane, bg="#161b22", bd=1, relief="solid")
         main_pane.add(left_frame, weight=1)
-
-        tk.Label(left_frame, text='Device Tree View', font=("Segoe UI", 10, "bold"), fg="#ffffff", bg="#21262d").pack(fill="x", pady=(0, 5), ipady=5)
+        tk.Label(
+            left_frame,
+            text="Device Tree View",
+            font=("Segoe UI", 10, "bold"),
+            fg="#ffffff",
+            bg="#21262d",
+        ).pack(fill="x", pady=(0, 5), ipady=5)
 
         devices_list = [
-            "Connection Wire I", "Connection Wire II", "1# Auxiliary Transformer",
-            "2# Auxiliary Transformer", "1# Generator", "1# Measure Control Box",
-            "2# Generator", "2# Measure Control Box", "Watt Hour Meter",
-            "11# Circulating Water Pump", "12# Circulating Water Pump", "13# Circulating Water Pump",
-            "1# Feed Water Pump", "1# Primary Air Fan", "1# Forced draft Fan",
-            "1# Induced draft Fan", "2# Feed Water Pump", "2# Primary Air Fan",
+            "Connection Wire I", "Connection Wire II",
+            "1# Auxiliary Transformer", "2# Auxiliary Transformer",
+            "1# Generator", "1# Measure Control Box",
+            "2# Generator", "2# Measure Control Box",
+            "Watt Hour Meter", "11# Circulating Water Pump",
+            "12# Circulating Water Pump", "13# Circulating Water Pump",
+            "1# Feed Water Pump", "1# Primary Air Fan",
+            "1# Forced draft Fan", "1# Induced draft Fan",
+            "2# Feed Water Pump", "2# Primary Air Fan",
             "2# Forced draft Fan", "2# Induced draft Fan",
             "21# Circulating Water Pump", "22# Circulating Water Pump",
-            "23# Circulating Water Pump", "Voltage Monitoring"
+            "23# Circulating Water Pump", "Voltage Monitoring",
         ]
 
         style = ttk.Style()
-        style.configure("CurveTree.Treeview", background="#0d1117", foreground="#c9d1d9", fieldbackground="#0d1117", rowheight=24)
-        style.map("CurveTree.Treeview", background=[("selected", "#1f6feb")], foreground=[("selected", "#ffffff")])
+        style.configure(
+            "CurveTree.Treeview",
+            background="#0d1117",
+            foreground="#c9d1d9",
+            fieldbackground="#0d1117",
+            rowheight=24,
+        )
+        style.map(
+            "CurveTree.Treeview",
+            background=[("selected", "#1f6feb")],
+            foreground=[("selected", "#ffffff")],
+        )
 
-        tree_dev = ttk.Treeview(left_frame, show="tree", style="CurveTree.Treeview")
+        tree_dev = ttk.Treeview(
+            left_frame, show="tree", style="CurveTree.Treeview",
+        )
         self._bind_mousewheel(tree_dev)
-        tree_dev.pack(side="left", fill="both", expand=True)
-
-        root_node = tree_dev.insert("", "end", text="⚡ Power Grid Devices", open=True)
-        for idx, dev_name in enumerate(devices_list, 1):
-            dev_node = tree_dev.insert(root_node, "end", text=f"{idx}. {dev_name}", open=False)
-            for param in ["Voltage (U)", "Current (I)", "Active Power (P)", "Reactive Power (Q)", "Frequency (f)"]:
-                tree_dev.insert(dev_node, "end", text=param)
+        tree_dev.pack(fill="both", expand=True)
+        root_node = tree_dev.insert(
+            "", "end", text="Power Grid Devices", open=True,
+        )
+        for index, device_name in enumerate(devices_list, 1):
+            tree_dev.insert(
+                root_node, "end", text=f"{index}. {device_name}",
+            )
 
         right_frame = tk.Frame(main_pane, bg="#0b0e14")
         main_pane.add(right_frame, weight=4)
+        right_split = ttk.PanedWindow(right_frame, orient="vertical")
+        right_split.pack(fill="both", expand=True)
 
-        right_pane_split = ttk.PanedWindow(right_frame, orient="vertical")
-        right_pane_split.pack(fill="both", expand=True)
-
-        charts_frame = tk.Frame(right_pane_split, bg="#0b0e14")
-        right_pane_split.add(charts_frame, weight=3)
-
-        canvas_u = tk.Canvas(charts_frame, bg="#0d1117", highlightthickness=1, highlightbackground="#30363d")
-        canvas_u.pack(fill="both", expand=True, pady=(0, 5))
-
-        canvas_p = tk.Canvas(charts_frame, bg="#0d1117", highlightthickness=1, highlightbackground="#30363d")
-        canvas_p.pack(fill="both", expand=True, pady=(5, 0))
-
-        table_frame = tk.Frame(right_pane_split, bg="#161b22", bd=1, relief="solid")
-        right_pane_split.add(table_frame, weight=2)
-
-        tk.Label(table_frame, text="CSV RECORDED DATA PREVIEW", font=("Segoe UI", 10, "bold"), fg="#8b949e", bg="#161b22", anchor="w").pack(fill="x", padx=5, pady=2)
-
-        tree_data_preview = ttk.Treeview(
-            table_frame, show="headings",
-            style="CurveTree.Treeview"
+        charts_frame = tk.Frame(right_split, bg="#0b0e14")
+        right_split.add(charts_frame, weight=3)
+        canvas_ui = tk.Canvas(
+            charts_frame, bg="#0d1117", highlightthickness=1,
+            highlightbackground="#30363d",
         )
-        self._bind_mousewheel(tree_data_preview)
-        tree_data_preview.pack(fill="both", expand=True)
+        canvas_ui.pack(fill="both", expand=True, pady=(0, 5))
+        canvas_power = tk.Canvas(
+            charts_frame, bg="#0d1117", highlightthickness=1,
+            highlightbackground="#30363d",
+        )
+        canvas_power.pack(fill="both", expand=True, pady=(5, 0))
+
+        table_frame = tk.Frame(
+            right_split, bg="#161b22", bd=1, relief="solid",
+        )
+        right_split.add(table_frame, weight=2)
+        tk.Label(
+            table_frame,
+            text="LIVE SAMPLE PREVIEW",
+            font=("Segoe UI", 10, "bold"),
+            fg="#8b949e",
+            bg="#161b22",
+            anchor="w",
+        ).pack(fill="x", padx=5, pady=2)
+        columns = ("time", "voltage", "current", "active", "reactive", "frequency")
+        sample_table = ttk.Treeview(
+            table_frame,
+            columns=columns,
+            show="headings",
+            style="CurveTree.Treeview",
+        )
+        headings = {
+            "time": "TIME",
+            "voltage": "U (kV)",
+            "current": "IA (A)",
+            "active": "P (kW)",
+            "reactive": "Q (kVar)",
+            "frequency": "f (Hz)",
+        }
+        for column in columns:
+            sample_table.heading(column, text=headings[column])
+            sample_table.column(column, width=105, anchor="center", stretch=True)
+        self._bind_mousewheel(sample_table)
+        sample_table.pack(fill="both", expand=True)
 
         active_device = {"name": "Connection Wire I"}
+        samples = []
+        plot_colors = {
+            "U": "#00f0ff",
+            "I": "#f6c344",
+            "P": "#ff6b6b",
+            "Q": "#a78bfa",
+            "f": "#14d84a",
+        }
 
-        def get_possible_csv_files(dev_name):
-            clean_setting = f"ListSetting {dev_name.replace('/', '_')}.csv"
-            clean_report = dev_name.replace(" ", "_").replace("#", "").replace("/", "_") + ".csv"
-
-            if os.path.exists(clean_setting):
-                return clean_setting
-            elif os.path.exists(clean_report):
-                return clean_report
+        def finite_value(mapping, *keys):
+            for key in keys:
+                try:
+                    value = float(mapping.get(key))
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(value):
+                    return value
             return None
 
-        def generate_mock_points(canvas, width, height, title, color_line, y_min=0, y_max=100, data_vals=None):
+        def live_values(device_name):
+            with DATA_LOCK:
+                if device_name == "Connection Wire I":
+                    data = dict(DATA_STORE.get("10.100.163.1", DEFAULT_DATA))
+                    return {
+                        "U": finite_value(data, "W1_Uab"),
+                        "I": finite_value(data, "W1_Ia"),
+                        "P": finite_value(data, "W1_P"),
+                        "Q": finite_value(data, "W1_Q"),
+                        "f": finite_value(data, "W1_f"),
+                    }
+                if device_name == "Connection Wire II":
+                    data = dict(DATA_STORE.get("10.100.163.1", DEFAULT_DATA))
+                    return {
+                        "U": finite_value(data, "W2_Uab"),
+                        "I": finite_value(data, "W2_Ia"),
+                        "P": finite_value(data, "W2_P"),
+                        "Q": finite_value(data, "W2_Q"),
+                        "f": finite_value(data, "W2_f"),
+                    }
+                if device_name == "1# Generator":
+                    data = dict(DATA_STORE.get(self.GEN_1_IP, DEFAULT_DATA))
+                elif device_name == "2# Generator":
+                    data = dict(DATA_STORE.get(self.GEN_2_IP, DEFAULT_DATA))
+                elif device_name == "Voltage Monitoring":
+                    data = dict(DATA_STORE.get("10.100.163.7", DEFAULT_DATA))
+                else:
+                    data = dict(BAY_VALUE_STORE.get(device_name, {}))
+                    if not data:
+                        device_ip = SETTING_BAY_IP.get(device_name, "")
+                        data = dict(DATA_STORE.get(device_ip, DEFAULT_DATA))
+            return {
+                "U": finite_value(data, "Uab", "Uab_L", "Uan"),
+                "I": finite_value(data, "Ia"),
+                "P": finite_value(data, "P", "P_tot"),
+                "Q": finite_value(data, "Q"),
+                "f": finite_value(data, "f"),
+            }
+
+        def draw_chart(canvas, title, series_keys):
             canvas.delete("all")
-            canvas.create_rectangle(10, 10, width - 10, height - 10, outline="#21262d", width=1)
-            canvas.create_text(20, 20, text=title, fill=color_line, font=("Segoe UI", 10, "bold"), anchor="w")
+            width = max(canvas.winfo_width(), 320)
+            height = max(canvas.winfo_height(), 150)
+            left, right, top, bottom = 58, 18, 38, 30
+            plot_width = max(1, width - left - right)
+            plot_height = max(1, height - top - bottom)
+            canvas.create_text(
+                15, 14, text=title, fill="#ffffff",
+                font=("Segoe UI", 10, "bold"), anchor="nw",
+            )
 
-            for i in range(1, 5):
-                y = 10 + i * (height - 20) / 5
-                canvas.create_line(10, y, width - 10, y, fill="#161b22", dash=(2, 4))
-
-            margin_x = 50
-            margin_y = 30
-            plot_w = width - margin_x - 20
-            plot_h = height - margin_y - 20
-
-            if not data_vals or len(data_vals) < 2:
-                points = []
-                steps = 50
-                for i in range(steps):
-                    x = margin_x + (i / (steps - 1)) * plot_w
-                    val = 50 + 35 * math.sin(i * 0.2) + (math.cos(i * 0.5) * 10)
-                    y = (height - margin_y) - ((val - y_min) / (y_max - y_min if y_max != y_min else 1)) * plot_h
-                    points.append((x, y))
-
-                for i in range(len(points) - 1):
-                    canvas.create_line(points[i][0], points[i][1], points[i+1][0], points[i+1][1], fill=color_line, width=2)
+            values = [
+                sample.get(key)
+                for sample in samples
+                for key in series_keys
+                if sample.get(key) is not None
+            ]
+            if not values:
+                canvas.create_text(
+                    width / 2, height / 2,
+                    text="Waiting for live IEC-104 values",
+                    fill="#8b949e", font=("Segoe UI", 11),
+                )
                 return
 
-            min_v = min(data_vals)
-            max_v = max(data_vals)
-            if min_v == max_v:
-                max_v += 1.0
+            minimum = min(values)
+            maximum = max(values)
+            if math.isclose(minimum, maximum):
+                padding = max(1.0, abs(maximum) * 0.1)
+                minimum -= padding
+                maximum += padding
 
-            points = []
-            for i, val in enumerate(data_vals):
-                x = margin_x + (i / (len(data_vals) - 1 if len(data_vals) > 1 else 1)) * plot_w
-                y = (height - margin_y) - ((val - min_v) / (max_v - min_v)) * plot_h
-                points.append((x, y))
+            for grid_index in range(5):
+                ratio = grid_index / 4.0
+                y = top + ratio * plot_height
+                grid_value = maximum - ratio * (maximum - minimum)
+                canvas.create_line(
+                    left, y, width - right, y,
+                    fill="#243040", dash=(2, 4),
+                )
+                canvas.create_text(
+                    left - 6, y, text=f"{grid_value:.2f}",
+                    fill="#8b949e", font=("Segoe UI", 8), anchor="e",
+                )
 
-            for i in range(len(points) - 1):
-                canvas.create_line(points[i][0], points[i][1], points[i+1][0], points[i+1][1], fill=color_line, width=2)
-                canvas.create_oval(points[i][0]-2, points[i][1]-2, points[i][0]+2, points[i][1]+2, fill="#ffffff", outline="")
+            legend_x = left
+            for key in series_keys:
+                latest = next(
+                    (sample.get(key) for sample in reversed(samples)
+                     if sample.get(key) is not None),
+                    None,
+                )
+                if latest is None:
+                    continue
+                color = plot_colors[key]
+                canvas.create_line(
+                    legend_x, 24, legend_x + 18, 24,
+                    fill=color, width=3,
+                )
+                canvas.create_text(
+                    legend_x + 22, 24,
+                    text=f"{key} {latest:.2f}",
+                    fill=color, font=("Segoe UI", 9, "bold"), anchor="w",
+                )
+                legend_x += 105
 
-            canvas.create_text(margin_x - 5, margin_y, text=f"{max_v:.1f}", fill="#8b949e", font=("Segoe UI", 10), anchor="e")
-            canvas.create_text(margin_x - 5, height - margin_y, text=f"{min_v:.1f}", fill="#8b949e", font=("Segoe UI", 10), anchor="e")
+                points = []
+                for index, sample in enumerate(samples):
+                    value = sample.get(key)
+                    if value is None:
+                        continue
+                    x = left + (
+                        index / max(1, len(samples) - 1)
+                    ) * plot_width
+                    y = top + (
+                        (maximum - value) / (maximum - minimum)
+                    ) * plot_height
+                    points.extend((x, y))
+                if len(points) >= 4:
+                    canvas.create_line(
+                        *points, fill=color, width=2, smooth=False,
+                    )
+                elif len(points) == 2:
+                    x, y = points
+                    canvas.create_oval(
+                        x - 2, y - 2, x + 2, y + 2,
+                        fill=color, outline=color,
+                    )
 
-        def redraw_curves(u_data=None, p_data=None):
-            w_u = canvas_u.winfo_width() or 800
-            h_u = canvas_u.winfo_height() or 200
-            w_p = canvas_p.winfo_width() or 800
-            h_p = canvas_p.winfo_height() or 200
+            if samples:
+                canvas.create_text(
+                    left, height - 8,
+                    text=samples[0]["time"],
+                    fill="#8b949e", font=("Segoe UI", 8), anchor="sw",
+                )
+                canvas.create_text(
+                    width - right, height - 8,
+                    text=samples[-1]["time"],
+                    fill="#8b949e", font=("Segoe UI", 8), anchor="se",
+                )
 
-            dev_title = active_device["name"]
-            generate_mock_points(canvas_u, w_u, h_u, f"📊 {dev_title} - Voltage (U) & Current (I) Trend", "#00f0ff", 0, 100, u_data)
-            generate_mock_points(canvas_p, w_p, h_p, f"⚡ {dev_title} - Power (P/Q) & Frequency (f) Trend", "#79c0ff", 0, 100, p_data)
+        def redraw_curves():
+            device_name = active_device["name"]
+            draw_chart(
+                canvas_ui,
+                f"{device_name} — Voltage and Current",
+                ("U", "I"),
+            )
+            draw_chart(
+                canvas_power,
+                f"{device_name} — Active/Reactive Power and Frequency",
+                ("P", "Q", "f"),
+            )
 
-        def load_device_data_to_curve(dev_name):
-            active_device["name"] = dev_name
-            lbl_selected_dev.config(text=f"Selected: {dev_name}")
+        def refresh_table():
+            for item in sample_table.get_children():
+                sample_table.delete(item)
+            for sample in reversed(samples[-60:]):
+                values = []
+                for key in ("U", "I", "P", "Q", "f"):
+                    value = sample.get(key)
+                    values.append("" if value is None else f"{value:.2f}")
+                sample_table.insert(
+                    "", "end", values=(sample["time"], *values),
+                )
 
-            for item in tree_data_preview.get_children():
-                tree_data_preview.delete(item)
+        def sample_once():
+            if not curve_win.winfo_exists():
+                return
+            values = live_values(active_device["name"])
+            samples.append({
+                "time": datetime.datetime.now().strftime("%H:%M:%S"),
+                **values,
+            })
+            if len(samples) > 120:
+                del samples[:-120]
+            refresh_table()
+            redraw_curves()
 
-            csv_file = get_possible_csv_files(dev_name)
+        def realtime_tick():
+            if not curve_win.winfo_exists():
+                return
+            sample_once()
+            curve_win.after(1000, realtime_tick)
 
-            u_vals = []
-            p_vals = []
-
-            if csv_file and os.path.exists(csv_file):
-                try:
-                    with open(csv_file, mode="r", encoding="utf-8") as f:
-                        reader = csv.reader(f)
-                        header = next(reader, None)
-
-                        if header:
-                            tree_data_preview["columns"] = header
-                            for col in header:
-                                tree_data_preview.heading(col, text=col)
-                                tree_data_preview.column(col, width=110, anchor="center")
-
-                        rows = list(reader)
-                        for row in rows:
-                            tree_data_preview.insert("", "end", values=row)
-
-                            for cell in row:
-                                try:
-                                    val = float(cell)
-                                    if len(u_vals) < 60:
-                                        u_vals.append(val)
-                                    else:
-                                        p_vals.append(val)
-                                except ValueError:
-                                    continue
-                except Exception as ex:
-                    print(f"CSV Read error in Curve: {ex}")
-            else:
-                cols = ("Date", "Time", "Parameter", "Value", "Unit", "Status")
-                tree_data_preview["columns"] = cols
-                for col in cols:
-                    tree_data_preview.heading(col, text=col)
-                    tree_data_preview.column(col, width=110, anchor="center")
-
-                now_str = datetime.datetime.now().strftime("%Y-%m-%d")
-                tree_data_preview.insert("", "end", values=(now_str, "10:00:00", "Uab Voltage", "10.05", "kV", "NORMAL"))
-                tree_data_preview.insert("", "end", values=(now_str, "10:05:00", "Ia Current", "580.2", "A", "NORMAL"))
-                tree_data_preview.insert("", "end", values=(now_str, "10:10:00", "Active Power", "5.82", "MW", "NORMAL"))
-
-            redraw_curves(u_vals if u_vals else None, p_vals if p_vals else None)
-
-        def on_tree_curve_select(event):
+        def select_device(_event=None):
             selected = tree_dev.selection()
-            if selected:
-                item_text = tree_dev.item(selected[0], "text")
-                clean_name = item_text.split(". ")[-1] if ". " in item_text else item_text
+            if not selected:
+                return
+            item_text = tree_dev.item(selected[0], "text")
+            device_name = (
+                item_text.split(". ", 1)[1]
+                if ". " in item_text else item_text
+            )
+            if device_name not in devices_list:
+                return
+            active_device["name"] = device_name
+            selected_label.config(text=f"Selected: {device_name}")
+            samples.clear()
+            sample_once()
 
-                if clean_name in devices_list:
-                    load_device_data_to_curve(clean_name)
-                elif tree_dev.parent(selected[0]):
-                    parent_text = tree_dev.item(tree_dev.parent(selected[0]), "text")
-                    p_clean = parent_text.split(". ")[-1] if ". " in parent_text else parent_text
-                    if p_clean in devices_list:
-                        load_device_data_to_curve(p_clean)
+        tree_dev.bind("<<TreeviewSelect>>", select_device)
+        canvas_ui.bind("<Configure>", lambda _event: redraw_curves())
+        canvas_power.bind("<Configure>", lambda _event: redraw_curves())
+        tk.Button(
+            ctrl_frame,
+            text="Refresh Now",
+            font=("Segoe UI", 10, "bold"),
+            bg="#1f6feb",
+            fg="#ffffff",
+            bd=0,
+            padx=12,
+            pady=4,
+            cursor="hand2",
+            command=sample_once,
+        ).pack(side="left", padx=15, pady=8)
 
-        tree_dev.bind("<<TreeviewSelect>>", on_tree_curve_select)
-        canvas_u.bind("<Configure>", lambda e: redraw_curves())
-        canvas_p.bind("<Configure>", lambda e: redraw_curves())
-        tree_data_preview.bind("<Configure>", lambda e: [tree_data_preview.column(c, width=max(80, int(tree_data_preview.winfo_width()/max(1, len(tree_data_preview["columns"])))) , stretch=True) for c in tree_data_preview["columns"]], add="+")
-
-        btn_refresh = tk.Button(
-            ctrl_frame, text=f"🔄 {'Refresh Trend'}", font=("Segoe UI", 10, "bold"),
-            bg="#1f6feb", fg="#ffffff", bd=0, padx=12, pady=4, cursor="hand2",
-            command=lambda: load_device_data_to_curve(active_device["name"])
-        )
-        btn_refresh.pack(side="left", padx=15, pady=8)
-
-        load_device_data_to_curve("Connection Wire I")
+        first_device = tree_dev.get_children(root_node)[0]
+        tree_dev.selection_set(first_device)
+        tree_dev.focus(first_device)
+        sample_once()
+        curve_win.after(1000, realtime_tick)
 
     def action_his_alarm(self):
+        """Plot and continuously refresh alarm-history counts and event rows."""
         alarm_win = tk.Toplevel(self.root)
-        alarm_win.title("Historical Alarm Logs")
-        self._make_toplevel_responsive(alarm_win, "Historical Alarm Logs", fullscreen=True)
+        alarm_win.title("Historical Alarm Graph")
+        self._make_toplevel_responsive(
+            alarm_win, "Historical Alarm Graph", fullscreen=True,
+        )
         alarm_win.configure(bg="#2b2b2b")
-
-        alarm_win.bind("<Escape>", lambda e: alarm_win.destroy())
+        alarm_win.bind("<Escape>", lambda _event: alarm_win.destroy())
 
         header_frame = tk.Frame(alarm_win, bg="#1e1e1e", height=60)
-        header_frame.pack(fill="x", side="top", padx=0, pady=0)
-
-        title_label = tk.Label(
+        header_frame.pack(fill="x", side="top")
+        tk.Label(
             header_frame,
-            text=f"📜 {'Historical Alarm Graph'.upper()}",
+            text="HISTORICAL ALARM GRAPH",
             font=("Consolas", 18, "bold"),
-            fg="#6FFFE9",
+            fg="#6fffe9",
             bg="#1e1e1e",
-        )
-        title_label.pack(side="left", padx=25, pady=15)
-
-        close_btn = tk.Button(
+        ).pack(side="left", padx=25, pady=15)
+        tk.Button(
             header_frame,
-            text=f"✕ {'Close (ESC)'}",
+            text="Close (ESC)",
             font=("Consolas", 10, "bold"),
             bg="#ff4d4d",
             fg="white",
@@ -4232,53 +4382,82 @@ class SCADAMainUI:
             padx=15,
             pady=8,
             cursor="hand2",
-            activebackground="#cc0000",
-            activeforeground="white",
             command=alarm_win.destroy,
-        )
-        close_btn.pack(side="right", padx=20, pady=12)
+        ).pack(side="right", padx=20, pady=12)
 
-        filter_frame = tk.Frame(alarm_win, bg="#1e1e1e", bd=1, relief="solid")
+        filter_frame = tk.Frame(
+            alarm_win, bg="#1e1e1e", bd=1, relief="solid",
+        )
         filter_frame.pack(fill="x", padx=25, pady=(15, 0))
-
         tk.Label(
-            filter_frame, text='Start Date:', font=("Consolas", 10, "bold"),
-            fg="#ffffff", bg="#1e1e1e"
+            filter_frame,
+            text="Start Date:",
+            font=("Consolas", 10, "bold"),
+            fg="#ffffff",
+            bg="#1e1e1e",
         ).pack(side="left", padx=(15, 5), pady=12)
-
-        dp_start_date = DateEntry(
+        start_date = DateEntry(
             filter_frame,
             width=12,
             background="#0066cc",
             foreground="white",
             borderwidth=2,
             date_pattern="yyyy-mm-dd",
-            font=("Consolas", 10)
+            font=("Consolas", 10),
         )
-        dp_start_date.pack(side="left", padx=(0, 15), pady=12)
-
+        start_date.pack(side="left", padx=(0, 15), pady=12)
         tk.Label(
-            filter_frame, text='End Date:', font=("Consolas", 10, "bold"),
-            fg="#ffffff", bg="#1e1e1e"
+            filter_frame,
+            text="End Date:",
+            font=("Consolas", 10, "bold"),
+            fg="#ffffff",
+            bg="#1e1e1e",
         ).pack(side="left", padx=(5, 5), pady=12)
-
-        dp_end_date = DateEntry(
+        end_date = DateEntry(
             filter_frame,
             width=12,
             background="#0066cc",
             foreground="white",
             borderwidth=2,
             date_pattern="yyyy-mm-dd",
-            font=("Consolas", 10)
+            font=("Consolas", 10),
         )
-        dp_end_date.pack(side="left", padx=(0, 15), pady=12)
+        end_date.pack(side="left", padx=(0, 15), pady=12)
+        try:
+            end_date.set_date(datetime.date.today())
+            start_date.set_date(
+                datetime.date.today() - datetime.timedelta(days=45),
+            )
+        except Exception:
+            pass
 
-        grid_frame = tk.Frame(alarm_win, bg="#2b2b2b", bd=2, relief="groove")
-        grid_frame.pack(fill="both", expand=True, padx=25, pady=15)
+        summary_label = tk.Label(
+            filter_frame,
+            text="0 events",
+            font=("Consolas", 10, "bold"),
+            fg="#6fffe9",
+            bg="#1e1e1e",
+        )
+        summary_label.pack(side="right", padx=15)
 
+        content_pane = ttk.PanedWindow(alarm_win, orient="vertical")
+        content_pane.pack(fill="both", expand=True, padx=25, pady=15)
+        chart_frame = tk.Frame(
+            content_pane, bg="#0d1117", bd=1, relief="solid",
+        )
+        content_pane.add(chart_frame, weight=2)
+        alarm_canvas = tk.Canvas(
+            chart_frame,
+            bg="#0d1117",
+            highlightthickness=0,
+        )
+        alarm_canvas.pack(fill="both", expand=True)
+
+        grid_frame = tk.Frame(
+            content_pane, bg="#2b2b2b", bd=2, relief="groove",
+        )
+        content_pane.add(grid_frame, weight=3)
         style = ttk.Style()
-        style.theme_use("default")
-
         style.configure(
             "HisAlarmGrid.Treeview.Heading",
             background="#1e1e1e",
@@ -4286,8 +4465,6 @@ class SCADAMainUI:
             font=("Consolas", 11, "bold"),
             rowheight=35,
         )
-        style.map("HisAlarmGrid.Treeview.Heading", background=[("active", "#333333")])
-
         style.configure(
             "HisAlarmGrid.Treeview",
             background="#2b2b2b",
@@ -4297,123 +4474,316 @@ class SCADAMainUI:
             font=("Consolas", 10),
             borderwidth=0,
         )
-        style.map("HisAlarmGrid.Treeview", background=[("selected", "#444444")])
+        style.map(
+            "HisAlarmGrid.Treeview",
+            background=[("selected", "#444444")],
+        )
 
-        columns = ("tanggal", "jam", "device", "description", "severity")
+        columns = ("date", "time", "device", "description", "severity")
         tree = ttk.Treeview(
             grid_frame,
             columns=columns,
             show="headings",
             style="HisAlarmGrid.Treeview",
         )
-
-        tree.heading("tanggal", text="DATE")
-        tree.heading("jam", text="TIME")
-        tree.heading("device", text="DEVICE")
-        tree.heading("description", text="ALARM HISTORY DESCRIPTION")
-        tree.heading("severity", text="STATUS")
-
-        tree.column("tanggal", width=120, anchor="center")
-        tree.column("jam", width=100, anchor="center")
+        headings = {
+            "date": "DATE",
+            "time": "TIME",
+            "device": "DEVICE",
+            "description": "ALARM HISTORY DESCRIPTION",
+            "severity": "STATUS",
+        }
+        for column in columns:
+            tree.heading(column, text=headings[column])
+        tree.column("date", width=120, anchor="center")
+        tree.column("time", width=100, anchor="center")
         tree.column("device", width=150, anchor="center")
         tree.column("description", width=650, anchor="w")
         tree.column("severity", width=140, anchor="center")
-
         self._bind_mousewheel(tree)
-        self._fit_tree_columns(tree, columns, [85, 80, 110, 180, 90], [1, 1, 1.2, 5, 1])
-        tree.pack(side="left", fill="both", expand=True)
+        self._fit_tree_columns(
+            tree, columns, [85, 80, 110, 180, 90], [1, 1, 1.2, 5, 1],
+        )
+        tree.pack(fill="both", expand=True)
+        tree.tag_configure(
+            "CRITICAL", background="#660000", foreground="#ff9999",
+            font=("Consolas", 10, "bold"),
+        )
+        tree.tag_configure(
+            "WARNING", background="#665200", foreground="#ffff99",
+            font=("Consolas", 10, "bold"),
+        )
+        tree.tag_configure(
+            "URGENT", background="#663300", foreground="#ffcc66",
+            font=("Consolas", 10, "bold"),
+        )
+        tree.tag_configure(
+            "NORMAL", background="#004d1a", foreground="#80ff80",
+            font=("Consolas", 10),
+        )
 
-        tree.tag_configure("CRITICAL", background="#660000", foreground="#ff9999", font=("Consolas", 10, "bold"))
-        tree.tag_configure("WARNING", background="#665200", foreground="#ffff99", font=("Consolas", 10, "bold"))
-        tree.tag_configure("URGENT", background="#663300", foreground="#ffcc66", font=("Consolas", 10, "bold"))
-        tree.tag_configure("NORMAL", background="#004d1a", foreground="#80ff80", font=("Consolas", 10))
+        alarm_state = {"daily": {}, "rows": []}
+        severity_order = ("NORMAL", "WARNING", "URGENT", "CRITICAL")
+        severity_colors = {
+            "NORMAL": "#14d84a",
+            "WARNING": "#f4d03f",
+            "URGENT": "#ff8c42",
+            "CRITICAL": "#ff3b3b",
+        }
 
-        history_csv = "AlarmHistory.csv"
+        def draw_alarm_graph():
+            alarm_canvas.delete("all")
+            width = max(alarm_canvas.winfo_width(), 420)
+            height = max(alarm_canvas.winfo_height(), 220)
+            left, right, top, bottom = 55, 20, 48, 38
+            plot_width = max(1, width - left - right)
+            plot_height = max(1, height - top - bottom)
+            alarm_canvas.create_text(
+                16, 14,
+                text="Alarm events by date and severity",
+                fill="#ffffff",
+                font=("Consolas", 11, "bold"),
+                anchor="nw",
+            )
 
-        def load_filtered_data():
-            for row in tree.get_children():
-                tree.delete(row)
+            legend_x = left
+            for severity in severity_order:
+                color = severity_colors[severity]
+                alarm_canvas.create_rectangle(
+                    legend_x, 29, legend_x + 12, 41,
+                    fill=color, outline=color,
+                )
+                alarm_canvas.create_text(
+                    legend_x + 17, 35,
+                    text=severity,
+                    fill=color,
+                    font=("Consolas", 8, "bold"),
+                    anchor="w",
+                )
+                legend_x += 100
 
-            start_dt = dp_start_date.get_date()
-            end_dt = dp_end_date.get_date()
-
-            if not os.path.exists(history_csv):
-                with open(history_csv, mode="w", newline="", encoding="utf-8") as f:
-                    writer = csv.writer(f)
-                    writer.writerow(["Date", "Time", "Device", "Description", "Status"])
-                tree.insert("", "end", values=("-", "-", "SYSTEM", "AlarmHistory.csv file newly created", "NORMAL"), tags=("NORMAL",))
+            days = sorted(alarm_state["daily"])
+            if not days:
+                alarm_canvas.create_text(
+                    width / 2, height / 2,
+                    text="No alarm history in the selected date range",
+                    fill="#8b949e",
+                    font=("Consolas", 11),
+                )
                 return
 
+            maximum_total = max(
+                sum(alarm_state["daily"][day].values()) for day in days
+            )
+            maximum_total = max(1, maximum_total)
+            for grid_index in range(5):
+                ratio = grid_index / 4.0
+                y = top + ratio * plot_height
+                grid_value = int(round(maximum_total * (1.0 - ratio)))
+                alarm_canvas.create_line(
+                    left, y, width - right, y,
+                    fill="#30363d", dash=(2, 4),
+                )
+                alarm_canvas.create_text(
+                    left - 7, y,
+                    text=str(grid_value),
+                    fill="#8b949e",
+                    font=("Consolas", 8),
+                    anchor="e",
+                )
+
+            slot_width = plot_width / max(1, len(days))
+            bar_width = min(48.0, slot_width * 0.65)
+            for day_index, day in enumerate(days):
+                x0 = left + day_index * slot_width + (
+                    slot_width - bar_width
+                ) / 2.0
+                x1 = x0 + bar_width
+                y_bottom = top + plot_height
+                counts = alarm_state["daily"][day]
+                for severity in severity_order:
+                    count = counts.get(severity, 0)
+                    if count <= 0:
+                        continue
+                    bar_height = count / maximum_total * plot_height
+                    y_top = y_bottom - bar_height
+                    alarm_canvas.create_rectangle(
+                        x0, y_top, x1, y_bottom,
+                        fill=severity_colors[severity],
+                        outline="#0d1117",
+                    )
+                    if bar_height >= 13:
+                        alarm_canvas.create_text(
+                            (x0 + x1) / 2.0,
+                            (y_top + y_bottom) / 2.0,
+                            text=str(count),
+                            fill="#000000",
+                            font=("Consolas", 8, "bold"),
+                        )
+                    y_bottom = y_top
+                label_step = max(1, math.ceil(len(days) / 12))
+                if day_index % label_step == 0 or day_index == len(days) - 1:
+                    alarm_canvas.create_text(
+                        (x0 + x1) / 2.0,
+                        height - bottom + 7,
+                        text=day[5:],
+                        fill="#c9d1d9",
+                        font=("Consolas", 8),
+                        anchor="n",
+                    )
+
+        def load_filtered_data(show_error=False):
+            for item in tree.get_children():
+                tree.delete(item)
             try:
-                with open(history_csv, mode="r", encoding="utf-8") as f:
-                    reader = csv.reader(f)
-                    header = next(reader, None)
+                range_start = start_date.get_date()
+                range_end = end_date.get_date()
+            except Exception:
+                range_end = datetime.date.today()
+                range_start = range_end - datetime.timedelta(days=45)
+            if range_start > range_end:
+                range_start, range_end = range_end, range_start
 
-                    rows = list(reader)
-                    filtered_rows = []
+            self._ensure_alarm_files()
+            filtered_rows = []
+            try:
+                with open(
+                    self.alarm_history_file,
+                    mode="r",
+                    newline="",
+                    encoding="utf-8-sig",
+                ) as handle:
+                    reader = csv.reader(handle)
+                    next(reader, None)
+                    for row in reader:
+                        if len(row) < 5:
+                            continue
+                        try:
+                            row_date = datetime.datetime.strptime(
+                                row[0].strip(), "%Y-%m-%d",
+                            ).date()
+                        except ValueError:
+                            continue
+                        if range_start <= row_date <= range_end:
+                            filtered_rows.append(row[:5])
+            except Exception as exc:
+                if show_error:
+                    messagebox.showerror(
+                        "File Error",
+                        f"Error reading AlarmHistory.csv: {exc}",
+                        parent=alarm_win,
+                    )
 
-                    for row in rows:
-                        if len(row) >= 5:
-                            row_date_str = row[0].strip()
-                            try:
-                                row_dt = datetime.datetime.strptime(row_date_str, "%Y-%m-%d").date()
-                                if start_dt <= row_dt <= end_dt:
-                                    filtered_rows.append(row)
-                            except ValueError:
-                                continue
+            daily = {}
+            for row in filtered_rows:
+                status = str(row[4]).strip().upper()
+                if status not in severity_order:
+                    status = "NORMAL"
+                counts = daily.setdefault(
+                    row[0],
+                    {severity: 0 for severity in severity_order},
+                )
+                counts[status] += 1
 
-                    if filtered_rows:
-                        for row in reversed(filtered_rows):
-                            tanggal, jam, device, desc, status = row[0], row[1], row[2], row[3], row[4]
-                            tag = status.upper() if status.upper() in ["CRITICAL", "URGENT", "WARNING", "NORMAL"] else "NORMAL"
-                            tree.insert("", "end", values=(tanggal, jam, device, desc, status), tags=(tag,))
-                    else:
-                        tree.insert("", "end", values=("-", "-", "SYSTEM", f"No data between {start_dt} to {end_dt}", "NORMAL"), tags=("NORMAL",))
-            except Exception as e:
-                messagebox.showerror("File Error", f"Error reading AlarmHistory.csv: {str(e)}")
+            alarm_state["rows"] = filtered_rows
+            alarm_state["daily"] = daily
+            for row in reversed(filtered_rows):
+                status = str(row[4]).strip().upper()
+                tag = status if status in severity_order else "NORMAL"
+                tree.insert("", "end", values=tuple(row), tags=(tag,))
+            if not filtered_rows:
+                tree.insert(
+                    "", "end",
+                    values=(
+                        "-", "-", "SYSTEM",
+                        f"No data between {range_start} and {range_end}",
+                        "NORMAL",
+                    ),
+                    tags=("NORMAL",),
+                )
+            summary_label.config(
+                text=f"{len(filtered_rows)} events • auto-refresh 2s",
+            )
+            draw_alarm_graph()
 
         def export_to_csv():
-            items = tree.get_children()
-            if not items:
-                messagebox.showwarning("Export Warning", "No data in table to export!")
+            if not alarm_state["rows"]:
+                messagebox.showwarning(
+                    "Export Warning",
+                    "No alarm data in the selected range.",
+                    parent=alarm_win,
+                )
                 return
-
             file_path = filedialog.asksaveasfilename(
                 defaultextension=".csv",
                 filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")],
                 title="Save Alarm History Data",
-                initialfile=f"Export_AlarmHistory_{dp_start_date.get_date()}_to_{dp_end_date.get_date()}.csv"
+                initialfile=(
+                    f"Export_AlarmHistory_{start_date.get_date()}_"
+                    f"to_{end_date.get_date()}.csv"
+                ),
+                parent=alarm_win,
             )
+            if not file_path:
+                return
+            try:
+                with open(
+                    file_path, mode="w", newline="", encoding="utf-8",
+                ) as handle:
+                    writer = csv.writer(handle)
+                    writer.writerow([
+                        "DATE", "TIME", "DEVICE",
+                        "ALARM DESCRIPTION", "STATUS",
+                    ])
+                    writer.writerows(alarm_state["rows"])
+                messagebox.showinfo(
+                    "Export Successful",
+                    f"Data exported successfully to:\n{file_path}",
+                    parent=alarm_win,
+                )
+            except Exception as exc:
+                messagebox.showerror(
+                    "Export Failed",
+                    f"Failed saving file: {exc}",
+                    parent=alarm_win,
+                )
 
-            if file_path:
-                try:
-                    with open(file_path, mode="w", newline="", encoding="utf-8") as f:
-                        writer = csv.writer(f)
-                        writer.writerow(["DATE", "TIME", "DEVICE", "ALARM DESCRIPTION", "STATUS"])
-                        for item in items:
-                            values = tree.item(item, "values")
-                            writer.writerow(values)
-                    messagebox.showinfo("Export Successful", f"Data exported successfully to:\n{file_path}")
-                except Exception as e:
-                    messagebox.showerror("Export Failed", f"Failed saving file: {str(e)}")
+        tk.Button(
+            filter_frame,
+            text="Apply Filter",
+            font=("Consolas", 10, "bold"),
+            bg="#0066cc",
+            fg="white",
+            bd=0,
+            padx=15,
+            pady=5,
+            cursor="hand2",
+            command=lambda: load_filtered_data(True),
+        ).pack(side="left", padx=10, pady=12)
+        tk.Button(
+            filter_frame,
+            text="Export Data",
+            font=("Consolas", 10, "bold"),
+            bg="#00994d",
+            fg="white",
+            bd=0,
+            padx=15,
+            pady=5,
+            cursor="hand2",
+            command=export_to_csv,
+        ).pack(side="left", padx=5, pady=12)
 
-        btn_proses = tk.Button(
-            filter_frame, text=f"🔍 {'Apply Filter'}", font=("Consolas", 10, "bold"),
-            bg="#0066cc", fg="white", bd=0, padx=15, pady=5, cursor="hand2",
-            activebackground="#004c99", activeforeground="white",
-            command=load_filtered_data
+        def auto_refresh():
+            if not alarm_win.winfo_exists():
+                return
+            load_filtered_data(False)
+            alarm_win.after(2000, auto_refresh)
+
+        alarm_canvas.bind(
+            "<Configure>", lambda _event: draw_alarm_graph(),
         )
-        btn_proses.pack(side="left", padx=10, pady=12)
-
-        btn_export = tk.Button(
-            filter_frame, text=f"📥 {'Export Data'}", font=("Consolas", 10, "bold"),
-            bg="#00994d", fg="white", bd=0, padx=15, pady=5, cursor="hand2",
-            activebackground="#006633", activeforeground="white",
-            command=export_to_csv
-        )
-        btn_export.pack(side="left", padx=5, pady=12)
-
-        load_filtered_data()
+        load_filtered_data(True)
+        alarm_win.after(2000, auto_refresh)
 
     def action_alarm(self):
         alarm_window = tk.Toplevel(self.root)
