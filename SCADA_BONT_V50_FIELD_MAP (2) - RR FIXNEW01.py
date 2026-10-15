@@ -2257,8 +2257,7 @@ class SCADAMainUI:
                 self.root.iconbitmap(default=app_icon)
         except Exception:
             pass
-        self._main_fullscreen = True
-        self._set_main_fullscreen(True)
+        self.root.state("zoomed")
         self.root.configure(bg="#000000")
         self.root.minsize(900, 600)
         self._setup_responsive_theme()
@@ -2269,10 +2268,7 @@ class SCADAMainUI:
         except Exception:
             pass
 
-        self.root.bind("<Escape>", lambda _event: self._set_main_fullscreen(False))
-        self.root.bind("<F11>", lambda _event: self.action_zoom())
-        # Re-apply after the native Windows/Wine window has been mapped.
-        self.root.after_idle(lambda: self._set_main_fullscreen(True))
+        self.root.bind("<Escape>", lambda _event: self.root.attributes("-zoomed", False))
 
         # Data structure references
         self.realtime_labels = {}
@@ -2365,19 +2361,6 @@ class SCADAMainUI:
         tree.bind("<Configure>", resize, add="+")
         tree.after(50, resize)
 
-    def _set_main_fullscreen(self, enabled):
-        """Make the operator window fill the complete active display."""
-        enabled = bool(enabled)
-        self._main_fullscreen = enabled
-        try:
-            if enabled:
-                self.root.geometry(
-                    f"{self.root.winfo_screenwidth()}x"
-                    f"{self.root.winfo_screenheight()}+0+0"
-                )
-            self.root.attributes("-fullscreen", enabled)
-        except tk.TclError:
-            self.root.state("zoomed" if enabled else "normal")
 
     def _make_toplevel_responsive(self, win, title=None, fullscreen=False):
         """Use the available monitor area instead of a hard-coded form size."""
@@ -4548,7 +4531,8 @@ class SCADAMainUI:
         messagebox.showinfo("Edit Mode", "UI Edit Mode unlocked. Double click components to modify properties.")
 
     def action_zoom(self):
-        self._set_main_fullscreen(not self._main_fullscreen)
+        is_zoomed = self.root.attributes("-zoomed")
+        self.root.attributes("-zoomed", not is_zoomed)
 
     def action_print(self):
         messagebox.showinfo("Print Command", "Sending current active SCADA view to local system printer...")
