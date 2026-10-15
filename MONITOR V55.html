@@ -86,10 +86,15 @@ body{
 /* Brand header */
 .tifico-logo{
     position:absolute;
-    left:30px; right:30px; top:12px;
+    left:30px;
+    right:30px;
+    top:12px;
     height:88px;
     z-index:50;
-    display:flex; align-items:center; justify-content:space-between;
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    box-sizing:border-box;
     padding:8px 24px;
     background:linear-gradient(110deg,#ffffff 0%,#f8fcf7 65%,#e8f2e4 100%);
     border:1px solid #9eaf97;
@@ -99,14 +104,18 @@ body{
     overflow:hidden;
 }
 .tifico-logo img{
-    width:250px; height:70px;
-    display:block; object-fit:contain;
+    width:150px;
+    height:46px;
+    display:block;
+    object-fit:contain;
     flex:0 0 auto;
 }
 .brand-caption{
     border-left:1px solid #c4d4bc;
     padding-left:28px;
-    display:flex; flex-direction:column; gap:7px;
+    display:flex;
+    flex-direction:column;
+    gap:7px;
     color:#225938;
 }
 .brand-caption strong{font-size:27px;letter-spacing:3px;font-weight:700;}
@@ -824,55 +833,6 @@ body{
 }
 
 
-/* arrows */
-
-.arrow{
-    position:absolute;
-
-    z-index:6;
-
-    color:#159b35;
-
-    font-size:27px;
-
-    font-weight:900;
-
-    line-height:1;
-}
-
-.arrow-up-main{
-    left:410px;
-    top:675px;
-}
-
-.arrow-down-main{
-    left:410px;
-    top:830px;
-}
-
-.arrow-down-generator{
-    left:210px;
-    top:985px;
-}
-
-.arrow-up-generator{
-    left:210px;
-    top:1100px;
-}
-
-.arrow-up-transformer{
-    left:685px;
-    top:1100px;
-
-    color:#a87500;
-}
-
-.arrow-down-transformer{
-    left:685px;
-    top:1240px;
-
-    color:#a87500;
-}
 
 
 /* junction */
@@ -1360,6 +1320,7 @@ body{
 #ll2-parameter .unit{ font-size:24px; }
 #ll3-parameter .unit{ font-size:24px; }
 #ll4-parameter .unit{ font-size:24px; }
+#ll5-parameter .unit{ font-size:24px; }
 
 #cm1-parameter .unit{ font-size:24px; }
 #cm2-parameter .unit{ font-size:24px; }
@@ -1509,22 +1470,6 @@ body.monitor-g2{
 .junction.j-blink{
     animation:junctionBlink .55s steps(1,end) infinite !important;
 }
-.junction[data-label]::after{
-    content:attr(data-label);
-    position:absolute;
-    left:50%;
-    bottom:calc(100% + 5px);
-    transform:translateX(-50%);
-    color:#111 !important;
-    background:rgba(245,245,245,.92);
-    border:1px solid #333;
-    border-radius:2px;
-    padding:2px 5px;
-    white-space:nowrap;
-    font:700 11px Arial,sans-serif;
-    line-height:12px;
-    pointer-events:none;
-}
 @keyframes junctionFlow{
     0%,100%{opacity:1;box-shadow:0 0 0 0 currentColor !important;}
     50%{opacity:.55;box-shadow:0 0 15px 5px currentColor !important;}
@@ -1547,12 +1492,6 @@ body:not(.monitor-g2) .j-generator{
     top:1002.5px;
 }
 body:not(.monitor-g2) .middle-group{left:330px;}
-body:not(.monitor-g2) .arrow-down-generator,
-body:not(.monitor-g2) .arrow-up-generator{
-    left:calc(var(--g1-generator-axis) + 12px);
-}
-body:not(.monitor-g2) .arrow-down-generator{top:1091.5px;}
-body:not(.monitor-g2) .arrow-up-generator{top:1171.5px;}
 
 body.monitor-g1{
     --g1-main-axis:434.5px;
@@ -1572,34 +1511,6 @@ body.monitor-g1 .j-transformer-bottom{top:1302.5px;}
 body.monitor-g1 .bottom-line{
     left:calc(var(--g1-transformer-axis) - 90px);
 }
-body.monitor-g1 .arrow-up-transformer,
-body.monitor-g1 .arrow-down-transformer{
-    left:calc(var(--g1-transformer-axis) - 15px);
-}
-
-/* Center every G1 flow arrow on its bus using a junction-width slot. */
-body.monitor-g1 .arrow-up-main,
-body.monitor-g1 .arrow-down-main,
-body.monitor-g1 .arrow-down-generator,
-body.monitor-g1 .arrow-up-generator,
-body.monitor-g1 .arrow-up-transformer,
-body.monitor-g1 .arrow-down-transformer{
-    width:30px;
-    text-align:center;
-}
-
-body.monitor-g1 .arrow-up-main,
-body.monitor-g1 .arrow-down-main{
-    left:calc(var(--g1-main-axis) - 15px);
-}
-
-body.monitor-g1 .arrow-down-generator,
-body.monitor-g1 .arrow-up-generator{
-    left:calc(var(--g1-generator-axis) - 15px);
-}
-
-/* Keep the lower transformer arrow clear of the orange coil. */
-body.monitor-g1 .arrow-down-transformer{top:1270px;}
 </style>
 
 
@@ -1618,8 +1529,6 @@ body.monitor-g2 .j-transformer-bottom{left:calc(var(--g2-transformer-axis) - 15p
 body.monitor-g2 .j-transformer{top:1002.5px;}
 body.monitor-g2 .j-transformer-bottom{top:1302.5px;}
 body.monitor-g2 .bottom-line{left:calc(var(--g2-transformer-axis) - 90px);}
-body.monitor-g2 .arrow-up-transformer,
-body.monitor-g2 .arrow-down-transformer{left:calc(var(--g2-transformer-axis) - 15px);}
 body.monitor-g2 .generator-bus{
     left:calc(var(--g2-generator-axis) - 2.5px);
     height:435px;
@@ -1628,29 +1537,6 @@ body.monitor-g2 .j-generator{
     left:calc(var(--g2-generator-axis) - 15px);
     top:1002.5px;
 }
-body.monitor-g2 .arrow-down-generator,
-body.monitor-g2 .arrow-up-generator{left:calc(var(--g2-generator-axis) - 15px);}
-body.monitor-g2 .arrow-down-generator{top:1091.5px;}
-body.monitor-g2 .arrow-up-generator{top:1171.5px;}
-
-/* Match G1: center every flow arrow on its electrical bus. */
-body.monitor-g2 .arrow-up-main,
-body.monitor-g2 .arrow-down-main,
-body.monitor-g2 .arrow-down-generator,
-body.monitor-g2 .arrow-up-generator,
-body.monitor-g2 .arrow-up-transformer,
-body.monitor-g2 .arrow-down-transformer{
-    width:30px;
-    text-align:center;
-}
-
-body.monitor-g2 .arrow-up-main,
-body.monitor-g2 .arrow-down-main{
-    left:calc(var(--g2-main-axis) - 15px);
-}
-
-/* Keep the lower transformer arrow clear of the orange coil. */
-body.monitor-g2 .arrow-down-transformer{top:1270px;}
 </style>
 
 <style id="MONITOR_RESPONSIVE_POLISH">
@@ -1757,7 +1643,7 @@ body.monitor-g2 .right-group{
 
 body.monitor-g2 .left-group{
     left:auto;
-    right:28px;
+    right:16px;
 }
 
 /* Preserve G1's electrical direction while matching G2's safe margins. */
@@ -1767,6 +1653,20 @@ body.monitor-g1 .center-values{
 
 body.monitor-g1 .left-group{
     left:28px;
+}
+
+/* Cos φ sits below V on both generator monitors. */
+#ll5-parameter{
+    display:flex;
+    margin-top:28px;
+}
+
+/* Keep Cos φ aligned with the G2 meter column; lower the generator symbol instead. */
+body.monitor-g2{
+    --generator-top:1410px;
+}
+body.monitor-g2 .generator-bus{
+    height:475px;
 }
 
 body.monitor-g1 .right-group{
@@ -1872,6 +1772,10 @@ body.monitor-display .status.offline{
     border-color:rgba(192,0,0,.35);
 }
 
+body.monitor-g2 .monitor-footer{
+    bottom:12px;
+}
+
 @media (max-width:520px), (max-height:720px){
     body.monitor-display #screen{
         box-shadow:
@@ -1881,6 +1785,109 @@ body.monitor-display .status.offline{
     }
 }
 </style>
+<style id="OPERATIONAL_DAYS_CONTROLS">
+#days-panel{
+    cursor:pointer;
+    user-select:none;
+}
+#days-panel:focus-visible{
+    outline:3px solid #facc15;
+    outline-offset:3px;
+}
+#operational-modal{
+    display:none;
+    position:fixed;
+    inset:0;
+    z-index:100000;
+    align-items:center;
+    justify-content:center;
+    padding:20px;
+    background:rgba(0,0,0,.75);
+    color:#f8fafc;
+    font-family:"Segoe UI",Arial,sans-serif;
+}
+#operational-modal.open{
+    display:flex;
+}
+.operational-card{
+    width:440px;
+    max-width:94vw;
+    padding:24px;
+    border:1px solid #3b82f6;
+    border-radius:14px;
+    background:#111827;
+    box-shadow:0 24px 80px #000;
+}
+.operational-card h2{
+    margin:0 0 6px;
+    color:#60a5fa;
+    font-size:22px;
+}
+.operational-hint{
+    margin:0 0 18px;
+    color:#94a3b8;
+    font-size:13px;
+}
+.operational-summary{
+    display:grid;
+    grid-template-columns:1fr auto;
+    gap:8px 16px;
+    align-items:center;
+    margin-bottom:18px;
+    padding:14px;
+    border-radius:9px;
+    background:#07101f;
+}
+#operational-modal-days{
+    color:#ff3045;
+    font-size:28px;
+}
+#operational-modal-status{
+    padding:5px 9px;
+    border-radius:999px;
+    background:#3f1d24;
+    color:#fca5a5;
+    font-size:12px;
+    font-weight:700;
+}
+#operational-modal-status.running{
+    background:#123b25;
+    color:#86efac;
+}
+.operational-started{
+    grid-column:1 / -1;
+    color:#cbd5e1;
+    font-size:13px;
+}
+.operational-actions{
+    display:flex;
+    flex-wrap:wrap;
+    gap:9px;
+}
+.operational-actions button{
+    min-width:100px;
+    padding:10px 14px;
+    border:0;
+    border-radius:7px;
+    cursor:pointer;
+    color:#fff;
+    font-weight:700;
+}
+#operational-reset{background:#b91c1c;}
+#operational-start{background:#15803d;}
+#operational-close{margin-left:auto;background:#475569;}
+.operational-actions button:disabled{
+    cursor:not-allowed;
+    opacity:.45;
+}
+#operational-message{
+    min-height:18px;
+    margin:12px 0 0;
+    color:#facc15;
+    font-size:13px;
+}
+</style>
+
 
 </head>
 
@@ -1958,7 +1965,15 @@ body.monitor-display .status.offline{
 </div>
 
 
-<div class="panel days" id="days-panel">
+<div
+    class="panel days"
+    id="days-panel"
+    role="button"
+    tabindex="0"
+    aria-haspopup="dialog"
+    aria-label="Operational Days. Double-click to configure."
+    title="Double-click to configure Operational Days"
+>
 
     <span class="label">
         Operational Days
@@ -1968,7 +1983,7 @@ body.monitor-display .status.offline{
         class="value"
         id="days"
     >
-        7462
+        0
     </span>
 
     <span class="unit">
@@ -2075,29 +2090,6 @@ body.monitor-display .status.offline{
 <div class="bus transformer-bus"></div>
 
 
-<div class="arrow arrow-up-main">
-    ↑
-</div>
-
-<div class="arrow arrow-down-main">
-    ↓
-</div>
-
-<div class="arrow arrow-down-generator">
-    ↓
-</div>
-
-<div class="arrow arrow-up-generator">
-    ↑
-</div>
-
-<div class="arrow arrow-up-transformer">
-    ↑
-</div>
-
-<div class="arrow arrow-down-transformer">
-    ↓
-</div>
 
 
 <div class="junction j-main"></div>
@@ -2304,6 +2296,24 @@ body.monitor-display .status.offline{
 
         <span class="unit">
             V
+        </span>
+
+    </div>
+
+    <div class="row" id="ll5-parameter">
+            <div class="box">
+
+            <span
+                class="small-value"
+                id="ll5"
+            >
+                0.00
+            </span>
+
+        </div>
+
+        <span class="unit">
+            Cos φ
         </span>
 
     </div>
@@ -2535,6 +2545,30 @@ body.monitor-display .status.offline{
 
 </div>
 </div>
+<div
+    id="operational-modal"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="operational-modal-title"
+    aria-hidden="true"
+>
+    <div class="operational-card">
+        <h2 id="operational-modal-title">Operational Days</h2>
+        <p class="operational-hint">Hitungan dimulai saat tombol Start ditekan, lalu bertambah setiap 24 jam.</p>
+        <div class="operational-summary">
+            <strong id="operational-modal-days">0 Days</strong>
+            <span id="operational-modal-status">STOPPED</span>
+            <span class="operational-started" id="operational-modal-started">Belum dimulai</span>
+        </div>
+        <div class="operational-actions">
+            <button id="operational-reset" type="button">Reset ke 0</button>
+            <button id="operational-start" type="button">Start</button>
+            <button id="operational-close" type="button">Tutup</button>
+        </div>
+        <p id="operational-message" aria-live="polite"></p>
+    </div>
+</div>
+
 
 
 <!-- =====================================================
@@ -2571,29 +2605,6 @@ window.setJunctionState = function(id, active, activeColor, inactiveColor, flowM
     if(active && flowMode === "blink") el.classList.add("j-blink");
 };
 
-function junctionCompare(value, operator, threshold){
-    // Operator/threshold hanya untuk rectangle analog lama.
-    if(operator === "=") return value === 1;
-    if(operator === ">=") return value >= threshold;
-    return operator === "<" ? value < threshold : value > threshold;
-}
-
-function junctionNumber(v){
-    if(typeof v === "number") return Number.isFinite(v) ? v : NaN;
-    if(v === null || v === undefined) return NaN;
-    const text = String(v).trim().replace(/,/g, ".");
-    const n = Number(text);
-    return Number.isFinite(n) ? n : NaN;
-}
-
-function cbzBreakerState(value, reverse){
-    const rawSet = Number(value) === 1;
-    const reverseText = String(reverse === null || reverse === undefined ? "" : reverse)
-        .trim().toLowerCase();
-    const reversed = ["-1", "1", "true", "yes", "on"].includes(reverseText);
-    return rawSet !== reversed;
-}
-
 window.updateJunctionStatus = function(p){
     if(!p) return;
 
@@ -2604,48 +2615,31 @@ window.updateJunctionStatus = function(p){
         return Number.isFinite(n) ? n : 0;
     }
 
-    // Sumber gambar:
-    // J_MAIN              = CT3
-    // J_GENERATOR         = LL3
-    // J_TRANSFORMER       = RR1
-    // J_TRANSFORMER_BOTTOM= RR3
-    const ct3=num(p.ct3);
-    const ll3=num(p.ll3);
-    const rr1=num(p.rr1);
-    const rr3=num(p.rr3);
+    const threshold=1.00;
+    const breakerSources={
+        "j-main":num(p.ct4),               // MW pada blok tengah
+        "j-generator":num(p.ll1),          // MW pada cabang generator
+        "j-transformer":num(p.rr2),        // MW pada cabang transformer
+        "j-transformer-bottom":num(p.rr3)  // kV pada bawah transformer
+    };
 
-    // SEDERHANA:
-    // 0 / negatif = OFF = HIJAU
-    // > 0         = ON  = MERAH
-    window.setJunctionState("j-main", ct3>0);
-    window.setJunctionState("j-generator", ll3>0);
-    window.setJunctionState("j-transformer", rr1>0);
-    window.setJunctionState("j-transformer-bottom", rr3>0);
-    if(p.rectangles){
-        Object.entries(p.rectangles).forEach(([name,cfg])=>{
-            const target=document.querySelector("."+name);
-            if(target && cfg.label) target.dataset.label=cfg.label;
-            const direct=p.rectangle_values && Object.prototype.hasOwnProperty.call(p.rectangle_values,name);
-            const rawValue=direct ? p.rectangle_values[name] : p[cfg.field];
-            const isDigital=cfg.Source_Kind === "rectangle_status_csv";
-            const valid=!isDigital || (rawValue !== null && rawValue !== undefined && rawValue !== "");
-            const value=num(rawValue);
-            const active=isDigital
-                ? (valid && cbzBreakerState(value,cfg.Reverse))
-                : junctionCompare(value,cfg.operator,Number(cfg.threshold||0));
-            const displayValue=isDigital ? (valid ? (active ? "C" : "O") : "?") : value;
-            const trueColor=valid ? (cfg.true_color||cfg.active_color||"#ff2020") : "#808080";
-            const falseColor=valid ? (cfg.false_color||cfg.inactive_color||"#14d84a") : "#808080";
-            window.setJunctionState(name,active,trueColor,falseColor,cfg.flow||"none",displayValue);
-        });
-    }
+    Object.entries(breakerSources).forEach(([id,value])=>{
+        window.setJunctionState(
+            id,
+            value>threshold,
+            "#ff2020",
+            "#14d84a",
+            "none",
+            ""
+        );
+    });
 };
 
-// Initial state sebelum telemetry masuk: kualitas belum diketahui.
+// Sebelum telemetry diterima, nilai tampilan adalah 0.00 sehingga breaker hijau.
 document.addEventListener("DOMContentLoaded", function(){
-    ["j-main","j-generator","j-transformer","j-transformer-bottom"].forEach(
-        name=>window.setJunctionState(name,false,"#808080","#808080","none","?")
-    );
+    ["j-main","j-generator","j-transformer","j-transformer-bottom"].forEach((id)=>{
+        window.setJunctionState(id,false,"#ff2020","#14d84a","none","");
+    });
 });
 </script>
 
@@ -2944,7 +2938,7 @@ function num(v,d=2){
 const DIGIT_MAP={
     tk1:1, tk2:1, tk3:1, tk4:1,
     ct1:1, ct2:1, ct3:1, ct4:1, ct5:1,
-    ll1:1, ll2:1, ll3:1, ll4:1,
+    ll1:1, ll2:1, ll3:1, ll4:1, ll5:1,
     cm1:1, cm2:1, cm3:1, cm4:1, cm5:1,
     rr1:1, rr2:1, rr3:1
 };
@@ -2967,7 +2961,7 @@ const DIGIT_MAP={
 const FONT_SIZE_MAP={
     tk1:16, tk2:16, tk3:16, tk4:16,
     ct1:16, ct2:16, ct3:16, ct4:16, ct5:16,
-    ll1:16, ll2:16, ll3:16, ll4:16,
+    ll1:16, ll2:16, ll3:16, ll4:16, ll5:16,
     cm1:16, cm2:16, cm3:16, cm4:16, cm5:16,
     rr1:16, rr2:16, rr3:16
 };
@@ -2981,7 +2975,7 @@ const FONT_SIZE_MAP={
 const SCALE_MAP={
     tk1:1.00, tk2:1.00, tk3:1.00, tk4:1.00,
     ct1:1.00, ct2:1.00, ct3:1.00, ct4:1.00, ct5:1.00,
-    ll1:1.00, ll2:1.00, ll3:1.00, ll4:1.00,
+    ll1:1.00, ll2:1.00, ll3:1.00, ll4:1.00, ll5:1.00,
     cm1:1.00, cm2:1.00, cm3:1.00, cm4:1.00, cm5:1.00,
     rr1:1.00, rr2:1.00, rr3:1.00
 };
@@ -2990,6 +2984,78 @@ const SCALE_MAP={
 /* =========================================================
    UPDATE PANEL
    ========================================================= */
+let operationalCounterState={
+    days:0,
+    running:false,
+    started_at:null
+};
+
+function renderOperationalCounterState(){
+    const days=Math.max(0,Math.floor(Number(operationalCounterState.days)||0));
+    const running=Boolean(operationalCounterState.running);
+    document.getElementById("operational-modal-days").textContent=days+" Days";
+    const status=document.getElementById("operational-modal-status");
+    status.textContent=running ? "RUNNING" : "STOPPED";
+    status.classList.toggle("running",running);
+    const started=document.getElementById("operational-modal-started");
+    started.textContent=operationalCounterState.started_at
+        ? "Mulai: "+new Date(operationalCounterState.started_at).toLocaleString("id-ID")
+        : "Belum dimulai";
+    document.getElementById("operational-start").disabled=running;
+}
+
+function openOperationalModal(){
+    const modal=document.getElementById("operational-modal");
+    document.getElementById("operational-message").textContent="";
+    renderOperationalCounterState();
+    modal.classList.add("open");
+    modal.setAttribute("aria-hidden","false");
+    document.getElementById("operational-start").focus();
+}
+
+function closeOperationalModal(){
+    const modal=document.getElementById("operational-modal");
+    modal.classList.remove("open");
+    modal.setAttribute("aria-hidden","true");
+    document.getElementById("days-panel").focus();
+}
+
+async function applyOperationalAction(action){
+    const message=document.getElementById("operational-message");
+    const buttons=document.querySelectorAll(".operational-actions button");
+    buttons.forEach(button=>button.disabled=true);
+    message.textContent=action==="reset" ? "Mereset penghitung..." : "Memulai penghitung...";
+    try{
+        const response=await fetch("/OperationalDays.json",{
+            method:"POST",
+            headers:{"Content-Type":"application/json"},
+            body:JSON.stringify({action})
+        });
+        let result={};
+        try{
+            result=await response.json();
+        }catch(_error){}
+        if(!response.ok){
+            throw new Error(
+                response.status===403
+                    ? "Akses dari perangkat ini ditolak."
+                    : (result.message||"Pengaturan gagal.")
+            );
+        }
+        operationalCounterState=result.state||operationalCounterState;
+        setLarge("days",String(operationalCounterState.days??0));
+        renderOperationalCounterState();
+        message.textContent=result.message||"Pengaturan tersimpan.";
+        refreshTelemetry();
+    }catch(error){
+        message.textContent=error.message||"Pengaturan gagal.";
+    }finally{
+        document.getElementById("operational-reset").disabled=false;
+        document.getElementById("operational-close").disabled=false;
+        renderOperationalCounterState();
+    }
+}
+
 
 function updatePanel(p){
 
@@ -3012,12 +3078,17 @@ function updatePanel(p){
     );
 
 
-    setLarge(
-        "days",
-        String(
-            p.days??7462
-        )
+    const operationalDays=Math.max(
+        0,
+        Math.floor(Number(p.operational_days??p.days??0)||0)
     );
+    operationalCounterState={
+        days:operationalDays,
+        running:Boolean(p.operational_counter?.running),
+        started_at:p.operational_counter?.started_at??null
+    };
+    setLarge("days",String(operationalDays));
+    renderOperationalCounterState();
 
 
     /*
@@ -3025,7 +3096,7 @@ function updatePanel(p){
        ---------------------------
        KT : tk1 - tk4
        CT : ct1 - ct5
-       IL : ll1 - ll4
+       IL : ll1 - ll5
        CM : cm1 - cm5
        RR : rr1 - rr2
 
@@ -3047,6 +3118,7 @@ function updatePanel(p){
         "ll2",
         "ll3",
         "ll4",
+        "ll5",
 
         "cm1",
         "cm2",
@@ -3187,7 +3259,8 @@ function initializeSevenSegments(){
         "ll1",
         "ll2",
         "ll3",
-        "ll4"
+        "ll4",
+        "ll5"
     ].forEach(function(id){
         setSmall(id,0);
     });
@@ -3215,7 +3288,7 @@ function initializeSevenSegments(){
     /* Header besar */
     setLarge("date","2026-08-21");
     setLarge("time","06:00:00");
-    setLarge("days","7462");
+    setLarge("days","0");
 }
 
 
@@ -3436,9 +3509,37 @@ async function refreshTelemetry(){
 
 refreshTelemetry();
 setInterval(refreshTelemetry,1000);
+const operationalPanel=document.getElementById("days-panel");
+operationalPanel.addEventListener("dblclick",openOperationalModal);
+operationalPanel.addEventListener("keydown",event=>{
+    if(event.key==="Enter"||event.key===" "){
+        event.preventDefault();
+        openOperationalModal();
+    }
+});
+document.getElementById("operational-close").addEventListener("click",closeOperationalModal);
+document.getElementById("operational-reset").addEventListener(
+    "click",
+    ()=>applyOperationalAction("reset")
+);
+document.getElementById("operational-start").addEventListener(
+    "click",
+    ()=>applyOperationalAction("start")
+);
+document.getElementById("operational-modal").addEventListener("click",event=>{
+    if(event.target.id==="operational-modal"){
+        closeOperationalModal();
+    }
+});
+document.addEventListener("keydown",event=>{
+    if(event.key==="Escape"&&document.getElementById("operational-modal").classList.contains("open")){
+        closeOperationalModal();
+    }
+});
 
-const TV_FIELDS=["tk1","tk2","tk3","tk4","ct1","ct2","ct3","ct4","ct5","ll1","ll2","ll3","ll4","cm1","cm2","cm3","cm4","cm5","rr1","rr2","rr3"];
-const TV_DEFAULTS={tk1:["auxiliary1","Uab"],tk2:["voltage","Uab"],tk3:["voltage","Ubc"],tk4:["voltage","Uca"],ct1:["wire1","Uab"],ct2:["wire1","f"],ct3:["wire1","Ia"],ct4:["wire1","P"],ct5:["wire1","Q"],ll1:["measure_control1","P"],ll2:["measure_control1","Q"],ll3:["measure_control1","IE"],ll4:["measure_control1","UE"],cm1:["measure_control1","Uab"],cm2:["measure_control1","f"],cm3:["measure_control1","Ia"],cm4:["measure_control1","Ib"],cm5:["measure_control1","Ic"],rr1:["auxiliary1","Ia"],rr2:["auxiliary1","P"],rr3:["measure_control1","Uab_L"]};
+
+const TV_FIELDS=["tk1","tk2","tk3","tk4","ct1","ct2","ct3","ct4","ct5","ll1","ll2","ll3","ll4","ll5","cm1","cm2","cm3","cm4","cm5","rr1","rr2","rr3"];
+const TV_DEFAULTS={tk1:["auxiliary1","Uab"],tk2:["voltage","Uab"],tk3:["voltage","Ubc"],tk4:["voltage","Uca"],ct1:["wire1","Uab"],ct2:["wire1","f"],ct3:["wire1","Ia"],ct4:["wire1","P"],ct5:["wire1","Q"],ll1:["measure_control1","P"],ll2:["measure_control1","Q"],ll3:["measure_control1","IE"],ll4:["measure_control1","UE"],ll5:["measure_control1","cos"],cm1:["measure_control1","Uab"],cm2:["measure_control1","f"],cm3:["measure_control1","Ia"],cm4:["measure_control1","Ib"],cm5:["measure_control1","Ic"],rr1:["auxiliary1","Ia"],rr2:["auxiliary1","P"],rr3:["measure_control1","Uab_L"]};
 const TV_RECTANGLES=["j-main","j-generator","j-transformer","j-transformer-bottom"];
 let tvConfig=null,tvEditTarget=null;
 function ensureEditor(){
@@ -3526,6 +3627,7 @@ document.addEventListener("click",event=>{const value=event.target.closest("[id]
         ll2:"Mvar",
         ll3:"A",
         ll4:"V",
+        ll5:"Cos φ",
 
         cm1:"kV",
         cm2:"Hz",
