@@ -576,6 +576,8 @@ CARD_POINT_MAP = [
 ]
 
 CARD_VALUE_STORE = {idx: {"Uab": 0.0, "Ia": 0.0, "P": 0.0, "Q": 0.0} for idx, _bay, _ip, _points in CARD_POINT_MAP}
+CARD_BAY_BY_INDEX = {idx: bay for idx, bay, _ip, _points in CARD_POINT_MAP}
+
 
 def _embedded_card_points(ip, asdu, ioa):
     try:
@@ -832,6 +834,26 @@ def _to_float(value, default=0.0):
         return default
 
 
+FEEDER_BREAKER_ON_COLOR = "#ff2020"
+FEEDER_BREAKER_OFF_COLOR = "#14d84a"
+
+
+def _feeder_breaker_visual(ia_value):
+    """Return the feeder breaker state from the IA value shown to two decimals."""
+    current = _to_float(ia_value, 0.0)
+    if not math.isfinite(current):
+        current = 0.0
+    displayed_current = round(current, 2)
+    active = displayed_current > 0.0
+    return (
+        displayed_current,
+        active,
+        FEEDER_BREAKER_ON_COLOR if active else FEEDER_BREAKER_OFF_COLOR,
+        "1" if active else "0",
+    )
+
+
+
 def _norm_text(value):
     return str(value or "").strip()
 
@@ -1049,7 +1071,7 @@ def _load_all_settings():
 
 def _load_setting_engine():
     """Build runtime IOA/ASDU registry and dynamically rebuild the 14-card map from CSV."""
-    global SETTING_REGISTRY, SETTING_BY_IP_TAG, SETTING_IOA_BY_IP, CARD_POINT_MAP
+    global SETTING_REGISTRY, SETTING_BY_IP_TAG, SETTING_IOA_BY_IP, CARD_POINT_MAP, CARD_BAY_BY_INDEX
     rows = _load_all_settings()
     registry = []
     tag_candidates = {}
@@ -1164,6 +1186,7 @@ def _load_setting_engine():
 
     if len(dynamic_cards) == 14:
         CARD_POINT_MAP = dynamic_cards
+        CARD_BAY_BY_INDEX = {idx: bay for idx, bay, _ip, _points in CARD_POINT_MAP}
         # Keep existing values by card number; never erase live values merely
         # because a CSV was edited.
         for idx, _bay, _ip, _points in CARD_POINT_MAP:
@@ -2201,7 +2224,7 @@ class SCADAMainUI:
         # VINCI / IEC104 RTU configuration
         self.GEN_1_IP = RTU_LIST[1]["ip"]
         self.GEN_2_IP = RTU_LIST[2]["ip"]
-        self.MODBUS_PORT = VINCI_PORT  
+        self.MODBUS_PORT = VINCI_PORT
         self.VINCI_PORT = VINCI_PORT
 
         # Formula constants retained from the original SCADA UI.
@@ -2234,7 +2257,8 @@ class SCADAMainUI:
                 self.root.iconbitmap(default=app_icon)
         except Exception:
             pass
-        self.root.state("zoomed")
+        self._main_fullscreen = True
+        self._set_main_fullscreen(True)
         self.root.configure(bg="#000000")
         self.root.minsize(900, 600)
         self._setup_responsive_theme()
@@ -2245,7 +2269,10 @@ class SCADAMainUI:
         except Exception:
             pass
 
-        self.root.bind("<Escape>", lambda e: self.root.attributes("-zoomed", False))
+        self.root.bind("<Escape>", lambda _event: self._set_main_fullscreen(False))
+        self.root.bind("<F11>", lambda _event: self.action_zoom())
+        # Re-apply after the native Windows/Wine window has been mapped.
+        self.root.after_idle(lambda: self._set_main_fullscreen(True))
 
         # Data structure references
         self.realtime_labels = {}
@@ -2337,6 +2364,20 @@ class SCADAMainUI:
                 pass
         tree.bind("<Configure>", resize, add="+")
         tree.after(50, resize)
+
+    def _set_main_fullscreen(self, enabled):
+        """Make the operator window fill the complete active display."""
+        enabled = bool(enabled)
+        self._main_fullscreen = enabled
+        try:
+            if enabled:
+                self.root.geometry(
+                    f"{self.root.winfo_screenwidth()}x"
+                    f"{self.root.winfo_screenheight()}+0+0"
+                )
+            self.root.attributes("-fullscreen", enabled)
+        except tk.TclError:
+            self.root.state("zoomed" if enabled else "normal")
 
     def _make_toplevel_responsive(self, win, title=None, fullscreen=False):
         """Use the available monitor area instead of a hard-coded form size."""
@@ -2570,7 +2611,7 @@ class SCADAMainUI:
             "Alarm_Class", "UUp_Limit", "Up_Limit", "Down_Limit", "DDown_Limit",
             "Formula", "Add_Offset", "Unit"
         )
-        
+
         table_host = tk.Frame(top_frame, bg="#ffffff")
         table_host.pack(fill="both", expand=True)
         table = ttk.Treeview(table_host, columns=cols, show="headings", height=6)
@@ -2604,7 +2645,7 @@ class SCADAMainUI:
         e_dev_addr = tk.Entry(f1, width=18)
         e_dev_addr.insert(0, "192.168.1.10")
         e_dev_addr.pack(side="left", padx=5)
-        
+
         tk.Label(f1, text="Bay_Name", bg="#d4d0c8", width=10, anchor="w", font=("Segoe UI", 10)).pack(side="left", padx=(15, 0))
         cb_bay = ttk.Combobox(f1, values=devices_list, width=32, state="readonly")
         cb_bay.set("Connection Wire I")
@@ -2623,7 +2664,7 @@ class SCADAMainUI:
         e_info = tk.Entry(f3, width=20)
         e_info.insert(0, "01YC0101004001")
         e_info.pack(side="left", padx=5)
-        
+
         tk.Label(f3, text="Info_Index", bg="#d4d0c8", font=("Segoe UI", 10)).pack(side="left", padx=(10, 2))
         e_idx = tk.Entry(f3, width=6)
         e_idx.insert(0, "1")
@@ -2654,7 +2695,7 @@ class SCADAMainUI:
         f6 = tk.Frame(bottom_frame, bg="#d4d0c8")
         f6.pack(fill="x", pady=2)
         tk.Label(f6, text="[Alert_Limit]", bg="#d4d0c8", font=("Segoe UI", 10, "bold")).pack(side="left")
-        
+
         limit_entries = {}
         for lbl, val in [("UUp_Limit", "1000000"), ("Up_Limit", "1000000"), ("Down_Limit", "-1000000"), ("DDown_Limit", "-1000000")]:
             tk.Label(f6, text=lbl, bg="#d4d0c8", font=("Segoe UI", 10)).pack(side="left", padx=(8, 2))
@@ -3588,12 +3629,12 @@ class SCADAMainUI:
 
         header_frame = tk.Frame(login_win, bg="#111318", height=50)
         header_frame.pack(fill="x", side="top")
-        
+
         tk.Label(
-            header_frame, 
-            text=f"🔒  {'SECURITY ACCESS CONTROL'}", 
-            bg="#111318", 
-            fg="#4ea8de", 
+            header_frame,
+            text=f"🔒  {'SECURITY ACCESS CONTROL'}",
+            bg="#111318",
+            fg="#4ea8de",
             font=("Segoe UI", 10, "bold")
         ).pack(pady=12)
 
@@ -3601,10 +3642,10 @@ class SCADAMainUI:
         body_frame.pack(fill="both", expand=True)
 
         tk.Label(
-            body_frame, 
-            text='Select User Role', 
-            bg="#1a1c23", 
-            fg="#8d99ae", 
+            body_frame,
+            text='Select User Role',
+            bg="#1a1c23",
+            fg="#8d99ae",
             font=("Segoe UI", 10, "bold")
         ).pack(anchor="w", pady=(0, 3))
 
@@ -3614,21 +3655,21 @@ class SCADAMainUI:
         combo_role.set(self.current_user if self.current_user in roles else "Operator")
 
         tk.Label(
-            body_frame, 
-            text='Password', 
-            bg="#1a1c23", 
-            fg="#8d99ae", 
+            body_frame,
+            text='Password',
+            bg="#1a1c23",
+            fg="#8d99ae",
             font=("Segoe UI", 10, "bold")
         ).pack(anchor="w", pady=(0, 3))
 
         entry_pass = tk.Entry(
-            body_frame, 
-            show="•", 
-            font=("Segoe UI", 10), 
-            bg="#2b2d42", 
-            fg="#ffffff", 
-            insertbackground="#ffffff", 
-            relief="flat", 
+            body_frame,
+            show="•",
+            font=("Segoe UI", 10),
+            bg="#2b2d42",
+            fg="#ffffff",
+            insertbackground="#ffffff",
+            relief="flat",
             bd=6
         )
         entry_pass.pack(fill="x", pady=(0, 18))
@@ -3650,33 +3691,33 @@ class SCADAMainUI:
         btn_frame.pack(fill="x")
 
         btn_login = tk.Button(
-            btn_frame, 
-            text='Login', 
-            bg="#2563eb", 
-            fg="#ffffff", 
-            activebackground="#1d4ed8", 
+            btn_frame,
+            text='Login',
+            bg="#2563eb",
+            fg="#ffffff",
+            activebackground="#1d4ed8",
             activeforeground="#ffffff",
-            font=("Segoe UI", 10, "bold"), 
-            relief="flat", 
-            height=2, 
+            font=("Segoe UI", 10, "bold"),
+            relief="flat",
+            height=2,
             width=16,
-            cursor="hand2", 
+            cursor="hand2",
             command=validate_login
         )
         btn_login.pack(side="left")
 
         btn_cancel = tk.Button(
-            btn_frame, 
-            text='Cancel', 
-            bg="#374151", 
-            fg="#d1d5db", 
-            activebackground="#4b5563", 
+            btn_frame,
+            text='Cancel',
+            bg="#374151",
+            fg="#d1d5db",
+            activebackground="#4b5563",
             activeforeground="#ffffff",
-            font=("Segoe UI", 10, "bold"), 
-            relief="flat", 
-            height=2, 
+            font=("Segoe UI", 10, "bold"),
+            relief="flat",
+            height=2,
             width=12,
-            cursor="hand2", 
+            cursor="hand2",
             command=login_win.destroy
         )
         btn_cancel.pack(side="right")
@@ -3685,15 +3726,15 @@ class SCADAMainUI:
 
     def create_log_off_button(self, parent_container):
         btn_logoff = tk.Button(
-            parent_container, 
-            text=f"🚪 {'Log Off'}", 
-            bg="#ece9d8", 
+            parent_container,
+            text=f"🚪 {'Log Off'}",
+            bg="#ece9d8",
             fg="#000000",
-            font=("Segoe UI", 10), 
-            relief="flat", 
-            bd=1, 
-            padx=6, 
-            pady=3, 
+            font=("Segoe UI", 10),
+            relief="flat",
+            bd=1,
+            padx=6,
+            pady=3,
             cursor="hand2",
             command=self.action_log_off
         )
@@ -4035,7 +4076,7 @@ class SCADAMainUI:
         def get_possible_csv_files(dev_name):
             clean_setting = f"ListSetting {dev_name.replace('/', '_')}.csv"
             clean_report = dev_name.replace(" ", "_").replace("#", "").replace("/", "_") + ".csv"
-            
+
             if os.path.exists(clean_setting):
                 return clean_setting
             elif os.path.exists(clean_report):
@@ -4142,7 +4183,7 @@ class SCADAMainUI:
                 for col in cols:
                     tree_data_preview.heading(col, text=col)
                     tree_data_preview.column(col, width=110, anchor="center")
-                
+
                 now_str = datetime.datetime.now().strftime("%Y-%m-%d")
                 tree_data_preview.insert("", "end", values=(now_str, "10:00:00", "Uab Voltage", "10.05", "kV", "NORMAL"))
                 tree_data_preview.insert("", "end", values=(now_str, "10:05:00", "Ia Current", "580.2", "A", "NORMAL"))
@@ -4324,7 +4365,7 @@ class SCADAMainUI:
                 with open(history_csv, mode="r", encoding="utf-8") as f:
                     reader = csv.reader(f)
                     header = next(reader, None)
-                    
+
                     rows = list(reader)
                     filtered_rows = []
 
@@ -4507,8 +4548,7 @@ class SCADAMainUI:
         messagebox.showinfo("Edit Mode", "UI Edit Mode unlocked. Double click components to modify properties.")
 
     def action_zoom(self):
-        is_zoomed = self.root.attributes("-zoomed")
-        self.root.attributes("-zoomed", not is_zoomed)
+        self._set_main_fullscreen(not self._main_fullscreen)
 
     def action_print(self):
         messagebox.showinfo("Print Command", "Sending current active SCADA view to local system printer...")
@@ -4779,10 +4819,8 @@ class SCADAMainUI:
             tags=("run_status",)
         )
 
-        # Show the actual digital status value inside the rectangle.  The
-        # value is refreshed by ``_set_status_circle`` from the same RAW
-        # status binding used to calculate the colour, so the displayed
-        # number can never drift away from the lamp state.
+        # The rectangle displays the binary result of the feeder IA rule:
+        # 0.00 A or below is green/0; any positive displayed IA is red/1.
         value_item = canvas.create_text(
             x, y,
             text="0",
@@ -4793,16 +4831,8 @@ class SCADAMainUI:
         )
         self.status_indicators.setdefault(key, []).append(breaker)
         self.status_indicator_value_items.setdefault(key, []).append(value_item)
-        binding_key = f"run:{key}"
-        self._register_ui_binding("statuses", binding_key, {
-            "page": "Run Monitor", "element": key, "mode": "default"
-        })
-        open_editor = lambda _event, bk=binding_key: self._open_binding_dialog(bk, "statuses")
-        # The numeric value is drawn above the rectangle, so it must receive
-        # the same double-click binding; otherwise the text would consume the
-        # mouse event and the status editor would not open.
-        canvas.tag_bind(breaker, "<Double-Button-1>", open_editor)
-        canvas.tag_bind(value_item, "<Double-Button-1>", open_editor)
+        # Feeder breaker colour is fixed to the IA rule. It is intentionally
+        # not editable through the generic digital-status binding dialog.
         self._run_status_specs.append({
             "item": breaker,
             "value_item": value_item,
@@ -4826,12 +4856,7 @@ class SCADAMainUI:
         )
 
         self.status_indicators.setdefault(key, []).append(circle)
-        binding_key = f"run:{key}"
-        self._register_ui_binding("statuses", binding_key, {
-            "page": "Run Monitor", "element": key, "mode": "default"
-        })
-        canvas.tag_bind(circle, "<Double-Button-1>",
-                        lambda _event, bk=binding_key: self._open_binding_dialog(bk, "statuses"))
+        # The lower lamp mirrors the same fixed IA rule as the rectangle.
         self._run_status_specs.append({
             "item": circle,
             "kind": "circle",
@@ -5191,12 +5216,25 @@ class SCADAMainUI:
         # Breaker rectangles and status circles share the exact feeder centre.
         # One source of coordinates prevents the two indicator layers drifting.
         bottom_breakers = [
-            (x_coord, 268, f"brk_d{idx}", "#ff0000")
+            (x_coord, 268, f"brk_d{idx}", FEEDER_BREAKER_OFF_COLOR)
             for idx, x_coord in enumerate(param_positions, start=1)
         ]
         for bx, by, bid, bcolor in bottom_breakers:
             self.add_status_breaker(canvas, bx, by, bid, bcolor)
             self.add_status_circle(canvas, bx, by, bid, bcolor)
+
+        # The background contains four more solid breaker bodies outside the
+        # 14 feeder row: both Connection Wires and both outer generator paths.
+        additional_breakers = [
+            (38, 268, "brk_g1"),
+            (522, 184, "brk_wire1"),
+            (752, 184, "brk_wire2"),
+            (1237, 268, "brk_g2"),
+        ]
+        for bx, by, bid in additional_breakers:
+            self.add_status_breaker(
+                canvas, bx, by, bid, FEEDER_BREAKER_OFF_COLOR,
+            )
 
         canvas.bind("<Configure>", self._resize_run_monitor, add="+")
         canvas.after(100, self._resize_run_monitor)
@@ -6826,13 +6864,13 @@ class SCADAMainUI:
                     self.aux_value_items.append((value_item, source_type, source_id, field, binding_key))
 
             # Cover the static breaker blocks with live red/green blocks.
-            # Coordinates correspond exactly to the 14 feeder breaker centers.
+            # Their colour is fixed to each feeder's displayed IA value.
             breaker_x = [245, 316, 386, 456, 526, 594, 663,
                          872, 943, 1013, 1084, 1162, 1238, 1315]
             for card_no, bx in enumerate(breaker_x, 1):
                 item = canvas.create_rectangle(
                     (bx - 7) * sx, 339 * sy, (bx + 7) * sx, 362 * sy,
-                    fill="#ff2020", outline="#ffffff", width=1,
+                    fill=FEEDER_BREAKER_OFF_COLOR, outline="#ffffff", width=1,
                     tags="aux_live"
                 )
                 value_item = canvas.create_text(
@@ -6841,14 +6879,6 @@ class SCADAMainUI:
                     tags="aux_live"
                 )
                 self.aux_status_items.append((item, card_no, value_item))
-                binding_key = f"aux:breaker:{card_no}"
-                self._register_ui_binding("statuses", binding_key, {
-                    "page": "Auxiliary System", "element": f"Breaker {card_no}",
-                    "mode": "card_status", "source_type": "card",
-                    "source_id": card_no, "field": "Q"
-                })
-                canvas.tag_bind(item, "<Double-Button-1>",
-                                lambda _event, bk=binding_key: self._open_binding_dialog(bk, "statuses"))
             canvas.tag_raise("aux_live")
             self._update_auxiliary_realtime()
 
@@ -6900,23 +6930,25 @@ class SCADAMainUI:
                 canvas.itemconfig(item, text=text, fill="#00ff36",
                                   font=("Arial Narrow", value_font, "bold"))
             for item, card_no, value_item in getattr(self, "aux_status_items", []):
-                value = cards.get(card_no, {}).get("Q", 0.0)
-                binding_key = f"aux:breaker:{card_no}"
-                binding = self.ui_bindings.get("statuses", {}).get(binding_key, {})
-                valid = True
-                if binding.get("Source_Kind") == "rectangle_status_csv":
-                    value = self._resolve_raw_ui_binding(binding_key)
-                    valid = value is not None
-                else:
-                    override = self._resolve_ui_binding("statuses", binding_key)
-                    if override is not None:
-                        value = override
-                try:
-                    active = abs(float(value)) > 0.000001
-                except (TypeError, ValueError):
-                    active = False
-                active, color, label = self._status_rectangle_style(
-                    binding_key, value, active, valid=valid,
+                bay_name = CARD_BAY_BY_INDEX.get(card_no, "")
+                value = bays.get(
+                    bay_name,
+                    cards.get(card_no, {}),
+                ).get("Ia", 0.0)
+                current, active, color, label = _feeder_breaker_visual(value)
+                self._record_rectangle_transition(
+                    f"aux:breaker:{card_no}",
+                    {
+                        "page": "Auxiliary System",
+                        "element": f"Breaker {card_no}",
+                        "label": f"Breaker {card_no}",
+                        "Physical_Name": "Ia",
+                        "Unit": "A",
+                        "operator": ">",
+                        "threshold": 0.0,
+                    },
+                    current,
+                    active,
                 )
                 canvas.itemconfig(item, fill=color)
                 canvas.itemconfig(value_item, text=label)
@@ -7741,6 +7773,7 @@ class SCADAMainUI:
             # ---------------------------
             # Bottom parameter panels: canonical 14-card order.
             # Values come from each card's own IP + ASDU + IOA point map.
+            feeder_currents = {}
             for panel_idx, bay_name, ip, points in CARD_POINT_MAP:
                 # BAY_VALUE_STORE is updated from the exact full IEC address
                 # (IP + ASDU + IOA). It is authoritative for a named bay and
@@ -7752,6 +7785,7 @@ class SCADAMainUI:
                             CARD_VALUE_STORE.get(panel_idx, {})
                         )
                     )
+                feeder_currents[panel_idx] = vals.get("Ia", 0.0)
                 self._set_realtime(f"p{panel_idx}_uab", vals.get("Uab", 0.0), 2)
                 self._set_realtime(f"p{panel_idx}_ia", vals.get("Ia", 0.0), 2)
                 self._set_realtime(f"p{panel_idx}_p", vals.get("P", 0.0), 2)
@@ -7768,9 +7802,18 @@ class SCADAMainUI:
                 status_setter(1, self.g1_status)
                 status_setter(2, self.g2_status)
             if hasattr(self, "status_indicators") and hasattr(self, "run_canvas"):
-                for panel_idx, bay_name, ip, points in CARD_POINT_MAP:
-                    q_value = CARD_VALUE_STORE.get(panel_idx, {}).get("Q", 0.0)
-                    self._set_status_circle(f"brk_d{panel_idx}", bool(float(q_value) != 0.0))
+                for panel_idx, _bay_name, _ip, _points in CARD_POINT_MAP:
+                    self._set_breaker_current(
+                        f"brk_d{panel_idx}",
+                        feeder_currents.get(panel_idx, 0.0),
+                    )
+                for key, ia_value in (
+                    ("brk_wire1", rtu1.get("W1_Ia", 0.0)),
+                    ("brk_wire2", rtu1.get("W2_Ia", 0.0)),
+                    ("brk_g1", rtu2.get("Ia", 0.0)),
+                    ("brk_g2", rtu3.get("Ia", 0.0)),
+                ):
+                    self._set_breaker_current(key, ia_value)
 
             self.update_system_config_cards()
             self._update_auxiliary_realtime()
@@ -7857,34 +7900,37 @@ class SCADAMainUI:
         except Exception:
             pass
 
-    def _set_status_circle(self, key, online):
+    def _set_breaker_current(self, key, ia_value):
+        """Colour any Run Monitor breaker from its displayed IA value."""
         items = self.status_indicators.get(key, [])
         if not isinstance(items, (list, tuple)):
             items = [items]
-        if hasattr(self, "run_canvas"):
-            binding_key = f"run:{key}"
-            binding = self.ui_bindings.get("statuses", {}).get(binding_key, {})
-            raw_override = self._resolve_raw_ui_binding(binding_key)
-            is_digital = binding.get("Source_Kind") == "rectangle_status_csv"
-            valid = raw_override is not None if is_digital else True
-            raw_value = raw_override if raw_override is not None else (
-                None if is_digital else (1 if online else 0)
-            )
-            if raw_override is not None:
-                try:
-                    online = abs(float(raw_override)) > 0.000001
-                except (TypeError, ValueError):
-                    online = False
-            online, color, label = self._status_rectangle_style(
-                binding_key, raw_value, online, valid=valid,
-            )
-            for item in items:
-                self.run_canvas.itemconfig(item, fill=color)
-            for value_item in self.status_indicator_value_items.get(key, []):
-                try:
-                    self.run_canvas.itemconfig(value_item, text=label)
-                except Exception:
-                    pass
+        if not hasattr(self, "run_canvas"):
+            return
+
+        current, active, color, label = _feeder_breaker_visual(ia_value)
+        binding_key = f"run:{key}"
+        self._record_rectangle_transition(
+            binding_key,
+            {
+                "page": "Run Monitor",
+                "element": key,
+                "label": key,
+                "Physical_Name": "Ia",
+                "Unit": "A",
+                "operator": ">",
+                "threshold": 0.0,
+            },
+            current,
+            active,
+        )
+        for item in items:
+            self.run_canvas.itemconfig(item, fill=color)
+        for value_item in self.status_indicator_value_items.get(key, []):
+            try:
+                self.run_canvas.itemconfig(value_item, text=label)
+            except Exception:
+                pass
 
     def _update_generator_widgets(self, gen_num, data):
         prefix = "g1" if gen_num == 1 else "g2"
@@ -8422,7 +8468,7 @@ try:
 
             voltage_monitor_ip = "10.100.163.7"
             voltage_values = dict(
-                DATA_STORE.get( 
+                DATA_STORE.get(
                     voltage_monitor_ip,
                     DEFAULT_DATA
             )
