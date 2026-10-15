@@ -525,31 +525,6 @@
         "Formula": "LINE_VOLTAGE",
         "Add_Offset": "0.0",
         "Unit": "kV"
-      },
-      "ll5": {
-        "source": "measure_control1",
-        "key": "cos",
-        "Decimals": 2,
-        "Device_Addr": "10.100.163.2",
-        "Bay_Name": "1# Measure Control Box",
-        "Physical_Name": "cos",
-        "Info_Name": "cos",
-        "Info_Index": "13",
-        "Type": "Power",
-        "Min_Save_Mode": "2Minute",
-        "ASDU": "1",
-        "IOA": "16400",
-        "Coefficient": "3.6621097e-05",
-        "CTPT": "1",
-        "Tolerance": "0",
-        "Alarm_Class": "Warning",
-        "UUp_Limit": "1000000",
-        "Up_Limit": "1000000",
-        "Down_Limit": "-1000000",
-        "DDown_Limit": "-1000000",
-        "Formula": "COS",
-        "Add_Offset": "0.0",
-        "Unit": ""
       }
     },
     "rectangles": {
@@ -1241,31 +1216,6 @@
         "Up_Limit": "1000000",
         "Down_Limit": "-1000000",
         "DDown_Limit": "-1000000"
-      },
-      "ll5": {
-        "source": "measure_control2",
-        "key": "cos",
-        "Decimals": 2,
-        "Device_Addr": "10.100.163.3",
-        "Bay_Name": "2# Measure Control Box",
-        "Physical_Name": "cos",
-        "Info_Name": "cos",
-        "Info_Index": "13",
-        "Type": "Power",
-        "Min_Save_Mode": "2Minute",
-        "ASDU": "1",
-        "IOA": "16400",
-        "Coefficient": "3.6621097e-05",
-        "CTPT": "1",
-        "Tolerance": "0",
-        "Alarm_Class": "Warning",
-        "UUp_Limit": "1000000",
-        "Up_Limit": "1000000",
-        "Down_Limit": "-1000000",
-        "DDown_Limit": "-1000000",
-        "Formula": "COS",
-        "Add_Offset": "0.0",
-        "Unit": ""
       }
     },
     "rectangles": {

@@ -1,5 +1,5 @@
 {
-  "clock": 57,
+  "clock": 61,
   "files": {
     "ListSetting 1# Auxiliary Transformer.csv": {
       "origin": "10.100.163.150",
@@ -123,7 +123,7 @@
     },
     "MonitorTVConfig.json": {
       "origin": "10.100.163.150",
-      "revision": 56,
+      "revision": 59,
       "sha256": "002f9960cd9671c7f97d4b4dc8c6ffed516a369dc66f129cf26203293442f38b"
     },
     "StatusSetting 1# Auxiliary Transformer.csv": {
@@ -248,8 +248,8 @@
     },
     "UIRealtimeBindings.json": {
       "origin": "10.100.163.150",
-      "revision": 57,
-      "sha256": "d5dfa34f369751327581c1a82002f0ad4ca11efa6ce9bbcd3f67c95b21e99c52"
+      "revision": 61,
+      "sha256": "c9e1d091729b66e796f21de63c6e10d5f51a1abf10ba84345f2973cde1fcd7e4"
     }
   },
   "schema": "SCADA-BONT-CONFIG-SYNC-1"
