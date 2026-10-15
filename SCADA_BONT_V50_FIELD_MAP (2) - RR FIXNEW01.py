@@ -8073,12 +8073,12 @@ try:
         # Rectangle / junction dapat menggunakan nilai hasil telemetry mana pun.
         # ``operator`` dan ``threshold`` menentukan kondisi BENAR; warna serta
         # efek flow dapat diubah dari editor Monitor TV dan tersimpan di JSON.
-        def rectangle(field, label):
+        def rectangle(field, label, operator="=", threshold=1.0):
             return {
                 "field": field,
                 "label": label,
-                "operator": "=",
-                "threshold": 1.0,
+                "operator": operator,
+                "threshold": threshold,
                 "true_color": "#ff2020",
                 "false_color": "#14d84a",
                 "flow": "none",
@@ -8088,7 +8088,9 @@ try:
             "j-main": rectangle("ct3", "Main Junction"),
             "j-generator": rectangle("ll3", "Generator Junction"),
             "j-transformer": rectangle("rr1", "Transformer Junction"),
-            "j-transformer-bottom": rectangle("rr3", "Transformer Bottom"),
+            "j-transformer-bottom": rectangle(
+                "rr3", "Transformer Bottom", operator=">", threshold=0.0,
+            ),
         }
         result = {
             "G1": {"variables": {}, "rectangles": {

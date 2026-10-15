@@ -2615,18 +2615,17 @@ window.updateJunctionStatus = function(p){
         return Number.isFinite(n) ? n : 0;
     }
 
-    const threshold=1.00;
-    const breakerSources={
-        "j-main":num(p.ct4),               // MW pada blok tengah
-        "j-generator":num(p.ll1),          // MW pada cabang generator
-        "j-transformer":num(p.rr2),        // MW pada cabang transformer
-        "j-transformer-bottom":num(p.rr3)  // kV pada bawah transformer
+    const breakerRules={
+        "j-main":{value:num(p.ct4),threshold:1.00},               // MW pada blok tengah
+        "j-generator":{value:num(p.ll1),threshold:1.00},          // MW pada cabang generator
+        "j-transformer":{value:num(p.rr2),threshold:1.00},        // MW pada cabang transformer
+        "j-transformer-bottom":{value:num(p.rr3),threshold:0.00}  // kV pada bawah transformer
     };
 
-    Object.entries(breakerSources).forEach(([id,value])=>{
+    Object.entries(breakerRules).forEach(([id,rule])=>{
         window.setJunctionState(
             id,
-            value>threshold,
+            rule.value>rule.threshold,
             "#ff2020",
             "#14d84a",
             "none",
