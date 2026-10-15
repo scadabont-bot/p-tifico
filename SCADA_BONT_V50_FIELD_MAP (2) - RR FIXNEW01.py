@@ -8004,12 +8004,70 @@ try:
     MONITOR_TV_CONFIG_PATH = os.path.join(APP_DIR, "MonitorTVConfig.json")
     MONITOR_TV_CONFIG_LOCK = threading.RLock()
 
-    def _monitor_tv_editor_allowed(remote_ip, supplied_password):
-        """Restrict TV editor to configured SCADA operator PCs and TV stations."""
+    def _monitor_tv_operator_allowed(remote_ip):
+        """Allow counter controls only from configured SCADA and TV stations."""
         config = _communication_config()
         allowed_ips = {str(ip).strip() for ip in config.get("tv_editor_allowed_ips", [])}
         allowed_ips.update({_local_scada_ip(), "127.0.0.1", "::1"})
-        return str(remote_ip) in allowed_ips and str(supplied_password) == "admin"
+        return str(remote_ip) in allowed_ips
+
+    def _monitor_tv_editor_allowed(remote_ip, supplied_password):
+        """Require the admin password for full Monitor-TV field editing."""
+        return _monitor_tv_operator_allowed(remote_ip) and str(supplied_password) == "admin"
+    def _default_operational_counter():
+        """Keep a new day counter at zero until the operator presses Start."""
+        return {
+            "running": False,
+            "started_at_epoch": None,
+            "accumulated_seconds": 0.0,
+        }
+
+    def _normalize_operational_counter(value):
+        """Return a safe, persistent counter state."""
+        source = value if isinstance(value, dict) else {}
+        running_value = source.get("running", False)
+        if isinstance(running_value, str):
+            running = running_value.strip().lower() in {"1", "true", "yes", "on"}
+        else:
+            running = bool(running_value)
+        try:
+            accumulated = float(source.get("accumulated_seconds", 0.0))
+        except (TypeError, ValueError):
+            accumulated = 0.0
+        if not math.isfinite(accumulated) or accumulated < 0:
+            accumulated = 0.0
+        started_at = source.get("started_at_epoch")
+        try:
+            started_at = float(started_at) if started_at is not None else None
+        except (TypeError, ValueError):
+            started_at = None
+        if started_at is not None and (not math.isfinite(started_at) or started_at < 0):
+            started_at = None
+        if running and started_at is None:
+            started_at = time.time()
+        return {
+            "running": running,
+            "started_at_epoch": started_at,
+            "accumulated_seconds": accumulated,
+        }
+
+    def _operational_counter_snapshot(value):
+        """Calculate completed operational days without mutating stored state."""
+        state = _normalize_operational_counter(value)
+        elapsed = state["accumulated_seconds"]
+        if state["running"] and state["started_at_epoch"] is not None:
+            elapsed += max(0.0, time.time() - state["started_at_epoch"])
+        started_at = state["started_at_epoch"]
+        return {
+            "days": int(elapsed // 86400),
+            "running": state["running"],
+            "started_at": (
+                datetime.datetime.fromtimestamp(started_at).isoformat(timespec="seconds")
+                if started_at is not None else None
+            ),
+            "elapsed_seconds": int(elapsed),
+        }
+
 
     def _monitor_tv_config():
         # Rectangle / junction dapat menggunakan nilai hasil telemetry mana pun.
@@ -8037,7 +8095,9 @@ try:
                 name: dict(item) for name, item in default_rectangles.items()}},
             "G2": {"variables": {}, "rectangles": {
                 name: dict(item) for name, item in default_rectangles.items()}},
+            "operational_counter": _default_operational_counter(),
         }
+        config_changed = False
         try:
             with MONITOR_TV_CONFIG_LOCK, open(MONITOR_TV_CONFIG_PATH, "r", encoding="utf-8-sig") as handle:
                 loaded = json.load(handle)
@@ -8047,6 +8107,14 @@ try:
                     if isinstance(section, dict):
                         result[monitor_id]["variables"].update(section.get("variables", {}))
                         result[monitor_id]["rectangles"].update(section.get("rectangles", {}))
+                loaded_counter = loaded.get("operational_counter")
+                if isinstance(loaded_counter, dict):
+                    normalized_counter = _normalize_operational_counter(loaded_counter)
+                    result["operational_counter"] = normalized_counter
+                    if loaded_counter != normalized_counter:
+                        config_changed = True
+                else:
+                    config_changed = True
         except Exception:
             pass
         # Seed new/incomplete TV bindings and refresh source metadata from the
@@ -8067,7 +8135,6 @@ try:
         }
         with SETTING_LOCK:
             registry = [dict(row) for row in SETTING_REGISTRY]
-        config_changed = False
         for monitor_id, field_map in maps.items():
             variables = result[monitor_id]["variables"]
             for html_id, (source, key) in field_map.items():
@@ -8235,6 +8302,27 @@ try:
             with open(temporary, "w", encoding="utf-8") as handle:
                 json.dump(config, handle, ensure_ascii=False, indent=2)
             os.replace(temporary, MONITOR_TV_CONFIG_PATH)
+    def _set_operational_counter(action):
+        """Apply an operator action and persist it atomically."""
+        action = str(action or "").strip().lower()
+        if action not in {"reset", "start"}:
+            raise ValueError("Aksi operational days tidak valid")
+        with MONITOR_TV_CONFIG_LOCK:
+            config = _monitor_tv_config()
+            state = _normalize_operational_counter(config.get("operational_counter"))
+            if action == "reset":
+                state = {
+                    "running": False,
+                    "started_at_epoch": None,
+                    "accumulated_seconds": 0.0,
+                }
+            elif not state["running"]:
+                state["running"] = True
+                state["started_at_epoch"] = time.time()
+            config["operational_counter"] = state
+            _save_monitor_tv_config(config)
+        return _operational_counter_snapshot(state)
+
 
 
     # ========================================================================
@@ -8265,6 +8353,7 @@ try:
         "ll2": ("measure_control1", "Q"),
         "ll3": ("measure_control1", "IE"),
         "ll4": ("measure_control1", "UE"),
+        "ll5": ("measure_control1", "cos"),
 
         "cm1": ("measure_control1", "Uab"),
         "cm2": ("measure_control1", "f"),
@@ -8451,7 +8540,7 @@ try:
             g1_ip = RTU_LIST[1]["ip"]
             g2_ip = RTU_LIST[2]["ip"]
 
-        return {
+        result = {
             "p1": _monitor_tv_generator_payload(
                 g1_ip, "W1", "G1 / GENERATOR 1 + CONNECTION WIRE I"
             ),
@@ -8460,6 +8549,14 @@ try:
             ),
             "mapping": MONITOR_TARGETS,
         }
+        operational = _operational_counter_snapshot(
+            _monitor_tv_config().get("operational_counter")
+        )
+        for panel in (result["p1"], result["p2"]):
+            panel["operational_days"] = operational["days"]
+            panel["operational_counter"] = operational
+        return result
+
 
     def _breaker_status_row(identifier, display_name, binding, used_in, binding_keys):
         """Resolve one configured breaker without creating a second IEC-104 client."""
@@ -8730,17 +8827,37 @@ try:
             path = urlparse(self.path).path.rstrip("/")
             remote_ip = str(self.client_address[0])
             supplied_password = str(self.headers.get("X-SCADA-Admin", ""))
-            if path != "/MonitorTVConfig.json" or not _monitor_tv_editor_allowed(remote_ip, supplied_password):
+            allowed_paths = {"/MonitorTVConfig.json", "/OperationalDays.json"}
+            can_write = (
+                _monitor_tv_operator_allowed(remote_ip)
+                if path == "/OperationalDays.json"
+                else _monitor_tv_editor_allowed(remote_ip, supplied_password)
+            )
+            if path not in allowed_paths or not can_write:
                 self.send_response(403)
                 self.end_headers()
                 return
             try:
-                length = min(int(self.headers.get("Content-Length", "0")), 262144)
-                config = json.loads(self.rfile.read(length).decode("utf-8"))
-                if not isinstance(config, dict) or not all(k in config for k in ("G1", "G2")):
-                    raise ValueError("Konfigurasi TV tidak valid")
-                _save_monitor_tv_config(config)
-                body = json.dumps({"ok": True, "message": "Save berhasil"}).encode("utf-8")
+                max_length = 4096 if path == "/OperationalDays.json" else 262144
+                length = min(int(self.headers.get("Content-Length", "0")), max_length)
+                request_body = json.loads(self.rfile.read(length).decode("utf-8"))
+                if path == "/OperationalDays.json":
+                    if not isinstance(request_body, dict):
+                        raise ValueError("Permintaan operational days tidak valid")
+                    state = _set_operational_counter(request_body.get("action"))
+                    message = (
+                        "Operational days direset ke 0"
+                        if request_body.get("action") == "reset"
+                        else "Penghitung operational days dimulai"
+                    )
+                    response = {"ok": True, "message": message, "state": state}
+                else:
+                    config = request_body
+                    if not isinstance(config, dict) or not all(k in config for k in ("G1", "G2")):
+                        raise ValueError("Konfigurasi TV tidak valid")
+                    _save_monitor_tv_config(config)
+                    response = {"ok": True, "message": "Save berhasil"}
+                body = json.dumps(response, ensure_ascii=False).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
             except Exception as exc:
@@ -9050,12 +9167,12 @@ def run_monitor_tv_qc():
         BAY_VALUE_STORE["1# Measure Control Box"] = {
             "Uab_L": 501.0, "Uab": 502.0, "f": 503.0, "Ia": 504.0,
             "Ib": 505.0, "Ic": 506.0, "P": 507.0, "IE": 508.0, "UE": 509.0,
-            "Q": 510.0,
+            "Q": 510.0, "cos": 0.87,
         }
         BAY_VALUE_STORE["2# Measure Control Box"] = {
             "Uab_L": 601.0, "Uab": 602.0, "f": 603.0, "Ia": 604.0,
             "Ib": 605.0, "Ic": 606.0, "P": 607.0, "IE": 608.0, "UE": 609.0,
-            "Q": 610.0,
+            "Q": 610.0, "cos": 0.92,
         }
         VINCI_STATUS["10.100.163.1"] = True
         VINCI_STATUS[RTU_LIST[1]["ip"]] = True
@@ -9078,12 +9195,14 @@ def run_monitor_tv_qc():
         # Remaining blocks must follow the Auxiliary/Voltage/Measure-Control map.
         gen_g1 = {"tk1":301.0, "tk2":701.0, "tk3":702.0, "tk4":703.0,
                   "ll1":507.0, "ll2":510.0, "ll3":508.0, "ll4":509.0,
-                  "cm1":502.0, "cm2":503.0, "cm3":504.0, "cm4":505.0,
-                  "cm5":506.0, "rr1":304.0, "rr2":307.0, "rr3":501.0}
+                  "ll5":0.87, "cm1":502.0, "cm2":503.0, "cm3":504.0,
+                  "cm4":505.0, "cm5":506.0, "rr1":304.0, "rr2":307.0,
+                  "rr3":501.0}
         gen_g2 = {"tk1":401.0, "tk2":701.0, "tk3":702.0, "tk4":703.0,
                   "ll1":607.0, "ll2":610.0, "ll3":608.0, "ll4":609.0,
-                  "cm1":602.0, "cm2":603.0, "cm3":604.0, "cm4":605.0,
-                  "cm5":606.0, "rr1":404.0, "rr2":407.0, "rr3":601.0}
+                  "ll5":0.92, "cm1":602.0, "cm2":603.0, "cm3":604.0,
+                  "cm4":605.0, "cm5":606.0, "rr1":404.0, "rr2":407.0,
+                  "rr3":601.0}
         for key, wanted in gen_g1.items():
             if not math.isclose(float(g1[key]), wanted, rel_tol=1e-9, abs_tol=1e-9):
                 failures.append(f"G1 generator block leakage: {key}={g1[key]}, expected {wanted}")
