@@ -4622,7 +4622,8 @@ class SCADAMainUI:
 # ==============================================================================
     def add_overlay_box(
         self, canvas, x, y, w, h, items, font_size=10,
-        scale_box=True, horizontal_lines=False, vertical_line=False
+        scale_box=True, horizontal_lines=False, vertical_line=False,
+        right_edge_x=None
     ):
         """Create a readable realtime value card for Run Monitor.
 
@@ -4634,25 +4635,19 @@ class SCADAMainUI:
         original_h = float(h)
         item_count = len(items)
 
-        # Small equipment cards cannot physically fit 15 px text across four
-        # rows. Keep them compact and readable; all larger SCADA cards remain 15 px.
+        # The 14 feeder cards share a narrow horizontal band. Keep their
+        # geometry fixed so live values cannot widen one card into its
+        # neighbours; larger cards still grow to fit their contents.
         is_compact_card = original_w <= 90 and item_count >= 4
         if is_compact_card:
-            actual_font = max(7, min(16, int(font_size)))
-            card_w = original_w
-            card_h = max(original_h, 78)
+            actual_font = max(8, min(10, int(font_size)))
             border = 1
             row_gap = 0
         else:
             actual_font = max(7, int(font_size))
-            card_factor = 1.0
-            card_w = original_w * card_factor
-            card_h = original_h * card_factor
             border = 2
             row_gap = 1
 
-        # Size the card from its font and contents.  The w/h arguments remain
-        # accepted for compatibility, but no longer force an oversized box.
         card_font = tkfont.Font(family="Arial Narrow", size=actual_font, weight="bold")
         widest_name = max((card_font.measure(str(label)) for label, _, _ in items), default=0)
         # Reserve enough value space for live SCADA values, including sign.
@@ -4662,14 +4657,15 @@ class SCADAMainUI:
         )
         value_sample = "-000.00" if is_compact_card else "-0000.00"
         widest_value = max(widest_value, card_font.measure(value_sample))
-        # A Tk Label needs a little more vertical room than font linespace.
-        # Keep the proven design dimensions as the minimum, then grow only
-        # when a larger font or longer value actually requires it.
         row_height = card_font.metrics("linespace") + (8 if is_compact_card else 4) + (2 * row_gap)
         content_w = widest_name + widest_value + 14
         content_h = (row_height * item_count) + (2 * border)
-        w = max(original_w, content_w)
-        h = max(original_h, content_h)
+        if is_compact_card:
+            w = original_w
+            h = original_h
+        else:
+            w = max(original_w, content_w)
+            h = max(original_h, content_h)
 
         # Konsisten dengan panel SCADA: card hitam, teks realtime hijau,
         # dan garis grid hijau gelap agar tetap terbaca di semua gambar SLD.
@@ -4741,6 +4737,9 @@ class SCADAMainUI:
             grid_lines.append(divider_line)
         for grid_line in grid_lines:
             grid_line.lift()
+        if right_edge_x is not None:
+            x = float(right_edge_x) - float(w)
+
 
         item_id = canvas.create_window(
             x, y,
@@ -4760,12 +4759,15 @@ class SCADAMainUI:
             "font_size": float(actual_font),
             "compact": is_compact_card,
             "scale_box": bool(scale_box),
+            "right_edge_x": (
+                float(right_edge_x) if right_edge_x is not None else None
+            ),
             "labels": label_refs,
         })
 
-    # Place the round status lamp at the lower end of each feeder line,
-    # immediately above its equipment label.
-    RUN_STATUS_Y_OFFSET = 174.0
+    # Place the round status lamp in the clear gap below each realtime card
+    # and above the equipment label/terminal triangle.
+    RUN_STATUS_Y_OFFSET = 152.0
 
     def add_status_breaker(self, canvas, x, y, key, initial_color="#ff0000"):
         """Overlay a live red/green rectangle on the breaker in the SLD."""
@@ -4941,7 +4943,6 @@ class SCADAMainUI:
         for spec in getattr(self, "_run_overlay_specs", []):
             item = spec["item"]
 
-            x = offset_x + spec["x"] * scale_x
             y = offset_y + spec["y"] * scale_y
             # ======================================================
             # RESPONSIVE CARD SIZE
@@ -4958,6 +4959,12 @@ class SCADAMainUI:
                 # between neighbouring feeder cards instead of one solid bar.
                 w = max(40, int(spec["w"]))
                 h = max(30, int(spec["h"]))
+            if spec.get("right_edge_x") is not None:
+                right_edge = offset_x + spec["right_edge_x"] * scale_x
+                x = right_edge - w
+            else:
+                x = offset_x + spec["x"] * scale_x
+
 
             canvas.coords(item, x, y)
             canvas.itemconfig(
@@ -5085,21 +5092,21 @@ class SCADAMainUI:
         }
 
         self.add_overlay_box(
-            canvas, 55, 148, 105, 72,
+            canvas, 55, 120, 105, 72,
             [("UAB", "0.00", "kv_i_uab"), ("UBC", "0.00", "kv_i_ubc"), ("UCA", "0.00", "kv_i_uca")],
             font_size=15,
             scale_box=False,
             horizontal_lines=True
         )
         self.add_overlay_box(
-            canvas, 1138, 148, 105, 72,
+            canvas, 1150, 120, 105, 72,
             [("UAB", "0.00", "kv_ii_uab"), ("UBC", "0.00", "kv_ii_ubc"), ("UCA", "0.00", "kv_ii_uca")],
             font_size=15,
             scale_box=False,
             horizontal_lines=True
         )
         self.add_overlay_box(
-            canvas, 242, 30, 105, 92,
+            canvas, 250, 12, 105, 92,
             [("UAB", "0.00", "wire1_uab"), ("IA", "0.00", "wire1_ia"),
              ("P", "0.00", "wire1_p"), ("Q", "0.00", "wire1_q")],
             font_size=15,
@@ -5108,7 +5115,7 @@ class SCADAMainUI:
             vertical_line=True
         )
         self.add_overlay_box(
-            canvas, 940, 30, 105, 92,
+            canvas, 960, 12, 105, 92,
             [("UAB", "0.00", "wire2_uab"), ("IA", "0.00", "wire2_ia"),
              ("P", "0.00", "wire2_p"), ("Q", "0.00", "wire2_q")],
             font_size=15,
@@ -5118,28 +5125,28 @@ class SCADAMainUI:
         )
 
         self.add_overlay_box(
-            # Geser panel Generator 1 sedikit ke kanan supaya seimbang dengan
-            # rangkaian generator dan tidak bertabrakan dengan batas kiri SLD.
-            canvas, 64, 530, 108, 315,
+            # Keep the left panel just inside the vertical dashed boundary.
+            # Its reduced height ends safely above the lower dashed line.
+            canvas, 45, 500, 108, 276,
             [("Uab", "0.00", "g1_uab"), ("Ubc", "0.00", "g1_ubc"),
              ("Uca", "0.00", "g1_uca"), ("I A", "0.00", "g1_ia"),
              ("I B", "0.00", "g1_ib"), ("I C", "0.00", "g1_ic"),
              ("P", "0.00", "g1_p"), ("Q", "0.00", "g1_q"),
              ("f", "0.00", "g1_f"), ("COS", "0.00", "g1_cos"),
              ("UE", "0.00", "g1_ue"), ("IE", "0.00", "g1_ie")],
-            font_size=15,
+            font_size=11,
             scale_box=False,
             horizontal_lines=True
         )
         self.add_overlay_box(
-            canvas, 1157, 530, 108, 315,
+            canvas, 1157, 500, 108, 276,
             [("Uab", "0.00", "g2_uab"), ("Ubc", "0.00", "g2_ubc"),
              ("Uca", "0.00", "g2_uca"), ("I A", "0.00", "g2_ia"),
              ("I B", "0.00", "g2_ib"), ("I C", "0.00", "g2_ic"),
              ("P", "0.00", "g2_p"), ("Q", "0.00", "g2_q"),
              ("f", "0.00", "g2_f"), ("COS", "0.00", "g2_cos"),
              ("UE", "0.00", "g2_ue"), ("IE", "0.00", "g2_ie")],
-            font_size=15,
+            font_size=11,
             scale_box=False,
             horizontal_lines=True
         )
@@ -5163,28 +5170,29 @@ class SCADAMainUI:
         ]
         assert len(CARD_ORDER_14) == 14 and len(set(CARD_ORDER_14)) == 14
 
-        # Feeder centres measured from the native 1275x832 replacement image.
-        param_positions = [165, 240, 313, 386, 460, 531, 605,
-                           678, 750, 825, 902, 977, 1053, 1130]
+        # Feeder centres measured from runmonitoring_fix.png after conversion
+        # to the native 1275x832 Run Monitor coordinate space.
+        param_positions = [150, 224, 298, 371, 446, 521, 595,
+                           675, 747, 821, 897, 974, 1048, 1123]
         for idx, x_coord in enumerate(param_positions, start=1):
             self.add_overlay_box(
-                canvas, x_coord - 64, 331, 68, 78,
+                # Right-align each compact card beside its feeder with a
+                # four-pixel clearance from the vertical line.
+                canvas, x_coord - 72, 320, 68, 78,
                 [("UAB", "0.00", f"p{idx}_uab"), ("IA", "0.00", f"p{idx}_ia"),
                  ("P", "0.00", f"p{idx}_p"), ("Q", "0.00", f"p{idx}_q")],
-                font_size=15,
+                font_size=10,
                 scale_box=False,
                 horizontal_lines=True,
-                vertical_line=True
+                vertical_line=True,
+                right_edge_x=x_coord - 4
             )
 
+        # Breaker rectangles and status circles share the exact feeder centre.
+        # One source of coordinates prevents the two indicator layers drifting.
         bottom_breakers = [
-            (165, 271, "brk_d1", "#ff0000"), (240, 271, "brk_d2", "#ff0000"),
-            (313, 271, "brk_d3", "#ff0000"), (386, 271, "brk_d4", "#ff0000"),
-            (460, 271, "brk_d5", "#ff0000"), (531, 271, "brk_d6", "#ff0000"),
-            (605, 271, "brk_d7", "#ff0000"), (678, 271, "brk_d8", "#ff0000"),
-            (750, 271, "brk_d9", "#ff0000"), (825, 271, "brk_d10", "#ff0000"),
-            (902, 271, "brk_d11", "#ff0000"), (977, 271, "brk_d12", "#ff0000"),
-            (1053, 271, "brk_d13", "#ff0000"), (1130, 271, "brk_d14", "#ff0000")
+            (x_coord, 268, f"brk_d{idx}", "#ff0000")
+            for idx, x_coord in enumerate(param_positions, start=1)
         ]
         for bx, by, bid, bcolor in bottom_breakers:
             self.add_status_breaker(canvas, bx, by, bid, bcolor)
