@@ -5793,35 +5793,28 @@ class SCADAMainUI:
         # SETTINGS RESOLVER
         # ================================================================
         def setting_meta(physical):
+            aliases = {
+                "I A": "Ia",
+                "I B": "Ib",
+                "I C": "Ic",
+                "Urotor": "UE",
+                "Irotor": "IE",
+                "U ROTOR": "UE",
+                "I ROTOR": "IE",
+            }
+            target_physical = aliases.get(physical, physical)
+            target_bay = f"{gen_num}# Generator"
             with SETTING_LOCK:
-                row = SETTING_BY_IP_TAG.get(
+                row = next(
                     (
-                        str(source_ip).strip(),
-                        str(physical).strip().lower()
-                    )
+                        item for item in SETTING_REGISTRY
+                        if str(item.get("Device_Addr", "")).strip() == str(source_ip).strip()
+                        and str(item.get("Bay_Name", "")).strip() == target_bay
+                        and str(item.get("Physical_Name", "")).strip().lower()
+                        == str(target_physical).strip().lower()
+                    ),
+                    None,
                 )
-
-                if row is None:
-                    aliases = {
-                        "I A": "Ia",
-                        "I B": "Ib",
-                        "I C": "Ic",
-                        "Urotor": "UE",
-                        "Irotor": "IE",
-                        "U ROTOR": "UE",
-                        "I ROTOR": "IE",
-                    }
-
-                    alt = aliases.get(physical)
-
-                    if alt:
-                        row = SETTING_BY_IP_TAG.get(
-                            (
-                                str(source_ip).strip(),
-                                alt.lower()
-                            )
-                        )
-
             return row or {}
 
         def configured_unit(physical, fallback):
@@ -7485,11 +7478,53 @@ class SCADAMainUI:
 
     def _default_run_binding(self, key):
         """Describe the exact engineering point currently feeding a Run card."""
-        match = re.fullmatch(r"p(\d+)_(uab|ia|p|q)", str(key), re.I)
-        if not match:
+        binding_columns = (
+            "Device_Addr", "Bay_Name", "Physical_Name", "Info_Name",
+            "Info_Index", "ASDU", "IOA", "Unit", "Coefficient", "CTPT",
+            "Formula", "Add_Offset", "Decimals",
+        )
+
+        generator_match = re.fullmatch(
+            r"g([12])_(uab|ubc|uca|ia|ib|ic|p|q|f|cos|ue|ie)",
+            str(key),
+            re.I,
+        )
+        if generator_match:
+            generator_no = int(generator_match.group(1))
+            field = {
+                "uab": "Uab", "ubc": "Ubc", "uca": "Uca",
+                "ia": "Ia", "ib": "Ib", "ic": "Ic",
+                "p": "P", "q": "Q", "f": "f", "cos": "cos",
+                "ue": "UE", "ie": "IE",
+            }[generator_match.group(2).lower()]
+            ip = self.GEN_1_IP if generator_no == 1 else self.GEN_2_IP
+            bay = f"{generator_no}# Generator"
+            with SETTING_LOCK:
+                row = next(
+                    (
+                        item for item in SETTING_REGISTRY
+                        if str(item.get("Device_Addr", "")).strip() == str(ip).strip()
+                        and str(item.get("Bay_Name", "")).strip() == bay
+                        and str(item.get("Physical_Name", "")).strip().lower()
+                        == field.lower()
+                    ),
+                    None,
+                )
+            if row:
+                return {name: row.get(name, "") for name in binding_columns}
+            return {
+                "Device_Addr": ip,
+                "Bay_Name": bay,
+                "Physical_Name": field,
+            }
+
+        feeder_match = re.fullmatch(r"p(\d+)_(uab|ia|p|q)", str(key), re.I)
+        if not feeder_match:
             return {}
-        card_no = int(match.group(1))
-        field = {"uab": "Uab", "ia": "Ia", "p": "P", "q": "Q"}[match.group(2).lower()]
+        card_no = int(feeder_match.group(1))
+        field = {
+            "uab": "Uab", "ia": "Ia", "p": "P", "q": "Q",
+        }[feeder_match.group(2).lower()]
         for idx, bay, ip, points in CARD_POINT_MAP:
             if idx != card_no or field not in points:
                 continue
@@ -7501,12 +7536,16 @@ class SCADAMainUI:
                     if (str(row.get("Device_Addr", "")).strip() == str(ip).strip() and
                             int(row.get("ASDU", -1)) == int(asdu) and
                             int(row.get("IOA", -1)) == int(ioa)):
-                        return {name: row.get(name, "") for name in
-                                ("Device_Addr", "Bay_Name", "Physical_Name", "Info_Name", "Info_Index", "ASDU", "IOA", "Unit")}
+                        return {name: row.get(name, "") for name in binding_columns}
                 except Exception:
                     continue
-            return {"Device_Addr": ip, "Bay_Name": bay, "Physical_Name": field,
-                    "ASDU": asdu, "IOA": ioa}
+            return {
+                "Device_Addr": ip,
+                "Bay_Name": bay,
+                "Physical_Name": field,
+                "ASDU": asdu,
+                "IOA": ioa,
+            }
         return {}
 
     def _default_status_binding(self, binding_key):
@@ -7803,11 +7842,26 @@ class SCADAMainUI:
                               "status_mode": "raw", "on_text": "ON",
                               "off_text": "OFF", "flow": "none"})
             saved["mode"] = "selected"
-            self.ui_bindings.setdefault(kind, {})[binding_key] = saved
-            if self._save_ui_bindings():
+            bucket = self.ui_bindings.setdefault(kind, {})
+            had_previous = binding_key in bucket
+            previous = bucket.get(binding_key)
+            with CONFIG_SYNC_LOCK:
+                bucket[binding_key] = saved
+                if not self._save_ui_bindings():
+                    if had_previous:
+                        bucket[binding_key] = previous
+                    else:
+                        bucket.pop(binding_key, None)
+                    return
                 self._synchronize_ui_bindings_from_listsettings(force=True)
-                messagebox.showinfo("Setting", "Save berhasil di setting.", parent=dialog)
-                dialog.destroy()
+                try:
+                    # Publish this local edit before a peer snapshot can race it
+                    # and restore the older modal selection.
+                    _config_sync_refresh_local_state()
+                except Exception as exc:
+                    _communication_log("LOCAL", "CONFIG_SYNC_SAVE_ERROR", str(exc))
+            messagebox.showinfo("Setting", "Save berhasil di setting.", parent=dialog)
+            dialog.destroy()
 
         tk.Button(button_bar, text="Edit", command=enable_edit, bg="#f59e0b", fg="white",
                   font=("Segoe UI", 10, "bold"), width=12, relief="flat").pack(side="left")
@@ -8096,7 +8150,9 @@ class SCADAMainUI:
             with DATA_LOCK:
                 rtu1 = dict(DATA_STORE.get("10.100.163.1", DEFAULT_DATA))
                 rtu2 = dict(DATA_STORE.get(self.GEN_1_IP, DEFAULT_DATA))
+                rtu2.update(BAY_VALUE_STORE.get("1# Generator", {}))
                 rtu3 = dict(DATA_STORE.get(self.GEN_2_IP, DEFAULT_DATA))
+                rtu3.update(BAY_VALUE_STORE.get("2# Generator", {}))
                 statuses = dict(VINCI_STATUS)
 
             # ---------------------------
