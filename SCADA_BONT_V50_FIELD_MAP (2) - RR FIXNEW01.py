@@ -9080,6 +9080,13 @@ try:
         )
         for html_id, (source, data_key) in MONITOR_TV_FIELD_MAP_G1.items()
     }
+    # G2 top kV meters follow Connection Wire II, so they remain on the
+    # 6 kV-side measurements instead of the shared Voltage Monitoring bay.
+    MONITOR_TV_FIELD_MAP_G2.update({
+        "tk2": ("wire2", "Uab"),
+        "tk3": ("wire2", "Ubc"),
+        "tk4": ("wire2", "Uca"),
+    })
 
     def _monitor_tv_generator_payload(source_ip, wire_prefix=None, display_name=None):
         """Build one Monitor-TV payload using MONITOR_TV_FIELD_MAP."""
