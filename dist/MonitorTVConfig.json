@@ -1,0 +1,327 @@
+{
+  "G1": {
+    "variables": {
+      "tk1": {
+        "source": "auxiliary1",
+        "key": "Uab",
+        "Decimals": 2
+      },
+      "tk2": {
+        "source": "voltage",
+        "key": "Uab",
+        "Decimals": 2
+      },
+      "tk3": {
+        "source": "voltage",
+        "key": "Ubc",
+        "Decimals": 2
+      },
+      "tk4": {
+        "source": "voltage",
+        "key": "Uca",
+        "Decimals": 2
+      },
+      "ct1": {
+        "source": "wire1",
+        "key": "Uab",
+        "Decimals": 2
+      },
+      "ct2": {
+        "source": "wire1",
+        "key": "f",
+        "Decimals": 2
+      },
+      "ct3": {
+        "source": "wire1",
+        "key": "Ia",
+        "Decimals": 2
+      },
+      "ct4": {
+        "source": "wire1",
+        "key": "P",
+        "Decimals": 2
+      },
+      "ct5": {
+        "source": "wire1",
+        "key": "Q",
+        "Decimals": 2
+      },
+      "ll1": {
+        "source": "measure_control1",
+        "key": "P",
+        "Decimals": 2
+      },
+      "ll2": {
+        "source": "measure_control1",
+        "key": "Q",
+        "Decimals": 2
+      },
+      "ll3": {
+        "source": "measure_control1",
+        "key": "IE",
+        "Decimals": 2
+      },
+      "ll4": {
+        "source": "measure_control1",
+        "key": "UE",
+        "Decimals": 2
+      },
+      "ll5": {
+        "source": "measure_control1",
+        "key": "cos",
+        "Decimals": 2
+      },
+      "cm1": {
+        "source": "measure_control1",
+        "key": "Uab",
+        "Decimals": 2
+      },
+      "cm2": {
+        "source": "measure_control1",
+        "key": "f",
+        "Decimals": 2
+      },
+      "cm3": {
+        "source": "measure_control1",
+        "key": "Ia",
+        "Decimals": 2
+      },
+      "cm4": {
+        "source": "measure_control1",
+        "key": "Ib",
+        "Decimals": 2
+      },
+      "cm5": {
+        "source": "measure_control1",
+        "key": "Ic",
+        "Decimals": 2
+      },
+      "rr1": {
+        "source": "auxiliary1",
+        "key": "Ia",
+        "Decimals": 2
+      },
+      "rr2": {
+        "source": "auxiliary1",
+        "key": "P",
+        "Decimals": 2
+      },
+      "rr3": {
+        "source": "measure_control1",
+        "key": "Uab_L",
+        "Decimals": 2
+      }
+    },
+    "rectangles": {
+      "j-main": {
+        "field": "ct3",
+        "label": "Main Junction",
+        "operator": "=",
+        "threshold": 1.0,
+        "true_color": "#ff2020",
+        "false_color": "#14d84a",
+        "flow": "none",
+        "source": "wire1",
+        "key": "Ia"
+      },
+      "j-generator": {
+        "field": "ll3",
+        "label": "Generator Junction",
+        "operator": "=",
+        "threshold": 1.0,
+        "true_color": "#ff2020",
+        "false_color": "#14d84a",
+        "flow": "none",
+        "source": "measure_control1",
+        "key": "IE"
+      },
+      "j-transformer": {
+        "field": "rr1",
+        "label": "Transformer Junction",
+        "operator": "=",
+        "threshold": 1.0,
+        "true_color": "#ff2020",
+        "false_color": "#14d84a",
+        "flow": "none",
+        "source": "auxiliary1",
+        "key": "Ia"
+      },
+      "j-transformer-bottom": {
+        "field": "rr3",
+        "label": "Transformer Bottom",
+        "operator": ">",
+        "threshold": 0.0,
+        "true_color": "#ff2020",
+        "false_color": "#14d84a",
+        "flow": "none",
+        "source": "measure_control1",
+        "key": "Uab_L"
+      }
+    }
+  },
+  "G2": {
+    "variables": {
+      "tk1": {
+        "source": "auxiliary2",
+        "key": "Uab",
+        "Decimals": 2
+      },
+      "tk2": {
+        "source": "voltage",
+        "key": "Uab_L",
+        "Decimals": 2
+      },
+      "tk3": {
+        "source": "voltage",
+        "key": "Ubc_L",
+        "Decimals": 2
+      },
+      "tk4": {
+        "source": "voltage",
+        "key": "Uca_L",
+        "Decimals": 2
+      },
+      "ct1": {
+        "source": "wire2",
+        "key": "Uab",
+        "Decimals": 2
+      },
+      "ct2": {
+        "source": "wire2",
+        "key": "f",
+        "Decimals": 2
+      },
+      "ct3": {
+        "source": "wire2",
+        "key": "Ia",
+        "Decimals": 2
+      },
+      "ct4": {
+        "source": "wire2",
+        "key": "P",
+        "Decimals": 2
+      },
+      "ct5": {
+        "source": "wire2",
+        "key": "Q",
+        "Decimals": 2
+      },
+      "ll1": {
+        "source": "measure_control2",
+        "key": "P",
+        "Decimals": 2
+      },
+      "ll2": {
+        "source": "measure_control2",
+        "key": "Q",
+        "Decimals": 2
+      },
+      "ll3": {
+        "source": "measure_control2",
+        "key": "IE",
+        "Decimals": 2
+      },
+      "ll4": {
+        "source": "measure_control2",
+        "key": "UE",
+        "Decimals": 2
+      },
+      "ll5": {
+        "source": "measure_control2",
+        "key": "cos",
+        "Decimals": 2
+      },
+      "cm1": {
+        "source": "measure_control2",
+        "key": "Uab",
+        "Decimals": 2
+      },
+      "cm2": {
+        "source": "measure_control2",
+        "key": "f",
+        "Decimals": 2
+      },
+      "cm3": {
+        "source": "measure_control2",
+        "key": "Ia",
+        "Decimals": 2
+      },
+      "cm4": {
+        "source": "measure_control2",
+        "key": "Ib",
+        "Decimals": 2
+      },
+      "cm5": {
+        "source": "measure_control2",
+        "key": "Ic",
+        "Decimals": 2
+      },
+      "rr1": {
+        "source": "auxiliary2",
+        "key": "Ia",
+        "Decimals": 2
+      },
+      "rr2": {
+        "source": "auxiliary2",
+        "key": "P",
+        "Decimals": 2
+      },
+      "rr3": {
+        "source": "measure_control2",
+        "key": "Uab_L",
+        "Decimals": 2
+      }
+    },
+    "rectangles": {
+      "j-main": {
+        "field": "ct3",
+        "label": "Main Junction",
+        "operator": "=",
+        "threshold": 1.0,
+        "true_color": "#ff2020",
+        "false_color": "#14d84a",
+        "flow": "none",
+        "source": "wire2",
+        "key": "Ia"
+      },
+      "j-generator": {
+        "field": "ll3",
+        "label": "Generator Junction",
+        "operator": "=",
+        "threshold": 1.0,
+        "true_color": "#ff2020",
+        "false_color": "#14d84a",
+        "flow": "none",
+        "source": "measure_control2",
+        "key": "IE"
+      },
+      "j-transformer": {
+        "field": "rr1",
+        "label": "Transformer Junction",
+        "operator": "=",
+        "threshold": 1.0,
+        "true_color": "#ff2020",
+        "false_color": "#14d84a",
+        "flow": "none",
+        "source": "auxiliary2",
+        "key": "Ia"
+      },
+      "j-transformer-bottom": {
+        "field": "rr3",
+        "label": "Transformer Bottom",
+        "operator": ">",
+        "threshold": 0.0,
+        "true_color": "#ff2020",
+        "false_color": "#14d84a",
+        "flow": "none",
+        "source": "measure_control2",
+        "key": "Uab_L"
+      }
+    }
+  },
+  "operational_counter": {
+    "running": false,
+    "started_at_epoch": null,
+    "accumulated_seconds": 0.0
+  }
+}

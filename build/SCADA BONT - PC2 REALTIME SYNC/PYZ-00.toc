@@ -1,5 +1,5 @@
-('C:\\Users\\SCADA_BONT\\Documents\\m\\SCADA BONT V11\\SCADA BONT '
- 'V11\\build\\SCADA BONT - PC2 REALTIME SYNC\\PYZ-00.pyz',
+('C:\\Users\\SCADA_BONT\\Documents\\GitHub\\p-tifico\\build\\SCADA BONT - PC2 '
+ 'REALTIME SYNC\\PYZ-00.pyz',
  [('PIL',
    'C:\\Users\\SCADA_BONT\\AppData\\Roaming\\Python\\Python313\\site-packages\\PIL\\__init__.py',
    'PYMODULE'),

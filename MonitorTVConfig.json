@@ -683,8 +683,8 @@
         "ASDU": 769,
         "IOA": 103,
         "field": "rr3",
-        "operator": ">",
-        "threshold": 0.0,
+        "operator": "=",
+        "threshold": 1.0,
         "true_color": "#ff2020",
         "false_color": "#14d84a",
         "flow": "none",
@@ -1381,7 +1381,7 @@
       },
       "j-transformer-bottom": {
         "field": "rr3",
-        "threshold": 0.0,
+        "threshold": 1.0,
         "Device_Addr": "10.100.163.1",
         "Bay_Name": "2# Auxiliary Transformer",
         "Physical_Name": "UV breaker close",
@@ -1396,7 +1396,7 @@
         "SetStr": "1",
         "ResetStr": "2",
         "Reverse": "0",
-        "operator": ">",
+        "operator": "=",
         "Type": "Voltage",
         "Min_Save_Mode": "2Minute",
         "Coefficient": "0.0002264",
@@ -1416,5 +1416,10 @@
         "off_color": "#14d84a"
       }
     }
+  },
+  "operational_counter": {
+    "running": false,
+    "started_at_epoch": null,
+    "accumulated_seconds": 0.0
   }
 }

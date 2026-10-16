@@ -1,0 +1,12 @@
+{
+  "enabled": true,
+  "host": "mqtt.arita.co.id",
+  "port": 8883,
+  "tls": true,
+  "tls_insecure": false,
+  "keepalive": 60,
+  "publish_interval_seconds": 1.0,
+  "topic_prefix": "scada/bont",
+  "username": "",
+  "password": ""
+}

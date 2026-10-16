@@ -1,5 +1,5 @@
 {
-  "clock": 61,
+  "clock": 69,
   "files": {
     "ListSetting 1# Auxiliary Transformer.csv": {
       "origin": "10.100.163.150",
@@ -28,8 +28,8 @@
     },
     "ListSetting 1# Measure Control Box.csv": {
       "origin": "10.100.163.150",
-      "revision": 6,
-      "sha256": "95173d79f32909e56744b297096ca95cb8d4ac111970cefd5176d04fc7215df5"
+      "revision": 66,
+      "sha256": "35931c72962097c48892e13114e4752349165f1041cf0cd169bbeb8150d0f7f2"
     },
     "ListSetting 1# Primary Air Fan.csv": {
       "origin": "10.100.163.150",
@@ -78,8 +78,8 @@
     },
     "ListSetting 2# Measure Control Box.csv": {
       "origin": "10.100.163.150",
-      "revision": 16,
-      "sha256": "830a30e55560f420a2e8e9b2474f7df60342b744eab40402c32f32d68ec14b55"
+      "revision": 67,
+      "sha256": "f1ce58f22abfe566cf6fe594812d53c1bf2fad4520c0afd4093c0f6d0499e0c3"
     },
     "ListSetting 2# Primary Air Fan.csv": {
       "origin": "10.100.163.150",
@@ -123,8 +123,8 @@
     },
     "MonitorTVConfig.json": {
       "origin": "10.100.163.150",
-      "revision": 59,
-      "sha256": "002f9960cd9671c7f97d4b4dc8c6ffed516a369dc66f129cf26203293442f38b"
+      "revision": 69,
+      "sha256": "932f0025aa541af7ea65b5d029552776aeb755a81619360d68a2a449f3069f9f"
     },
     "StatusSetting 1# Auxiliary Transformer.csv": {
       "origin": "10.100.163.150",
@@ -248,8 +248,8 @@
     },
     "UIRealtimeBindings.json": {
       "origin": "10.100.163.150",
-      "revision": 61,
-      "sha256": "c9e1d091729b66e796f21de63c6e10d5f51a1abf10ba84345f2973cde1fcd7e4"
+      "revision": 64,
+      "sha256": "33cd8e46a3cdba6771d924ac8c5899ee02b0aad3707d59f0e9fbc45932185233"
     }
   },
   "schema": "SCADA-BONT-CONFIG-SYNC-1"

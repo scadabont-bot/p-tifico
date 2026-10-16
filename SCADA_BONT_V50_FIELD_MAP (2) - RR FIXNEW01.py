@@ -15,6 +15,7 @@ import shutil
 import re
 import ast
 import json
+import ssl
 from concurrent.futures import ThreadPoolExecutor
 from tkinter import ttk, messagebox, simpledialog, filedialog, font as tkfont
 from PIL import Image, ImageTk, ImageOps, ImageEnhance, ImageFilter
@@ -156,6 +157,262 @@ APP_DIR = (
     else os.path.dirname(os.path.abspath(__file__))
 )
 COMMUNICATION_CONFIG_PATH = os.path.join(APP_DIR, "CommunicationConfig.json")
+MQTT_CONFIG_PATH = os.path.join(APP_DIR, "MQTTConfig.json")
+
+
+# MQTT is intentionally implemented with the Python standard library.  The
+# packaged SCADA executable must not depend on a separately installed paho
+# module, and publishing is kept read-only so IEC-104 remains the source of
+# truth for the SCADA UI.
+MQTT_STARTED = False
+MQTT_LOCK = threading.RLock()
+MQTT_LAST_ERROR_LOG = 0.0
+
+
+def _mqtt_config():
+    """Return MQTT settings, with a secure default for mqtt.arita.co.id."""
+    defaults = {
+        "enabled": True,
+        "host": "mqtt.arita.co.id",
+        "port": 8883,
+        "tls": True,
+        "tls_insecure": False,
+        "keepalive": 60,
+        "publish_interval_seconds": 1.0,
+        "topic_prefix": "scada/bont",
+        "username": "",
+        "password": "",
+    }
+    try:
+        with open(MQTT_CONFIG_PATH, "r", encoding="utf-8-sig") as handle:
+            loaded = json.load(handle)
+        if isinstance(loaded, dict):
+            defaults.update(loaded)
+    except Exception:
+        pass
+    try:
+        defaults["port"] = int(defaults.get("port", 8883))
+    except (TypeError, ValueError):
+        defaults["port"] = 8883
+    try:
+        defaults["publish_interval_seconds"] = max(
+            0.2, float(defaults.get("publish_interval_seconds", 1.0))
+        )
+    except (TypeError, ValueError):
+        defaults["publish_interval_seconds"] = 1.0
+    defaults["host"] = str(defaults.get("host", "mqtt.arita.co.id")).strip()
+    defaults["topic_prefix"] = str(defaults.get("topic_prefix", "scada/bont")).strip(" /") or "scada/bont"
+    defaults["tls"] = bool(defaults.get("tls", defaults["port"] == 8883))
+    defaults["tls_insecure"] = bool(defaults.get("tls_insecure", False))
+    return defaults
+
+
+def _mqtt_encode_remaining_length(length):
+    encoded = bytearray()
+    while True:
+        digit = length % 128
+        length //= 128
+        if length:
+            digit |= 0x80
+        encoded.append(digit)
+        if not length:
+            return bytes(encoded)
+
+
+def _mqtt_utf8(value):
+    data = str(value or "").encode("utf-8")
+    if len(data) > 65535:
+        raise ValueError("MQTT UTF-8 field is too long")
+    return struct.pack("!H", len(data)) + data
+
+
+def _mqtt_recv_exact(sock, size):
+    chunks = []
+    remaining = int(size)
+    while remaining:
+        chunk = sock.recv(remaining)
+        if not chunk:
+            raise ConnectionError("MQTT broker closed the connection")
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+class _SimpleMQTTPublisher:
+    """Small MQTT 3.1.1 QoS-0 publisher used by the packaged SCADA app."""
+
+    def __init__(self, config, client_id):
+        self.config = config
+        self.client_id = client_id
+        self.sock = None
+
+    def connect(self):
+        raw = socket.create_connection(
+            (self.config["host"], self.config["port"]), timeout=8.0
+        )
+        if self.config.get("tls"):
+            if self.config.get("tls_insecure"):
+                context = ssl._create_unverified_context()
+            else:
+                context = ssl.create_default_context()
+            raw = context.wrap_socket(raw, server_hostname=self.config["host"])
+        raw.settimeout(8.0)
+        flags = 0x02  # Clean Session.
+        username = str(self.config.get("username", "") or "")
+        password = str(self.config.get("password", "") or "")
+        if username:
+            flags |= 0x80
+            if password:
+                flags |= 0x40
+        variable_header = b"\x00\x04MQTT\x04" + bytes([flags]) + struct.pack(
+            "!H", int(self.config.get("keepalive", 60))
+        )
+        payload = _mqtt_utf8(self.client_id)
+        if username:
+            payload += _mqtt_utf8(username)
+            if password:
+                payload += _mqtt_utf8(password)
+        remaining = variable_header + payload
+        packet = b"\x10" + _mqtt_encode_remaining_length(len(remaining)) + remaining
+        raw.sendall(packet)
+        response = _mqtt_recv_exact(raw, 4)
+        if response[:2] != b"\x20\x02" or response[3] != 0:
+            raise ConnectionError(
+                f"MQTT CONNACK rejected, return_code={response[3] if len(response) > 3 else 'unknown'}"
+            )
+        self.sock = raw
+
+    def publish(self, topic, payload):
+        if self.sock is None:
+            raise ConnectionError("MQTT publisher is not connected")
+        topic_bytes = str(topic).encode("utf-8")
+        body = struct.pack("!H", len(topic_bytes)) + topic_bytes + bytes(payload)
+        packet = b"\x30" + _mqtt_encode_remaining_length(len(body)) + body
+        self.sock.sendall(packet)
+
+    def close(self):
+        if self.sock is None:
+            return
+        try:
+            self.sock.sendall(b"\xE0\x00")
+        except Exception:
+            pass
+        try:
+            self.sock.close()
+        except Exception:
+            pass
+        self.sock = None
+
+
+def _mqtt_runtime_snapshot(local_ip):
+    with DATA_LOCK:
+        data_store = {str(ip): dict(values) for ip, values in DATA_STORE.items()}
+        bay_store = {str(bay): dict(values) for bay, values in BAY_VALUE_STORE.items()}
+        vinci_status = {str(ip): bool(value) for ip, value in VINCI_STATUS.items()}
+        status_store = [
+            {"ip": key[0], "kind": key[1], "key": key[2], "value": value}
+            for key, value in STATUS_VALUE_STORE.items()
+            if isinstance(key, tuple) and len(key) == 3
+        ]
+    return {
+        "schema": "SCADA-BONT-MQTT-1",
+        "generated_at": datetime.datetime.now().isoformat(timespec="milliseconds"),
+        "source_ip": str(local_ip or "unknown"),
+        "publisher_pid": os.getpid(),
+        "rtu": {
+            ip: {"online": vinci_status.get(ip, False), "data": values}
+            for ip, values in data_store.items()
+        },
+        "bay": bay_store,
+        "status_points": status_store,
+    }
+
+
+def _mqtt_publish_runtime(publisher, config, snapshot):
+    prefix = str(config["topic_prefix"]).strip(" /")
+    source_ip = str(snapshot.get("source_ip", "unknown"))
+    root = f"{prefix}/{source_ip}"
+    encoded_snapshot = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
+    publisher.publish(f"{root}/snapshot", encoded_snapshot.encode("utf-8"))
+    for rtu_ip, item in snapshot.get("rtu", {}).items():
+        publisher.publish(
+            f"{root}/rtu/{rtu_ip}/data",
+            json.dumps(item.get("data", {}), ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+        )
+        publisher.publish(
+            f"{root}/rtu/{rtu_ip}/status",
+            json.dumps(
+                {"source_ip": source_ip, "rtu_ip": rtu_ip, "online": item.get("online", False),
+                 "generated_at": snapshot.get("generated_at")},
+                separators=(",", ":"),
+            ).encode("utf-8"),
+        )
+    publisher.publish(
+        f"{root}/bay",
+        json.dumps(snapshot.get("bay", {}), ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+    )
+    publisher.publish(
+        f"{root}/status",
+        json.dumps(snapshot.get("status_points", []), ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+    )
+
+
+def _mqtt_publisher_worker():
+    global MQTT_LAST_ERROR_LOG
+    publisher = None
+    reconnect_delay = 2.0
+    last_local_ip = ""
+    while True:
+        config = _mqtt_config()
+        if not config.get("enabled") or not config.get("host"):
+            if publisher is not None:
+                publisher.close()
+                publisher = None
+            time.sleep(5.0)
+            continue
+        try:
+            local_ip = _local_scada_ip() or socket.gethostbyname(socket.gethostname())
+            client_id = f"scada-bont-{local_ip}-{os.getpid()}"
+            if publisher is None or local_ip != last_local_ip:
+                if publisher is not None:
+                    publisher.close()
+                publisher = _SimpleMQTTPublisher(config, client_id)
+                publisher.connect()
+                last_local_ip = local_ip
+                reconnect_delay = 2.0
+                _communication_log(
+                    local_ip, "MQTT_CONNECTED",
+                    f"broker={config['host']}:{config['port']} tls={bool(config.get('tls'))}",
+                )
+            snapshot = _mqtt_runtime_snapshot(local_ip)
+            _mqtt_publish_runtime(publisher, config, snapshot)
+            time.sleep(config["publish_interval_seconds"])
+        except Exception as exc:
+            if publisher is not None:
+                publisher.close()
+                publisher = None
+            now = time.monotonic()
+            if now - MQTT_LAST_ERROR_LOG >= 30.0:
+                _communication_log(
+                    last_local_ip or "MQTT", "MQTT_ERROR",
+                    f"{type(exc).__name__}: {exc}",
+                )
+                MQTT_LAST_ERROR_LOG = now
+            time.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2.0, 30.0)
+
+
+def start_mqtt_publisher():
+    global MQTT_STARTED
+    with MQTT_LOCK:
+        if MQTT_STARTED:
+            return
+        MQTT_STARTED = True
+        threading.Thread(
+            target=_mqtt_publisher_worker,
+            daemon=True,
+            name="SCADA-MQTT-Publisher",
+        ).start()
 
 
 def _iec104_connection_mode():
@@ -5161,12 +5418,18 @@ class SCADAMainUI:
 
     # Place the round status lamp in the clear gap below each realtime card
     # and above the equipment label/terminal triangle.
-    RUN_STATUS_Y_OFFSET = 152.0
+    # Circle coordinates follow the supplied 1917x857 reference Run Monitor
+    # canvas.  The reference places the circle centre 160 px below the
+    # breaker centre.
+    RUN_STATUS_Y_OFFSET = 160.0
 
     def add_status_breaker(self, canvas, x, y, key, initial_color="#ff0000"):
         """Overlay a live red/green rectangle on the breaker in the SLD."""
+        # The reference breaker body is 17 px wide by 22 px high in the
+        # 1917x857 design canvas.  Use the full body width so the live
+        # indicator completely covers the underlying breaker symbol.
         breaker = canvas.create_rectangle(
-            x - 6, y - 11, x + 6, y + 11,
+            x - 8.5, y - 11, x + 8.5, y + 11,
             fill=initial_color,
             outline="#ffffff",
             width=1,
@@ -5193,7 +5456,7 @@ class SCADAMainUI:
             "kind": "rectangle",
             "x": float(x),
             "y": float(y),
-            "half_w": 6.0,
+            "half_w": 8.5,
             "half_h": 11.0,
         })
 
@@ -5329,7 +5592,14 @@ class SCADAMainUI:
             # Keep each card aligned with the stretched background geometry.
             # Its design size already guarantees that every text row fits;
             # scaling here restores the visual proportions of the prior layout.
-            if spec.get("scale_box", True):
+            if spec.get("compact") and not spec.get("scale_box", True):
+                # Shrink compact feeder cards on smaller operator windows so
+                # neighbouring cards cannot merge into one black strip. At
+                # the reference 1920px width the cards remain 70px wide.
+                compact_scale = min(1.0, scale_x)
+                w = max(40, int(spec["w"] * compact_scale))
+                h = max(30, int(spec["h"] * min(1.0, scale_y)))
+            elif spec.get("scale_box", True):
                 w = max(40, int(spec["w"] * scale_x))
                 h = max(30, int(spec["h"] * scale_y))
             else:
@@ -5354,7 +5624,8 @@ class SCADAMainUI:
 
             # Let typography follow the background scale as well, but use the
             # smaller axis so wide monitors cannot make text excessively large.
-            fs = max(15, int(round(spec["font_size"] * scale)))
+            minimum_font = 8 if spec.get("compact") else 15
+            fs = max(minimum_font, int(round(spec["font_size"] * scale)))
 
             for lbl in spec["labels"]:
                 try:
@@ -5400,9 +5671,10 @@ class SCADAMainUI:
         self.run_canvas = canvas
         self.run_canvas.bind("<Configure>", self._resize_run_monitor)
 
-        # Native coordinate space of the replacement RUNMONITORNEW.jpg.
-        self._run_base_w = 1275
-        self._run_base_h = 832
+        # Exact coordinate space of the supplied 1917x857 reference screen.
+        # The native SLD asset is resized into this landscape canvas.
+        self._run_base_w = 1917
+        self._run_base_h = 857
         self._run_overlay_specs = []
         self._run_status_specs = []
         self.status_indicator_value_items = {}
@@ -5419,7 +5691,8 @@ class SCADAMainUI:
                 )
             else:
                 self.run_source_image = Image.open(self._run_image_path).convert("RGB")
-                self._run_base_w, self._run_base_h = self.run_source_image.size
+                # Keep the 1917x857 overlay coordinate system; do not replace
+                # it with the asset's native 1275x832 dimensions.
                 # Initial image; the Configure event immediately fits it.
                 self.run_image = ImageTk.PhotoImage(
                     self.run_source_image.resize(
@@ -5439,8 +5712,8 @@ class SCADAMainUI:
             )
 
         # Reset button in design coordinates.
-        reset_x, reset_y = 637.5, 28.0
-        reset_w, reset_h = 110.0, 34.0
+        reset_x, reset_y = 959.5, 29.5
+        reset_w, reset_h = 113.0, 35.0
 
         reset_btn = tk.Button(
             canvas,
@@ -5471,21 +5744,21 @@ class SCADAMainUI:
         }
 
         self.add_overlay_box(
-            canvas, 55, 120, 105, 72,
+            canvas, 83, 125, 106, 82,
             [("UAB", "0.00", "kv_i_uab"), ("UBC", "0.00", "kv_i_ubc"), ("UCA", "0.00", "kv_i_uca")],
             font_size=15,
             scale_box=False,
             horizontal_lines=True
         )
         self.add_overlay_box(
-            canvas, 1150, 120, 105, 72,
+            canvas, 1732, 125, 106, 82,
             [("UAB", "0.00", "kv_ii_uab"), ("UBC", "0.00", "kv_ii_ubc"), ("UCA", "0.00", "kv_ii_uca")],
             font_size=15,
             scale_box=False,
             horizontal_lines=True
         )
         self.add_overlay_box(
-            canvas, 250, 12, 105, 92,
+            canvas, 376, 12, 106, 108,
             [("UAB", "0.00", "wire1_uab"), ("IA", "0.00", "wire1_ia"),
              ("P", "0.00", "wire1_p"), ("Q", "0.00", "wire1_q")],
             font_size=15,
@@ -5494,7 +5767,7 @@ class SCADAMainUI:
             vertical_line=True
         )
         self.add_overlay_box(
-            canvas, 960, 12, 105, 92,
+            canvas, 1446, 12, 106, 108,
             [("UAB", "0.00", "wire2_uab"), ("IA", "0.00", "wire2_ia"),
              ("P", "0.00", "wire2_p"), ("Q", "0.00", "wire2_q")],
             font_size=15,
@@ -5506,7 +5779,7 @@ class SCADAMainUI:
         self.add_overlay_box(
             # Keep the left panel just inside the vertical dashed boundary.
             # Its reduced height ends safely above the lower dashed line.
-            canvas, 45, 500, 108, 276,
+            canvas, 67, 519, 107, 276,
             [("Uab", "0.00", "g1_uab"), ("Ubc", "0.00", "g1_ubc"),
              ("Uca", "0.00", "g1_uca"), ("I A", "0.00", "g1_ia"),
              ("I B", "0.00", "g1_ib"), ("I C", "0.00", "g1_ic"),
@@ -5518,7 +5791,7 @@ class SCADAMainUI:
             horizontal_lines=True
         )
         self.add_overlay_box(
-            canvas, 1157, 500, 108, 276,
+            canvas, 1745, 519, 107, 276,
             [("Uab", "0.00", "g2_uab"), ("Ubc", "0.00", "g2_ubc"),
              ("Uca", "0.00", "g2_uca"), ("I A", "0.00", "g2_ia"),
              ("I B", "0.00", "g2_ib"), ("I C", "0.00", "g2_ic"),
@@ -5549,15 +5822,17 @@ class SCADAMainUI:
         ]
         assert len(CARD_ORDER_14) == 14 and len(set(CARD_ORDER_14)) == 14
 
-        # Feeder centres measured from runmonitoring_fix.png after conversion
-        # to the native 1275x832 Run Monitor coordinate space.
-        param_positions = [150, 224, 298, 371, 446, 521, 595,
-                           675, 747, 821, 897, 974, 1048, 1123]
+        # Feeder centres measured from the supplied 1917x857 reference
+        # screenshot.  Keep these independent of an even-spacing formula:
+        # the source SLD has a small centre-to-centre change across the two
+        # 6 kV sections that is visible in the breaker and circle indicators.
+        param_positions = [226, 337.5, 448.5, 558.5, 671.5, 784.5, 896,
+                           1016.5, 1125, 1236.5, 1350.5, 1466.5, 1578, 1691]
         for idx, x_coord in enumerate(param_positions, start=1):
             self.add_overlay_box(
                 # Right-align each compact card beside its feeder with a
                 # four-pixel clearance from the vertical line.
-                canvas, x_coord - 72, 320, 68, 78,
+                canvas, x_coord - 74, 332, 70, 78,
                 [("UAB", "0.00", f"p{idx}_uab"), ("IA", "0.00", f"p{idx}_ia"),
                  ("P", "0.00", f"p{idx}_p"), ("Q", "0.00", f"p{idx}_q")],
                 font_size=10,
@@ -5570,7 +5845,7 @@ class SCADAMainUI:
         # Breaker rectangles and status circles share the exact feeder centre.
         # One source of coordinates prevents the two indicator layers drifting.
         bottom_breakers = [
-            (x_coord, 268, f"brk_d{idx}", FEEDER_BREAKER_OFF_COLOR)
+            (x_coord, 278.5, f"brk_d{idx}", "#ff0000")
             for idx, x_coord in enumerate(param_positions, start=1)
         ]
         for bx, by, bid, bcolor in bottom_breakers:
@@ -5580,10 +5855,13 @@ class SCADAMainUI:
         # The background contains four more solid breaker bodies outside the
         # 14 feeder row: both Connection Wires and both outer generator paths.
         additional_breakers = [
-            (38, 268, "brk_g1"),
-            (522, 184, "brk_wire1"),
-            (752, 184, "brk_wire2"),
-            (1237, 268, "brk_g2"),
+            # Centres measured from the supplied 1917x857 reference image.
+            # These were previously left at the old 1275px canvas positions,
+            # which caused the live square to appear beside the real breaker.
+            (58, 278.5, "brk_g1"),
+            (786, 190, "brk_wire1"),
+            (1132, 190, "brk_wire2"),
+            (1862, 278.5, "brk_g2"),
         ]
         for bx, by, bid in additional_breakers:
             self.add_status_breaker(
@@ -5793,28 +6071,35 @@ class SCADAMainUI:
         # SETTINGS RESOLVER
         # ================================================================
         def setting_meta(physical):
-            aliases = {
-                "I A": "Ia",
-                "I B": "Ib",
-                "I C": "Ic",
-                "Urotor": "UE",
-                "Irotor": "IE",
-                "U ROTOR": "UE",
-                "I ROTOR": "IE",
-            }
-            target_physical = aliases.get(physical, physical)
-            target_bay = f"{gen_num}# Generator"
             with SETTING_LOCK:
-                row = next(
+                row = SETTING_BY_IP_TAG.get(
                     (
-                        item for item in SETTING_REGISTRY
-                        if str(item.get("Device_Addr", "")).strip() == str(source_ip).strip()
-                        and str(item.get("Bay_Name", "")).strip() == target_bay
-                        and str(item.get("Physical_Name", "")).strip().lower()
-                        == str(target_physical).strip().lower()
-                    ),
-                    None,
+                        str(source_ip).strip(),
+                        str(physical).strip().lower()
+                    )
                 )
+
+                if row is None:
+                    aliases = {
+                        "I A": "Ia",
+                        "I B": "Ib",
+                        "I C": "Ic",
+                        "Urotor": "UE",
+                        "Irotor": "IE",
+                        "U ROTOR": "UE",
+                        "I ROTOR": "IE",
+                    }
+
+                    alt = aliases.get(physical)
+
+                    if alt:
+                        row = SETTING_BY_IP_TAG.get(
+                            (
+                                str(source_ip).strip(),
+                                alt.lower()
+                            )
+                        )
+
             return row or {}
 
         def configured_unit(physical, fallback):
@@ -7478,53 +7763,11 @@ class SCADAMainUI:
 
     def _default_run_binding(self, key):
         """Describe the exact engineering point currently feeding a Run card."""
-        binding_columns = (
-            "Device_Addr", "Bay_Name", "Physical_Name", "Info_Name",
-            "Info_Index", "ASDU", "IOA", "Unit", "Coefficient", "CTPT",
-            "Formula", "Add_Offset", "Decimals",
-        )
-
-        generator_match = re.fullmatch(
-            r"g([12])_(uab|ubc|uca|ia|ib|ic|p|q|f|cos|ue|ie)",
-            str(key),
-            re.I,
-        )
-        if generator_match:
-            generator_no = int(generator_match.group(1))
-            field = {
-                "uab": "Uab", "ubc": "Ubc", "uca": "Uca",
-                "ia": "Ia", "ib": "Ib", "ic": "Ic",
-                "p": "P", "q": "Q", "f": "f", "cos": "cos",
-                "ue": "UE", "ie": "IE",
-            }[generator_match.group(2).lower()]
-            ip = self.GEN_1_IP if generator_no == 1 else self.GEN_2_IP
-            bay = f"{generator_no}# Generator"
-            with SETTING_LOCK:
-                row = next(
-                    (
-                        item for item in SETTING_REGISTRY
-                        if str(item.get("Device_Addr", "")).strip() == str(ip).strip()
-                        and str(item.get("Bay_Name", "")).strip() == bay
-                        and str(item.get("Physical_Name", "")).strip().lower()
-                        == field.lower()
-                    ),
-                    None,
-                )
-            if row:
-                return {name: row.get(name, "") for name in binding_columns}
-            return {
-                "Device_Addr": ip,
-                "Bay_Name": bay,
-                "Physical_Name": field,
-            }
-
-        feeder_match = re.fullmatch(r"p(\d+)_(uab|ia|p|q)", str(key), re.I)
-        if not feeder_match:
+        match = re.fullmatch(r"p(\d+)_(uab|ia|p|q)", str(key), re.I)
+        if not match:
             return {}
-        card_no = int(feeder_match.group(1))
-        field = {
-            "uab": "Uab", "ia": "Ia", "p": "P", "q": "Q",
-        }[feeder_match.group(2).lower()]
+        card_no = int(match.group(1))
+        field = {"uab": "Uab", "ia": "Ia", "p": "P", "q": "Q"}[match.group(2).lower()]
         for idx, bay, ip, points in CARD_POINT_MAP:
             if idx != card_no or field not in points:
                 continue
@@ -7536,16 +7779,12 @@ class SCADAMainUI:
                     if (str(row.get("Device_Addr", "")).strip() == str(ip).strip() and
                             int(row.get("ASDU", -1)) == int(asdu) and
                             int(row.get("IOA", -1)) == int(ioa)):
-                        return {name: row.get(name, "") for name in binding_columns}
+                        return {name: row.get(name, "") for name in
+                                ("Device_Addr", "Bay_Name", "Physical_Name", "Info_Name", "Info_Index", "ASDU", "IOA", "Unit")}
                 except Exception:
                     continue
-            return {
-                "Device_Addr": ip,
-                "Bay_Name": bay,
-                "Physical_Name": field,
-                "ASDU": asdu,
-                "IOA": ioa,
-            }
+            return {"Device_Addr": ip, "Bay_Name": bay, "Physical_Name": field,
+                    "ASDU": asdu, "IOA": ioa}
         return {}
 
     def _default_status_binding(self, binding_key):
@@ -7842,26 +8081,11 @@ class SCADAMainUI:
                               "status_mode": "raw", "on_text": "ON",
                               "off_text": "OFF", "flow": "none"})
             saved["mode"] = "selected"
-            bucket = self.ui_bindings.setdefault(kind, {})
-            had_previous = binding_key in bucket
-            previous = bucket.get(binding_key)
-            with CONFIG_SYNC_LOCK:
-                bucket[binding_key] = saved
-                if not self._save_ui_bindings():
-                    if had_previous:
-                        bucket[binding_key] = previous
-                    else:
-                        bucket.pop(binding_key, None)
-                    return
+            self.ui_bindings.setdefault(kind, {})[binding_key] = saved
+            if self._save_ui_bindings():
                 self._synchronize_ui_bindings_from_listsettings(force=True)
-                try:
-                    # Publish this local edit before a peer snapshot can race it
-                    # and restore the older modal selection.
-                    _config_sync_refresh_local_state()
-                except Exception as exc:
-                    _communication_log("LOCAL", "CONFIG_SYNC_SAVE_ERROR", str(exc))
-            messagebox.showinfo("Setting", "Save berhasil di setting.", parent=dialog)
-            dialog.destroy()
+                messagebox.showinfo("Setting", "Save berhasil di setting.", parent=dialog)
+                dialog.destroy()
 
         tk.Button(button_bar, text="Edit", command=enable_edit, bg="#f59e0b", fg="white",
                   font=("Segoe UI", 10, "bold"), width=12, relief="flat").pack(side="left")
@@ -8150,9 +8374,7 @@ class SCADAMainUI:
             with DATA_LOCK:
                 rtu1 = dict(DATA_STORE.get("10.100.163.1", DEFAULT_DATA))
                 rtu2 = dict(DATA_STORE.get(self.GEN_1_IP, DEFAULT_DATA))
-                rtu2.update(BAY_VALUE_STORE.get("1# Generator", {}))
                 rtu3 = dict(DATA_STORE.get(self.GEN_2_IP, DEFAULT_DATA))
-                rtu3.update(BAY_VALUE_STORE.get("2# Generator", {}))
                 statuses = dict(VINCI_STATUS)
 
             # ---------------------------
@@ -8429,6 +8651,9 @@ class SCADAMainUI:
             # Report data logger is independent of UI refresh. It records one
             # engineering snapshot every 2 seconds for every configured Bay.
             start_report_logger()
+            # Publish the same live IEC-104/relay state to MQTT.  This is
+            # read-only and runs independently from the UI refresh loop.
+            start_mqtt_publisher()
 
         # UI update loop. Communication itself is handled by the IEC104 workers.
         self.root.after(VINCI_UI_REFRESH_MS, self.update_vinci_ui)
@@ -8479,18 +8704,11 @@ try:
         """Require the admin password for full Monitor-TV field editing."""
         return _monitor_tv_operator_allowed(remote_ip) and str(supplied_password) == "admin"
     def _default_operational_counter():
-        """Keep a new runtime counter at zero until the operator starts it."""
+        """Keep a new day counter at zero until the operator presses Start."""
         return {
             "running": False,
             "started_at_epoch": None,
             "accumulated_seconds": 0.0,
-        }
-
-    def _default_operational_counters():
-        """Maintain independent runtime counters for Generator 1 and 2."""
-        return {
-            "G1": _default_operational_counter(),
-            "G2": _default_operational_counter(),
         }
 
     def _normalize_operational_counter(value):
@@ -8523,7 +8741,7 @@ try:
         }
 
     def _operational_counter_snapshot(value):
-        """Calculate elapsed operational time without mutating stored state."""
+        """Calculate completed operational days without mutating stored state."""
         state = _normalize_operational_counter(value)
         elapsed = state["accumulated_seconds"]
         if state["running"] and state["started_at_epoch"] is not None:
@@ -8531,7 +8749,6 @@ try:
         started_at = state["started_at_epoch"]
         return {
             "days": int(elapsed // 86400),
-            "runtime_hours": round(elapsed / 3600.0, 2),
             "running": state["running"],
             "started_at": (
                 datetime.datetime.fromtimestamp(started_at).isoformat(timespec="seconds")
@@ -8569,7 +8786,7 @@ try:
                 name: dict(item) for name, item in default_rectangles.items()}},
             "G2": {"variables": {}, "rectangles": {
                 name: dict(item) for name, item in default_rectangles.items()}},
-            "operational_counters": _default_operational_counters(),
+            "operational_counter": _default_operational_counter(),
         }
         config_changed = False
         try:
@@ -8581,20 +8798,13 @@ try:
                     if isinstance(section, dict):
                         result[monitor_id]["variables"].update(section.get("variables", {}))
                         result[monitor_id]["rectangles"].update(section.get("rectangles", {}))
-                loaded_counters = loaded.get("operational_counters")
-                if isinstance(loaded_counters, dict):
-                    for monitor_id in ("G1", "G2"):
-                        loaded_counter = loaded_counters.get(monitor_id)
-                        normalized_counter = _normalize_operational_counter(loaded_counter)
-                        result["operational_counters"][monitor_id] = normalized_counter
-                        if not isinstance(loaded_counter, dict) or loaded_counter != normalized_counter:
-                            config_changed = True
+                loaded_counter = loaded.get("operational_counter")
+                if isinstance(loaded_counter, dict):
+                    normalized_counter = _normalize_operational_counter(loaded_counter)
+                    result["operational_counter"] = normalized_counter
+                    if loaded_counter != normalized_counter:
+                        config_changed = True
                 else:
-                    # One-time clean migration from the former shared counter.
-                    legacy_counter = loaded.get("operational_counter")
-                    migrated_counter = _normalize_operational_counter(legacy_counter)
-                    for monitor_id in ("G1", "G2"):
-                        result["operational_counters"][monitor_id] = dict(migrated_counter)
                     config_changed = True
         except Exception:
             pass
@@ -8626,9 +8836,9 @@ try:
                 elif source == "wire2" and not physical.startswith("W2_"):
                     physical = "W2_" + physical
                 existing = variables.get(str(html_id), {})
-                # Bay + Physical is the persistent selection identity. Default
-                # bindings follow ListSetting changes; values explicitly saved
-                # from the Monitor-TV editor remain authoritative.
+                # Bay + Physical is the persistent selection identity. Address
+                # and engineering fields always follow the authoritative CSV,
+                # so a Parameter Setting edit is visible on SCADA and TV too.
                 lookup_bay = str(existing.get("Bay_Name", bay)).strip() if isinstance(existing, dict) else bay
                 lookup_physical = str(existing.get("Physical_Name", physical)).strip() if isinstance(existing, dict) else physical
                 row = next((item for item in registry
@@ -8650,7 +8860,7 @@ try:
                 seeded.setdefault("source", source)
                 seeded.setdefault("key", str(key))
                 seeded.setdefault("Decimals", 2)
-                if row and seeded.get("mode") != "selected":
+                if row:
                     for column in SETTING_COLUMNS:
                         seeded[column] = row.get(column, "")
                 if variables.get(str(html_id)) != seeded:
@@ -8772,79 +8982,35 @@ try:
                 config_changed = True
         if config_changed:
             try:
-                _save_monitor_tv_config(
-                    result, preserve_operational_counters=True,
-                )
+                _save_monitor_tv_config(result)
             except Exception:
                 pass
         return result
 
-    def _save_monitor_tv_config(config, preserve_operational_counters=False):
+    def _save_monitor_tv_config(config):
         temporary = MONITOR_TV_CONFIG_PATH + ".tmp"
         with MONITOR_TV_CONFIG_LOCK:
-            if preserve_operational_counters:
-                try:
-                    with open(
-                        MONITOR_TV_CONFIG_PATH, "r", encoding="utf-8-sig",
-                    ) as handle:
-                        current = json.load(handle)
-                    current_counters = current.get("operational_counters")
-                    if isinstance(current_counters, dict):
-                        config["operational_counters"] = {
-                            monitor_id: _normalize_operational_counter(
-                                current_counters.get(monitor_id),
-                            )
-                            for monitor_id in ("G1", "G2")
-                        }
-                except Exception:
-                    pass
             with open(temporary, "w", encoding="utf-8") as handle:
                 json.dump(config, handle, ensure_ascii=False, indent=2)
-                handle.flush()
-                os.fsync(handle.fileno())
             os.replace(temporary, MONITOR_TV_CONFIG_PATH)
-
-    def _set_operational_counter(
-        monitor_id, action, start_mode="now", start_at_epoch=None,
-    ):
-        """Apply one G1/G2 runtime action and persist it atomically."""
-        monitor_id = str(monitor_id or "").strip().upper()
-        if monitor_id not in {"G1", "G2"}:
-            raise ValueError("Generator operational harus G1 atau G2")
+    def _set_operational_counter(action):
+        """Apply an operator action and persist it atomically."""
         action = str(action or "").strip().lower()
         if action not in {"reset", "start"}:
-            raise ValueError("Aksi operational time tidak valid")
-        start_mode = str(start_mode or "now").strip().lower()
-        if action == "start" and start_mode not in {"now", "custom"}:
-            raise ValueError("Pilihan waktu mulai tidak valid")
-
+            raise ValueError("Aksi operational days tidak valid")
         with MONITOR_TV_CONFIG_LOCK:
             config = _monitor_tv_config()
-            counters = config.setdefault(
-                "operational_counters", _default_operational_counters(),
-            )
+            state = _normalize_operational_counter(config.get("operational_counter"))
             if action == "reset":
-                state = _default_operational_counter()
-            else:
-                now = time.time()
-                if start_mode == "now":
-                    selected_start = now
-                else:
-                    try:
-                        selected_start = float(start_at_epoch)
-                    except (TypeError, ValueError):
-                        raise ValueError("Tanggal dan jam mulai wajib diisi")
-                    if not math.isfinite(selected_start) or selected_start < 0:
-                        raise ValueError("Tanggal dan jam mulai tidak valid")
-                    if selected_start > now + 1.0:
-                        raise ValueError("Waktu mulai tidak boleh melebihi waktu sekarang")
                 state = {
-                    "running": True,
-                    "started_at_epoch": selected_start,
+                    "running": False,
+                    "started_at_epoch": None,
                     "accumulated_seconds": 0.0,
                 }
-            counters[monitor_id] = state
-            config["operational_counters"] = counters
+            elif not state["running"]:
+                state["running"] = True
+                state["started_at_epoch"] = time.time()
+            config["operational_counter"] = state
             _save_monitor_tv_config(config)
         return _operational_counter_snapshot(state)
 
@@ -8958,9 +9124,6 @@ try:
             )
             raw_bay_values = {bay: dict(values) for bay, values in RAW_BAY_VALUE_STORE.items()}
             raw_ip_values = {ip: dict(values) for ip, values in RAW_STORE.items()}
-            engineered_bay_values = {
-                bay: dict(values) for bay, values in BAY_VALUE_STORE.items()
-            }
 
         now = time.localtime()
         prefix = str(wire_prefix or "").strip()
@@ -9000,35 +9163,16 @@ try:
 
         for html_id, (source, data_key) in field_map.items():
             payload[html_id] = read_source(source, data_key)
-        # Apply the Monitor-TV binding to the RAW point. This makes Coefficient,
-        # CT/PT, Formula, and Add Offset saved in the editor affect the display
-        # instead of reusing the ListSetting-engineered value unchanged.
+        # Full ListSetting address override. ASDU/IOA and engineering metadata
+        # are persisted for audit/editing; the runtime value is taken from the
+        # exact Bay_Name + Physical_Name calculated by the IEC setting engine.
         for html_id, item in configured_variables.items():
             if not isinstance(item, dict):
                 continue
             bay = str(item.get("Bay_Name", "")).strip()
             physical = str(item.get("Physical_Name", "")).strip()
-            if not bay or not physical:
-                continue
-            formula = _norm_formula(item.get("Formula"))
-            raw_value = None
-            if formula in {"DERIVED_P", "DERIVED_Q", "DERIVED_I"}:
-                raw_value = 0.0
-            else:
-                raw_value = raw_bay_values.get(bay, {}).get(physical)
-                if raw_value is None:
-                    ip = str(item.get("Device_Addr", "")).strip()
-                    raw_value = raw_ip_values.get(ip, {}).get(physical)
-            if raw_value is None:
-                continue
-            try:
-                calculated = _calculate_formula(
-                    float(raw_value), item, engineered_bay_values.get(bay, {}),
-                )
-                if math.isfinite(float(calculated)):
-                    payload[str(html_id)] = float(calculated)
-            except Exception:
-                continue
+            if bay and physical:
+                payload[str(html_id)] = read_value(BAY_VALUE_STORE.get(bay, {}), physical)
         # Hindari menampilkan angka cache dari RTU yang sedang offline.
         for html_id, (source, data_key) in field_map.items():
             if source.startswith("measure_control") and not generator_online:
@@ -9096,13 +9240,10 @@ try:
             ),
             "mapping": MONITOR_TARGETS,
         }
-        config = _monitor_tv_config()
-        counters = config.get("operational_counters", {})
-        for monitor_id, panel in (
-            ("G1", result["p1"]),
-            ("G2", result["p2"]),
-        ):
-            operational = _operational_counter_snapshot(counters.get(monitor_id))
+        operational = _operational_counter_snapshot(
+            _monitor_tv_config().get("operational_counter")
+        )
+        for panel in (result["p1"], result["p2"]):
             panel["operational_days"] = operational["days"]
             panel["operational_counter"] = operational
         return result
@@ -9393,35 +9534,18 @@ try:
                 request_body = json.loads(self.rfile.read(length).decode("utf-8"))
                 if path == "/OperationalDays.json":
                     if not isinstance(request_body, dict):
-                        raise ValueError("Permintaan operational time tidak valid")
-                    action = str(request_body.get("action", "")).strip().lower()
-                    monitor_id = str(request_body.get("monitor_id", "")).strip().upper()
-                    start_mode = str(request_body.get("start_mode", "now")).strip().lower()
-                    state = _set_operational_counter(
-                        monitor_id,
-                        action,
-                        start_mode,
-                        request_body.get("start_at_epoch"),
-                    )
+                        raise ValueError("Permintaan operational days tidak valid")
+                    state = _set_operational_counter(request_body.get("action"))
                     message = (
-                        f"{monitor_id} operational time direset ke 0"
-                        if action == "reset"
-                        else (
-                            f"{monitor_id} waktu mulai manual berhasil disimpan"
-                            if start_mode == "custom"
-                            else f"{monitor_id} runtime dimulai dari waktu sekarang"
-                        )
+                        "Operational days direset ke 0"
+                        if request_body.get("action") == "reset"
+                        else "Penghitung operational days dimulai"
                     )
                     response = {"ok": True, "message": message, "state": state}
                 else:
                     config = request_body
                     if not isinstance(config, dict) or not all(k in config for k in ("G1", "G2")):
                         raise ValueError("Konfigurasi TV tidak valid")
-                    # Runtime state is owned by OperationalDays.json. Do not let
-                    # a stale field-editor snapshot overwrite a running counter.
-                    current_config = _monitor_tv_config()
-                    config["operational_counters"] = current_config["operational_counters"]
-                    config.pop("operational_counter", None)
                     _save_monitor_tv_config(config)
                     response = {"ok": True, "message": "Save berhasil"}
                 body = json.dumps(response, ensure_ascii=False).encode("utf-8")
