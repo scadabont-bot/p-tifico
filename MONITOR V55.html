@@ -1810,7 +1810,7 @@ body.monitor-g2 .monitor-footer{
     display:flex;
 }
 .operational-card{
-    width:440px;
+    width:520px;
     max-width:94vw;
     padding:24px;
     border:1px solid #3b82f6;
@@ -1858,6 +1858,54 @@ body.monitor-g2 .monitor-footer{
     grid-column:1 / -1;
     color:#cbd5e1;
     font-size:13px;
+}
+#operational-modal-runtime{
+    color:#38bdf8;
+    font-family:Consolas,"Courier New",monospace;
+    font-size:20px;
+}
+.operational-runtime-label{
+    color:#94a3b8;
+    font-size:12px;
+    font-weight:700;
+    text-align:right;
+    text-transform:uppercase;
+}
+.operational-start-options{
+    display:grid;
+    gap:10px;
+    margin:0 0 18px;
+    padding:14px;
+    border:1px solid #334155;
+    border-radius:9px;
+}
+.operational-start-options legend{
+    padding:0 6px;
+    color:#cbd5e1;
+    font-size:13px;
+    font-weight:700;
+}
+.operational-option{
+    display:flex;
+    align-items:center;
+    gap:8px;
+    color:#e2e8f0;
+    font-size:14px;
+}
+#operational-start-datetime{
+    box-sizing:border-box;
+    width:100%;
+    padding:9px 11px;
+    border:1px solid #475569;
+    border-radius:7px;
+    background:#020617;
+    color:#f8fafc;
+    font:14px Consolas,"Courier New",monospace;
+    color-scheme:dark;
+}
+#operational-start-datetime:disabled{
+    cursor:not-allowed;
+    opacity:.45;
 }
 .operational-actions{
     display:flex;
@@ -2553,16 +2601,30 @@ body.monitor-g2 .monitor-footer{
     aria-hidden="true"
 >
     <div class="operational-card">
-        <h2 id="operational-modal-title">Operational Days</h2>
-        <p class="operational-hint">Hitungan dimulai saat tombol Start ditekan, lalu bertambah setiap 24 jam.</p>
+        <h2 id="operational-modal-title">Operational Time</h2>
+        <p class="operational-hint">Pilih waktu mulai sekarang atau tentukan tanggal dan jam awal operasi.</p>
         <div class="operational-summary">
             <strong id="operational-modal-days">0 Days</strong>
             <span id="operational-modal-status">STOPPED</span>
+            <strong id="operational-modal-runtime">00:00:00</strong>
+            <span class="operational-runtime-label">Run Time</span>
             <span class="operational-started" id="operational-modal-started">Belum dimulai</span>
         </div>
+        <fieldset class="operational-start-options">
+            <legend>Waktu mulai G1/G2</legend>
+            <label class="operational-option">
+                <input type="radio" name="operational-start-mode" value="now" checked />
+                Otomatis berdasarkan waktu sekarang
+            </label>
+            <label class="operational-option">
+                <input type="radio" name="operational-start-mode" value="custom" />
+                Tentukan tanggal dan jam
+            </label>
+            <input id="operational-start-datetime" type="datetime-local" step="1" disabled />
+        </fieldset>
         <div class="operational-actions">
             <button id="operational-reset" type="button">Reset ke 0</button>
-            <button id="operational-start" type="button">Start</button>
+            <button id="operational-start" type="button">Terapkan Start</button>
             <button id="operational-close" type="button">Tutup</button>
         </div>
         <p id="operational-message" aria-live="polite"></p>
@@ -2986,13 +3048,42 @@ const SCALE_MAP={
 let operationalCounterState={
     days:0,
     running:false,
-    started_at:null
+    started_at:null,
+    elapsed_seconds:0
 };
+
+function formatOperationalRuntime(value){
+    const total=Math.max(0,Math.floor(Number(value)||0));
+    const hours=Math.floor(total/3600);
+    const minutes=Math.floor((total%3600)/60);
+    const seconds=total%60;
+    return String(hours).padStart(2,"0")+":"+
+        String(minutes).padStart(2,"0")+":"+
+        String(seconds).padStart(2,"0");
+}
+
+function toLocalDateTimeValue(value){
+    const parsed=value ? new Date(value) : new Date();
+    const valid=Number.isFinite(parsed.getTime()) ? parsed : new Date();
+    const local=new Date(valid.getTime()-valid.getTimezoneOffset()*60000);
+    return local.toISOString().slice(0,19);
+}
+
+function updateOperationalStartMode(){
+    const custom=document.querySelector('input[name="operational-start-mode"][value="custom"]').checked;
+    const input=document.getElementById("operational-start-datetime");
+    input.disabled=!custom;
+    if(custom&&!input.value){
+        input.value=toLocalDateTimeValue(operationalCounterState.started_at);
+    }
+}
 
 function renderOperationalCounterState(){
     const days=Math.max(0,Math.floor(Number(operationalCounterState.days)||0));
     const running=Boolean(operationalCounterState.running);
     document.getElementById("operational-modal-days").textContent=days+" Days";
+    document.getElementById("operational-modal-runtime").textContent=
+        formatOperationalRuntime(operationalCounterState.elapsed_seconds);
     const status=document.getElementById("operational-modal-status");
     status.textContent=running ? "RUNNING" : "STOPPED";
     status.classList.toggle("running",running);
@@ -3000,12 +3091,20 @@ function renderOperationalCounterState(){
     started.textContent=operationalCounterState.started_at
         ? "Mulai: "+new Date(operationalCounterState.started_at).toLocaleString("id-ID")
         : "Belum dimulai";
-    document.getElementById("operational-start").disabled=running;
+    document.getElementById("operational-start").textContent=
+        running ? "Ubah Waktu Start" : "Terapkan Start";
 }
 
 function openOperationalModal(){
     const modal=document.getElementById("operational-modal");
+    document.getElementById("operational-modal-title").textContent=
+        "Operational Time — "+monitorId;
     document.getElementById("operational-message").textContent="";
+    const nowMode=document.querySelector('input[name="operational-start-mode"][value="now"]');
+    nowMode.checked=true;
+    document.getElementById("operational-start-datetime").value=
+        toLocalDateTimeValue(operationalCounterState.started_at);
+    updateOperationalStartMode();
     renderOperationalCounterState();
     modal.classList.add("open");
     modal.setAttribute("aria-hidden","false");
@@ -3022,13 +3121,29 @@ function closeOperationalModal(){
 async function applyOperationalAction(action){
     const message=document.getElementById("operational-message");
     const buttons=document.querySelectorAll(".operational-actions button");
-    buttons.forEach(button=>button.disabled=true);
-    message.textContent=action==="reset" ? "Mereset penghitung..." : "Memulai penghitung...";
+    const payload={action,monitor_id:monitorId};
     try{
+        if(action==="start"){
+            const mode=document.querySelector('input[name="operational-start-mode"]:checked')?.value||"now";
+            payload.start_mode=mode;
+            if(mode==="custom"){
+                const value=document.getElementById("operational-start-datetime").value;
+                const selected=new Date(value);
+                if(!value||!Number.isFinite(selected.getTime())){
+                    throw new Error("Tanggal dan jam mulai wajib diisi.");
+                }
+                if(selected.getTime()>Date.now()+1000){
+                    throw new Error("Waktu mulai tidak boleh melebihi waktu sekarang.");
+                }
+                payload.start_at_epoch=selected.getTime()/1000;
+            }
+        }
+        buttons.forEach(button=>button.disabled=true);
+        message.textContent=action==="reset" ? "Mereset penghitung..." : "Menyimpan waktu mulai...";
         const response=await fetch("/OperationalDays.json",{
             method:"POST",
             headers:{"Content-Type":"application/json"},
-            body:JSON.stringify({action})
+            body:JSON.stringify(payload)
         });
         let result={};
         try{
@@ -3049,8 +3164,8 @@ async function applyOperationalAction(action){
     }catch(error){
         message.textContent=error.message||"Pengaturan gagal.";
     }finally{
-        document.getElementById("operational-reset").disabled=false;
-        document.getElementById("operational-close").disabled=false;
+        buttons.forEach(button=>button.disabled=false);
+        updateOperationalStartMode();
         renderOperationalCounterState();
     }
 }
@@ -3084,7 +3199,8 @@ function updatePanel(p){
     operationalCounterState={
         days:operationalDays,
         running:Boolean(p.operational_counter?.running),
-        started_at:p.operational_counter?.started_at??null
+        started_at:p.operational_counter?.started_at??null,
+        elapsed_seconds:Number(p.operational_counter?.elapsed_seconds??0)||0
     };
     setLarge("days",String(operationalDays));
     renderOperationalCounterState();
@@ -3525,6 +3641,9 @@ document.getElementById("operational-start").addEventListener(
     "click",
     ()=>applyOperationalAction("start")
 );
+document.querySelectorAll('input[name="operational-start-mode"]').forEach(input=>{
+    input.addEventListener("change",updateOperationalStartMode);
+});
 document.getElementById("operational-modal").addEventListener("click",event=>{
     if(event.target.id==="operational-modal"){
         closeOperationalModal();
@@ -3579,7 +3698,46 @@ async function openTvEditor(kind,name){
 }
 async function saveTvEditor(){
  const numberValue=(id,fallback)=>{const raw=document.getElementById(id).value.trim();const value=Number(raw);return raw!==""&&Number.isFinite(value)?value:fallback;};
- const section=tvConfig[monitorId]||(tvConfig[monitorId]={variables:{},rectangles:{}});const chosen=tvActiveOptions[Number(document.getElementById("tv-setting-option").value)]||{};const address={source:document.getElementById("tv-source").value,key:document.getElementById("tv-key").value.trim(),Device_Addr:document.getElementById("tv-device").value.trim(),Bay_Name:document.getElementById("tv-bay").value.trim(),Physical_Name:document.getElementById("tv-physical").value.trim(),Info_Name:document.getElementById("tv-info").value.trim(),Info_Index:chosen.Info_Index??"",ASDU:numberValue("tv-asdu",0),IOA:numberValue("tv-ioa",0),Coefficient:numberValue("tv-coefficient",1),CTPT:numberValue("tv-ctpt",1),Formula:document.getElementById("tv-formula").value.trim(),Add_Offset:numberValue("tv-offset",0),Unit:document.getElementById("tv-unit").value.trim(),Decimals:numberValue("tv-decimal",2),Source_Kind:chosen.Source_Kind||(document.getElementById("tv-source").value==="status"?"rectangle_status_csv":"")};if(tvEditTarget.kind==="variable")section.variables[tvEditTarget.name]=address;else{const trueColor=document.getElementById("tv-true-color").value,falseColor=document.getElementById("tv-false-color").value;section.rectangles[tvEditTarget.name]={...address,field:address.key,label:document.getElementById("tv-rectangle-label").value.trim()||tvEditTarget.name,operator:"=",threshold:1,true_color:trueColor,false_color:falseColor,flow:document.getElementById("tv-flow").value,active_color:trueColor,inactive_color:falseColor};}
+ const section=tvConfig[monitorId]||(tvConfig[monitorId]={variables:{},rectangles:{}});
+ const chosen=tvActiveOptions[Number(document.getElementById("tv-setting-option").value)]||{};
+ const address={
+  mode:"selected",
+  source:document.getElementById("tv-source").value,
+  key:document.getElementById("tv-key").value.trim(),
+  Device_Addr:document.getElementById("tv-device").value.trim(),
+  Bay_Name:document.getElementById("tv-bay").value.trim(),
+  Physical_Name:document.getElementById("tv-physical").value.trim(),
+  Info_Name:document.getElementById("tv-info").value.trim(),
+  Info_Index:chosen.Info_Index??"",
+  ASDU:numberValue("tv-asdu",0),
+  IOA:numberValue("tv-ioa",0),
+  Coefficient:numberValue("tv-coefficient",1),
+  CTPT:numberValue("tv-ctpt",1),
+  Formula:document.getElementById("tv-formula").value.trim(),
+  Add_Offset:numberValue("tv-offset",0),
+  Unit:document.getElementById("tv-unit").value.trim(),
+  Decimals:numberValue("tv-decimal",2),
+  Source_Kind:chosen.Source_Kind||
+   (document.getElementById("tv-source").value==="status"?"rectangle_status_csv":"")
+ };
+ if(tvEditTarget.kind==="variable"){
+  section.variables[tvEditTarget.name]=address;
+ }else{
+  const trueColor=document.getElementById("tv-true-color").value;
+  const falseColor=document.getElementById("tv-false-color").value;
+  section.rectangles[tvEditTarget.name]={
+   ...address,
+   field:address.key,
+   label:document.getElementById("tv-rectangle-label").value.trim()||tvEditTarget.name,
+   operator:"=",
+   threshold:1,
+   true_color:trueColor,
+   false_color:falseColor,
+   flow:document.getElementById("tv-flow").value,
+   active_color:trueColor,
+   inactive_color:falseColor
+  };
+ }
  const message=document.getElementById("tv-editor-message");message.textContent="Menyimpan...";setEditorDisabled(true);
  try{const response=await fetch("/MonitorTVConfig.json",{method:"POST",headers:{"Content-Type":"application/json","X-SCADA-Admin":window.tvAdminPassword||""},body:JSON.stringify(tvConfig)});let result={};try{result=await response.json();}catch(_error){}if(!response.ok)throw new Error(result.message||`Save gagal (HTTP ${response.status})`);message.textContent=result.message||"Save berhasil";setTimeout(()=>document.getElementById("tv-editor").classList.remove("open"),700);}catch(error){message.textContent=error.message||"Save gagal";setEditorDisabled(false);}
 }

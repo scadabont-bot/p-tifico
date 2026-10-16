@@ -8479,11 +8479,18 @@ try:
         """Require the admin password for full Monitor-TV field editing."""
         return _monitor_tv_operator_allowed(remote_ip) and str(supplied_password) == "admin"
     def _default_operational_counter():
-        """Keep a new day counter at zero until the operator presses Start."""
+        """Keep a new runtime counter at zero until the operator starts it."""
         return {
             "running": False,
             "started_at_epoch": None,
             "accumulated_seconds": 0.0,
+        }
+
+    def _default_operational_counters():
+        """Maintain independent runtime counters for Generator 1 and 2."""
+        return {
+            "G1": _default_operational_counter(),
+            "G2": _default_operational_counter(),
         }
 
     def _normalize_operational_counter(value):
@@ -8516,7 +8523,7 @@ try:
         }
 
     def _operational_counter_snapshot(value):
-        """Calculate completed operational days without mutating stored state."""
+        """Calculate elapsed operational time without mutating stored state."""
         state = _normalize_operational_counter(value)
         elapsed = state["accumulated_seconds"]
         if state["running"] and state["started_at_epoch"] is not None:
@@ -8524,6 +8531,7 @@ try:
         started_at = state["started_at_epoch"]
         return {
             "days": int(elapsed // 86400),
+            "runtime_hours": round(elapsed / 3600.0, 2),
             "running": state["running"],
             "started_at": (
                 datetime.datetime.fromtimestamp(started_at).isoformat(timespec="seconds")
@@ -8561,7 +8569,7 @@ try:
                 name: dict(item) for name, item in default_rectangles.items()}},
             "G2": {"variables": {}, "rectangles": {
                 name: dict(item) for name, item in default_rectangles.items()}},
-            "operational_counter": _default_operational_counter(),
+            "operational_counters": _default_operational_counters(),
         }
         config_changed = False
         try:
@@ -8573,13 +8581,20 @@ try:
                     if isinstance(section, dict):
                         result[monitor_id]["variables"].update(section.get("variables", {}))
                         result[monitor_id]["rectangles"].update(section.get("rectangles", {}))
-                loaded_counter = loaded.get("operational_counter")
-                if isinstance(loaded_counter, dict):
-                    normalized_counter = _normalize_operational_counter(loaded_counter)
-                    result["operational_counter"] = normalized_counter
-                    if loaded_counter != normalized_counter:
-                        config_changed = True
+                loaded_counters = loaded.get("operational_counters")
+                if isinstance(loaded_counters, dict):
+                    for monitor_id in ("G1", "G2"):
+                        loaded_counter = loaded_counters.get(monitor_id)
+                        normalized_counter = _normalize_operational_counter(loaded_counter)
+                        result["operational_counters"][monitor_id] = normalized_counter
+                        if not isinstance(loaded_counter, dict) or loaded_counter != normalized_counter:
+                            config_changed = True
                 else:
+                    # One-time clean migration from the former shared counter.
+                    legacy_counter = loaded.get("operational_counter")
+                    migrated_counter = _normalize_operational_counter(legacy_counter)
+                    for monitor_id in ("G1", "G2"):
+                        result["operational_counters"][monitor_id] = dict(migrated_counter)
                     config_changed = True
         except Exception:
             pass
@@ -8611,9 +8626,9 @@ try:
                 elif source == "wire2" and not physical.startswith("W2_"):
                     physical = "W2_" + physical
                 existing = variables.get(str(html_id), {})
-                # Bay + Physical is the persistent selection identity. Address
-                # and engineering fields always follow the authoritative CSV,
-                # so a Parameter Setting edit is visible on SCADA and TV too.
+                # Bay + Physical is the persistent selection identity. Default
+                # bindings follow ListSetting changes; values explicitly saved
+                # from the Monitor-TV editor remain authoritative.
                 lookup_bay = str(existing.get("Bay_Name", bay)).strip() if isinstance(existing, dict) else bay
                 lookup_physical = str(existing.get("Physical_Name", physical)).strip() if isinstance(existing, dict) else physical
                 row = next((item for item in registry
@@ -8635,7 +8650,7 @@ try:
                 seeded.setdefault("source", source)
                 seeded.setdefault("key", str(key))
                 seeded.setdefault("Decimals", 2)
-                if row:
+                if row and seeded.get("mode") != "selected":
                     for column in SETTING_COLUMNS:
                         seeded[column] = row.get(column, "")
                 if variables.get(str(html_id)) != seeded:
@@ -8757,35 +8772,79 @@ try:
                 config_changed = True
         if config_changed:
             try:
-                _save_monitor_tv_config(result)
+                _save_monitor_tv_config(
+                    result, preserve_operational_counters=True,
+                )
             except Exception:
                 pass
         return result
 
-    def _save_monitor_tv_config(config):
+    def _save_monitor_tv_config(config, preserve_operational_counters=False):
         temporary = MONITOR_TV_CONFIG_PATH + ".tmp"
         with MONITOR_TV_CONFIG_LOCK:
+            if preserve_operational_counters:
+                try:
+                    with open(
+                        MONITOR_TV_CONFIG_PATH, "r", encoding="utf-8-sig",
+                    ) as handle:
+                        current = json.load(handle)
+                    current_counters = current.get("operational_counters")
+                    if isinstance(current_counters, dict):
+                        config["operational_counters"] = {
+                            monitor_id: _normalize_operational_counter(
+                                current_counters.get(monitor_id),
+                            )
+                            for monitor_id in ("G1", "G2")
+                        }
+                except Exception:
+                    pass
             with open(temporary, "w", encoding="utf-8") as handle:
                 json.dump(config, handle, ensure_ascii=False, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
             os.replace(temporary, MONITOR_TV_CONFIG_PATH)
-    def _set_operational_counter(action):
-        """Apply an operator action and persist it atomically."""
+
+    def _set_operational_counter(
+        monitor_id, action, start_mode="now", start_at_epoch=None,
+    ):
+        """Apply one G1/G2 runtime action and persist it atomically."""
+        monitor_id = str(monitor_id or "").strip().upper()
+        if monitor_id not in {"G1", "G2"}:
+            raise ValueError("Generator operational harus G1 atau G2")
         action = str(action or "").strip().lower()
         if action not in {"reset", "start"}:
-            raise ValueError("Aksi operational days tidak valid")
+            raise ValueError("Aksi operational time tidak valid")
+        start_mode = str(start_mode or "now").strip().lower()
+        if action == "start" and start_mode not in {"now", "custom"}:
+            raise ValueError("Pilihan waktu mulai tidak valid")
+
         with MONITOR_TV_CONFIG_LOCK:
             config = _monitor_tv_config()
-            state = _normalize_operational_counter(config.get("operational_counter"))
+            counters = config.setdefault(
+                "operational_counters", _default_operational_counters(),
+            )
             if action == "reset":
+                state = _default_operational_counter()
+            else:
+                now = time.time()
+                if start_mode == "now":
+                    selected_start = now
+                else:
+                    try:
+                        selected_start = float(start_at_epoch)
+                    except (TypeError, ValueError):
+                        raise ValueError("Tanggal dan jam mulai wajib diisi")
+                    if not math.isfinite(selected_start) or selected_start < 0:
+                        raise ValueError("Tanggal dan jam mulai tidak valid")
+                    if selected_start > now + 1.0:
+                        raise ValueError("Waktu mulai tidak boleh melebihi waktu sekarang")
                 state = {
-                    "running": False,
-                    "started_at_epoch": None,
+                    "running": True,
+                    "started_at_epoch": selected_start,
                     "accumulated_seconds": 0.0,
                 }
-            elif not state["running"]:
-                state["running"] = True
-                state["started_at_epoch"] = time.time()
-            config["operational_counter"] = state
+            counters[monitor_id] = state
+            config["operational_counters"] = counters
             _save_monitor_tv_config(config)
         return _operational_counter_snapshot(state)
 
@@ -8899,6 +8958,9 @@ try:
             )
             raw_bay_values = {bay: dict(values) for bay, values in RAW_BAY_VALUE_STORE.items()}
             raw_ip_values = {ip: dict(values) for ip, values in RAW_STORE.items()}
+            engineered_bay_values = {
+                bay: dict(values) for bay, values in BAY_VALUE_STORE.items()
+            }
 
         now = time.localtime()
         prefix = str(wire_prefix or "").strip()
@@ -8938,16 +9000,35 @@ try:
 
         for html_id, (source, data_key) in field_map.items():
             payload[html_id] = read_source(source, data_key)
-        # Full ListSetting address override. ASDU/IOA and engineering metadata
-        # are persisted for audit/editing; the runtime value is taken from the
-        # exact Bay_Name + Physical_Name calculated by the IEC setting engine.
+        # Apply the Monitor-TV binding to the RAW point. This makes Coefficient,
+        # CT/PT, Formula, and Add Offset saved in the editor affect the display
+        # instead of reusing the ListSetting-engineered value unchanged.
         for html_id, item in configured_variables.items():
             if not isinstance(item, dict):
                 continue
             bay = str(item.get("Bay_Name", "")).strip()
             physical = str(item.get("Physical_Name", "")).strip()
-            if bay and physical:
-                payload[str(html_id)] = read_value(BAY_VALUE_STORE.get(bay, {}), physical)
+            if not bay or not physical:
+                continue
+            formula = _norm_formula(item.get("Formula"))
+            raw_value = None
+            if formula in {"DERIVED_P", "DERIVED_Q", "DERIVED_I"}:
+                raw_value = 0.0
+            else:
+                raw_value = raw_bay_values.get(bay, {}).get(physical)
+                if raw_value is None:
+                    ip = str(item.get("Device_Addr", "")).strip()
+                    raw_value = raw_ip_values.get(ip, {}).get(physical)
+            if raw_value is None:
+                continue
+            try:
+                calculated = _calculate_formula(
+                    float(raw_value), item, engineered_bay_values.get(bay, {}),
+                )
+                if math.isfinite(float(calculated)):
+                    payload[str(html_id)] = float(calculated)
+            except Exception:
+                continue
         # Hindari menampilkan angka cache dari RTU yang sedang offline.
         for html_id, (source, data_key) in field_map.items():
             if source.startswith("measure_control") and not generator_online:
@@ -9015,10 +9096,13 @@ try:
             ),
             "mapping": MONITOR_TARGETS,
         }
-        operational = _operational_counter_snapshot(
-            _monitor_tv_config().get("operational_counter")
-        )
-        for panel in (result["p1"], result["p2"]):
+        config = _monitor_tv_config()
+        counters = config.get("operational_counters", {})
+        for monitor_id, panel in (
+            ("G1", result["p1"]),
+            ("G2", result["p2"]),
+        ):
+            operational = _operational_counter_snapshot(counters.get(monitor_id))
             panel["operational_days"] = operational["days"]
             panel["operational_counter"] = operational
         return result
@@ -9309,18 +9393,35 @@ try:
                 request_body = json.loads(self.rfile.read(length).decode("utf-8"))
                 if path == "/OperationalDays.json":
                     if not isinstance(request_body, dict):
-                        raise ValueError("Permintaan operational days tidak valid")
-                    state = _set_operational_counter(request_body.get("action"))
+                        raise ValueError("Permintaan operational time tidak valid")
+                    action = str(request_body.get("action", "")).strip().lower()
+                    monitor_id = str(request_body.get("monitor_id", "")).strip().upper()
+                    start_mode = str(request_body.get("start_mode", "now")).strip().lower()
+                    state = _set_operational_counter(
+                        monitor_id,
+                        action,
+                        start_mode,
+                        request_body.get("start_at_epoch"),
+                    )
                     message = (
-                        "Operational days direset ke 0"
-                        if request_body.get("action") == "reset"
-                        else "Penghitung operational days dimulai"
+                        f"{monitor_id} operational time direset ke 0"
+                        if action == "reset"
+                        else (
+                            f"{monitor_id} waktu mulai manual berhasil disimpan"
+                            if start_mode == "custom"
+                            else f"{monitor_id} runtime dimulai dari waktu sekarang"
+                        )
                     )
                     response = {"ok": True, "message": message, "state": state}
                 else:
                     config = request_body
                     if not isinstance(config, dict) or not all(k in config for k in ("G1", "G2")):
                         raise ValueError("Konfigurasi TV tidak valid")
+                    # Runtime state is owned by OperationalDays.json. Do not let
+                    # a stale field-editor snapshot overwrite a running counter.
+                    current_config = _monitor_tv_config()
+                    config["operational_counters"] = current_config["operational_counters"]
+                    config.pop("operational_counter", None)
                     _save_monitor_tv_config(config)
                     response = {"ok": True, "message": "Save berhasil"}
                 body = json.dumps(response, ensure_ascii=False).encode("utf-8")
