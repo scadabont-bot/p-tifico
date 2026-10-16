@@ -9075,9 +9075,7 @@ try:
                   .replace("auxiliary1", "auxiliary2")
                   .replace("measure_control1", "measure_control2"),
             (
-                {"Uab": "Uab_L", "Ubc": "Ubc_L", "Uca": "Uca_L"}.get(data_key, data_key)
-                if source == "voltage"
-                else data_key
+                data_key
             ),
         )
         for html_id, (source, data_key) in MONITOR_TV_FIELD_MAP_G1.items()
