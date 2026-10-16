@@ -8836,9 +8836,9 @@ try:
                 elif source == "wire2" and not physical.startswith("W2_"):
                     physical = "W2_" + physical
                 existing = variables.get(str(html_id), {})
-                # Bay + Physical is the persistent selection identity. Address
-                # and engineering fields always follow the authoritative CSV,
-                # so a Parameter Setting edit is visible on SCADA and TV too.
+                # Bay + Physical is the persistent selection identity. Default
+                # bindings follow ListSetting changes; values explicitly saved
+                # from the Monitor-TV editor remain authoritative.
                 lookup_bay = str(existing.get("Bay_Name", bay)).strip() if isinstance(existing, dict) else bay
                 lookup_physical = str(existing.get("Physical_Name", physical)).strip() if isinstance(existing, dict) else physical
                 row = next((item for item in registry
@@ -8860,7 +8860,7 @@ try:
                 seeded.setdefault("source", source)
                 seeded.setdefault("key", str(key))
                 seeded.setdefault("Decimals", 2)
-                if row:
+                if row and seeded.get("mode") != "selected":
                     for column in SETTING_COLUMNS:
                         seeded[column] = row.get(column, "")
                 if variables.get(str(html_id)) != seeded:
