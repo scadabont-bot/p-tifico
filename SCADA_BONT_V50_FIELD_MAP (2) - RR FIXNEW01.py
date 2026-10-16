@@ -694,6 +694,17 @@ def _config_sync_worker():
     """Pull newer configuration from the paired PC about once per second."""
     from urllib.request import Request, urlopen
     config = _communication_config()
+    local_ip = _local_scada_ip()
+    master_ip = str(config.get("master_ip", "")).strip()
+    # In master/slave mode the master is the single source of truth for
+    # operator-editable configuration.  A slave may pull from the master, but
+    # the master must never pull an older/slave snapshot back and overwrite a
+    # just-saved Monitor-TV CT/PT setting.
+    is_authoritative_master = (
+        str(config.get("mode", "")).strip().lower() == "master_slave"
+        and local_ip
+        and local_ip == master_ip
+    )
     remote_ip = _parallel_peer_ip()
     port = int(config.get("relay_port", 5001))
     token = str(config.get("relay_token", ""))
@@ -713,7 +724,7 @@ def _config_sync_worker():
                 _config_sync_version(entry) > _config_sync_version(local_files.get(name, {}))
                 for name, entry in remote_files.items() if isinstance(entry, dict)
             )
-            if has_newer:
+            if has_newer and not is_authoritative_master:
                 request = Request(snapshot_url, headers=headers)
                 with urlopen(request, timeout=4.0) as response:
                     snapshot = json.loads(response.read().decode("utf-8"))
@@ -8980,11 +8991,12 @@ try:
                 for column in analog_only_columns:
                     rectangle.pop(column, None)
                 config_changed = True
-        if config_changed:
-            try:
-                _save_monitor_tv_config(result)
-            except Exception:
-                pass
+        # Do not persist normalization from this read path.  Monitor-TV is
+        # served by more than one SCADA process, so saving a result assembled
+        # from a stale snapshot can overwrite a CT/PT edit that was just
+        # submitted by the operator.  Explicit POST requests remain the only
+        # writer for MonitorTVConfig.json; the normalized result is still used
+        # in memory for the current response.
         return result
 
     def _save_monitor_tv_config(config):
@@ -9124,6 +9136,7 @@ try:
             )
             raw_bay_values = {bay: dict(values) for bay, values in RAW_BAY_VALUE_STORE.items()}
             raw_ip_values = {ip: dict(values) for ip, values in RAW_STORE.items()}
+            engineered_bay_values = {bay: dict(values) for bay, values in BAY_VALUE_STORE.items()}
 
         now = time.localtime()
         prefix = str(wire_prefix or "").strip()
@@ -9163,16 +9176,41 @@ try:
 
         for html_id, (source, data_key) in field_map.items():
             payload[html_id] = read_source(source, data_key)
-        # Full ListSetting address override. ASDU/IOA and engineering metadata
-        # are persisted for audit/editing; the runtime value is taken from the
-        # exact Bay_Name + Physical_Name calculated by the IEC setting engine.
+        # Apply the Monitor-TV binding to the RAW point. This makes Coefficient,
+        # CT/PT, Formula, and Add Offset saved in the editor affect the display
+        # instead of reusing the ListSetting-engineered value unchanged.
         for html_id, item in configured_variables.items():
             if not isinstance(item, dict):
                 continue
             bay = str(item.get("Bay_Name", "")).strip()
             physical = str(item.get("Physical_Name", "")).strip()
-            if bay and physical:
-                payload[str(html_id)] = read_value(BAY_VALUE_STORE.get(bay, {}), physical)
+            if not bay or not physical:
+                continue
+            raw_physical = _runtime_physical_name(item) or physical
+            formula = _norm_formula(item.get("Formula"))
+            raw_value = None
+            if formula in {"DERIVED_P", "DERIVED_Q", "DERIVED_I"}:
+                raw_value = 0.0
+            else:
+                raw_value = raw_bay_values.get(bay, {}).get(raw_physical)
+                if raw_value is None:
+                    ip = str(item.get("Device_Addr", "")).strip()
+                    raw_value = raw_ip_values.get(ip, {}).get(raw_physical)
+                if raw_value is None and raw_physical != physical:
+                    raw_value = raw_bay_values.get(bay, {}).get(physical)
+                if raw_value is None:
+                    ip = str(item.get("Device_Addr", "")).strip()
+                    raw_value = raw_ip_values.get(ip, {}).get(physical)
+            if raw_value is None:
+                continue
+            try:
+                calculated = _calculate_formula(
+                    float(raw_value), item, engineered_bay_values.get(bay, {}),
+                )
+                if math.isfinite(float(calculated)):
+                    payload[str(html_id)] = float(calculated)
+            except Exception:
+                continue
         # Hindari menampilkan angka cache dari RTU yang sedang offline.
         for html_id, (source, data_key) in field_map.items():
             if source.startswith("measure_control") and not generator_online:
