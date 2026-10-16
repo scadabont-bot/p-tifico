@@ -1,5 +1,5 @@
 {
-  "enabled": true,
+  "enabled": false,
   "host": "mqtt.arita.co.id",
   "port": 8883,
   "tls": true,

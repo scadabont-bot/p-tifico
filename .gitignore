@@ -1,0 +1,19 @@
+# Runtime state and continuously appended SCADA data.
+/Alarm.csv
+/AlarmHistory.csv
+/CommunicationLog.csv
+/ConfigSyncState.json
+/MonitorTV.json
+/Report_*.csv
+
+# Local Python/PyInstaller output.
+/__pycache__/
+/build/
+/build_mqtt/
+/dist/
+/dist_mqtt/
+/SCADA BONT - PC2 REALTIME SYNC.exe
+/SCADA BONT - PC2 REALTIME SYNC.exe.pre_*
+
+# Local compiled artifacts.
+*.pyc

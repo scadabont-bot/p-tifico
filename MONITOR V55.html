@@ -1776,6 +1776,76 @@ body.monitor-g2 .monitor-footer{
     bottom:12px;
 }
 
+/* G1/G2 use the portrait monitor route, so they do not carry the
+   monitor-display class used by the landscape SLD.  Keep the portrait footer
+   visible and keep the connection text out of the middle of the diagram. */
+body.monitor-g1 .monitor-footer,
+body.monitor-g2 .monitor-footer{
+    position:absolute;
+    left:28px;
+    right:28px;
+    bottom:20px;
+    height:78px;
+    z-index:40;
+    display:grid;
+    grid-template-columns:145px 1fr 220px;
+    align-items:center;
+    gap:14px;
+    padding:9px 16px;
+    overflow:hidden;
+    color:#eee8d4;
+    background:linear-gradient(90deg,rgba(18,25,18,.98),rgba(5,6,6,.96));
+    border:2px solid #777366;
+    border-left:8px solid #258348;
+    border-radius:8px;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.09),0 4px 12px rgba(0,0,0,.22);
+}
+body.monitor-g1 .footer-unit,
+body.monitor-g1 .footer-mode,
+body.monitor-g2 .footer-unit,
+body.monitor-g2 .footer-mode{
+    min-width:0;
+    display:flex;
+    flex-direction:column;
+    justify-content:center;
+}
+body.monitor-g1 .footer-mode,
+body.monitor-g2 .footer-mode{
+    padding-left:18px;
+    border-left:1px solid rgba(238,232,212,.24);
+}
+body.monitor-g1 .footer-kicker,
+body.monitor-g2 .footer-kicker{
+    margin-bottom:4px;
+    color:#a8bca1;
+    font-size:12px;
+    font-weight:700;
+    line-height:1;
+    letter-spacing:1.2px;
+    text-transform:uppercase;
+}
+body.monitor-g1 .footer-unit strong,
+body.monitor-g2 .footer-unit strong{
+    color:#42ed31;
+    font-family:Georgia,serif;
+    font-size:24px;
+    line-height:1;
+}
+body.monitor-g1 .footer-mode strong,
+body.monitor-g2 .footer-mode strong{
+    overflow:hidden;
+    color:#f3efdf;
+    font-size:16px;
+    line-height:1.1;
+    letter-spacing:.8px;
+    text-overflow:ellipsis;
+    white-space:nowrap;
+}
+body.monitor-g1 #status,
+body.monitor-g2 #status{
+    display:none !important;
+}
+
 @media (max-width:520px), (max-height:720px){
     body.monitor-display #screen{
         box-shadow:
