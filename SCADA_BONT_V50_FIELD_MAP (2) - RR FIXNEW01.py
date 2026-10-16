@@ -9080,6 +9080,14 @@ try:
         )
         for html_id, (source, data_key) in MONITOR_TV_FIELD_MAP_G1.items()
     }
+    # G2 top phase-voltage estimates use its own Wire II line voltages.
+    # The saved MonitorTVConfig formula converts each line value by sqrt(3).
+    MONITOR_TV_FIELD_MAP_G2.update({
+        "tk2": ("wire2", "Uab_phase"),
+        "tk3": ("wire2", "Ubc_phase"),
+        "tk4": ("wire2", "Uca_phase"),
+    })
+
     def _monitor_tv_generator_payload(source_ip, wire_prefix=None, display_name=None):
         """Build one Monitor-TV payload using MONITOR_TV_FIELD_MAP."""
         field_map = (
@@ -9437,12 +9445,23 @@ try:
 
     def _full_realtime_relay_payload():
         """Complete read-only snapshot consumed by the second SCADA PC."""
+        # The slave receives engineered telemetry, not RAW IEC values.
+        # Include the configured G2 phase estimates as separate wire keys.
+        g2_phase_values = _monitor_tv_generator_payload(RTU_LIST[2]["ip"], "W2")
         with DATA_LOCK:
+            data_store = {ip: dict(values) for ip, values in DATA_STORE.items()}
+            wire_values = data_store.setdefault("10.100.163.1", {})
+            for field, key in (("tk2", "W2_Uab_phase"),
+                               ("tk3", "W2_Ubc_phase"),
+                               ("tk4", "W2_Uca_phase")):
+                value = g2_phase_values.get(field)
+                if isinstance(value, (int, float)) and math.isfinite(value):
+                    wire_values[key] = float(value)
             return {
                 "schema": "SCADA-BONT-RELAY-1",
                 "generated_at": datetime.datetime.now().isoformat(timespec="milliseconds"),
                 "source_ip": _communication_config().get("master_ip", "10.100.163.149"),
-                "data_store": {ip: dict(values) for ip, values in DATA_STORE.items()},
+                "data_store": data_store,
                 "bay_store": {bay: dict(values) for bay, values in BAY_VALUE_STORE.items()},
                 "card_store": {str(idx): dict(values) for idx, values in CARD_VALUE_STORE.items()},
                 "vinci_status": dict(VINCI_STATUS),
