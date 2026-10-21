@@ -1387,22 +1387,14 @@ def _load_setting_engine():
             by_ioa.setdefault((ip, asdu, ioa), []).append(item)
 
     # Multiple Bay CSVs may intentionally describe the same physical RTU
-    # measurement. Duplicates are safe only when they resolve to the SAME
-    # physical variable. A protocol address must never resolve to two variables.
+    # measurement. Keep every matching row: the same IEC-104 point can feed
+    # more than one named bay (for example Generator 2 and its Measure Control
+    # Box), and each bay must retain its own engineering formula.
     by_tag = {}
     for key, vals in tag_candidates.items():
         signatures = {(v.get("ASDU_INT"), v.get("IOA_INT")) for v in vals}
         if len(signatures) == 1:
             by_tag[key] = vals[0]
-
-    by_ioa_clean = {}
-    for key, vals in by_ioa.items():
-        # Deterministic policy: the last active CSV row wins. This is useful
-        # when an operator has corrected a point in a later Bay file. The
-        # startup validator still reports the collision so it cannot be missed.
-        if vals:
-            by_ioa_clean[key] = [vals[-1]]
-    by_ioa = by_ioa_clean
 
     with SETTING_LOCK:
         SETTING_REGISTRY = registry
