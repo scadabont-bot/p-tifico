@@ -1865,10 +1865,26 @@ body.monitor-g2 #status{
 #days-panel{
     cursor:pointer;
     user-select:none;
+    padding-bottom:15px;
 }
 #days-panel:focus-visible{
     outline:3px solid #facc15;
     outline-offset:3px;
+}
+#operational-start-caption{
+    position:absolute;
+    right:12px;
+    bottom:5px;
+    left:12px;
+    overflow:hidden;
+    color:#9f987f;
+    font-family:Arial,Helvetica,sans-serif;
+    font-size:10px;
+    line-height:1;
+    letter-spacing:.2px;
+    text-align:center;
+    text-overflow:ellipsis;
+    white-space:nowrap;
 }
 #operational-modal{
     display:none;
@@ -1886,7 +1902,7 @@ body.monitor-g2 #status{
     display:flex;
 }
 .operational-card{
-    width:440px;
+    width:480px;
     max-width:94vw;
     padding:24px;
     border:1px solid #3b82f6;
@@ -1935,6 +1951,34 @@ body.monitor-g2 #status{
     color:#cbd5e1;
     font-size:13px;
 }
+.operational-form{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:12px;
+    margin-bottom:18px;
+}
+.operational-field{
+    display:grid;
+    gap:6px;
+    color:#cbd5e1;
+    font-size:12px;
+    font-weight:700;
+}
+.operational-field input{
+    width:100%;
+    padding:10px 11px;
+    border:1px solid #475569;
+    border-radius:7px;
+    outline:none;
+    background:#07101f;
+    color:#f8fafc;
+    color-scheme:dark;
+    font:600 14px "Segoe UI",Arial,sans-serif;
+}
+.operational-field input:focus{
+    border-color:#60a5fa;
+    box-shadow:0 0 0 2px rgba(96,165,250,.22);
+}
 .operational-actions{
     display:flex;
     flex-wrap:wrap;
@@ -1950,7 +1994,8 @@ body.monitor-g2 #status{
     font-weight:700;
 }
 #operational-reset{background:#b91c1c;}
-#operational-start{background:#15803d;}
+#operational-save-start{background:#2563eb;}
+#operational-start-now{background:#15803d;}
 #operational-close{margin-left:auto;background:#475569;}
 .operational-actions button:disabled{
     cursor:not-allowed;
@@ -2332,8 +2377,8 @@ body.monitor-display .reference-layout{display:block;}
     role="button"
     tabindex="0"
     aria-haspopup="dialog"
-    aria-label="Operational Days. Double-click to configure."
-    title="Double-click to configure Operational Days"
+    aria-label="Operational Days. Klik untuk mengatur tanggal dan jam mulai."
+    title="Klik untuk mengatur Operational Days"
 >
 
     <span class="label">
@@ -2350,6 +2395,8 @@ body.monitor-display .reference-layout{display:block;}
     <span class="unit">
         Days
     </span>
+
+    <span id="operational-start-caption">Belum dimulai</span>
 
 </div>
 
@@ -2915,15 +2962,26 @@ body.monitor-display .reference-layout{display:block;}
 >
     <div class="operational-card">
         <h2 id="operational-modal-title">Operational Days</h2>
-        <p class="operational-hint">Hitungan dimulai saat tombol Start ditekan, lalu bertambah setiap 24 jam.</p>
+        <p class="operational-hint">Pilih waktu mulai atau gunakan Start Saat Ini. Nilai bertambah satu setelah setiap 24 jam penuh.</p>
         <div class="operational-summary">
             <strong id="operational-modal-days">0 Days</strong>
             <span id="operational-modal-status">STOPPED</span>
             <span class="operational-started" id="operational-modal-started">Belum dimulai</span>
         </div>
+        <div class="operational-form">
+            <label class="operational-field">
+                <span>Tanggal Mulai</span>
+                <input id="operational-start-date" type="date">
+            </label>
+            <label class="operational-field">
+                <span>Jam Mulai</span>
+                <input id="operational-start-time" type="time" step="1">
+            </label>
+        </div>
         <div class="operational-actions">
+            <button id="operational-save-start" type="button">Simpan Waktu Mulai</button>
+            <button id="operational-start-now" type="button">Start Saat Ini</button>
             <button id="operational-reset" type="button">Reset ke 0</button>
-            <button id="operational-start" type="button">Start</button>
             <button id="operational-close" type="button">Tutup</button>
         </div>
         <p id="operational-message" aria-live="polite"></p>
@@ -3350,27 +3408,75 @@ let operationalCounterState={
     started_at:null
 };
 
+function parseOperationalStart(value){
+    if(!value) return null;
+    const parsed=new Date(value);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function padOperationalPart(value){
+    return String(value).padStart(2,"0");
+}
+
+function formatOperationalStart(value,includeSeconds=false){
+    const parsed=parseOperationalStart(value);
+    if(!parsed) return "";
+    const date=[
+        padOperationalPart(parsed.getDate()),
+        padOperationalPart(parsed.getMonth()+1),
+        parsed.getFullYear()
+    ].join("-");
+    const time=[
+        padOperationalPart(parsed.getHours()),
+        padOperationalPart(parsed.getMinutes())
+    ];
+    if(includeSeconds) time.push(padOperationalPart(parsed.getSeconds()));
+    return date+" "+time.join(":");
+}
+
+function setOperationalStartInputs(value){
+    const parsed=parseOperationalStart(value)||new Date();
+    document.getElementById("operational-start-date").value=[
+        parsed.getFullYear(),
+        padOperationalPart(parsed.getMonth()+1),
+        padOperationalPart(parsed.getDate())
+    ].join("-");
+    document.getElementById("operational-start-time").value=[
+        padOperationalPart(parsed.getHours()),
+        padOperationalPart(parsed.getMinutes()),
+        padOperationalPart(parsed.getSeconds())
+    ].join(":");
+}
+
 function renderOperationalCounterState(){
     const days=Math.max(0,Math.floor(Number(operationalCounterState.days)||0));
     const running=Boolean(operationalCounterState.running);
+    const startedLabel=formatOperationalStart(operationalCounterState.started_at,true);
     document.getElementById("operational-modal-days").textContent=days+" Days";
     const status=document.getElementById("operational-modal-status");
     status.textContent=running ? "RUNNING" : "STOPPED";
     status.classList.toggle("running",running);
-    const started=document.getElementById("operational-modal-started");
-    started.textContent=operationalCounterState.started_at
-        ? "Mulai: "+new Date(operationalCounterState.started_at).toLocaleString("id-ID")
+    document.getElementById("operational-modal-started").textContent=startedLabel
+        ? "Mulai: "+startedLabel
         : "Belum dimulai";
-    document.getElementById("operational-start").disabled=running;
+    const caption=document.getElementById("operational-start-caption");
+    caption.textContent=startedLabel ? "Mulai "+startedLabel : "Belum dimulai";
+    document.getElementById("days-panel").setAttribute(
+        "aria-label",
+        startedLabel
+            ? "Operational Days. Mulai "+startedLabel+". Klik untuk mengatur."
+            : "Operational Days. Belum dimulai. Klik untuk mengatur."
+    );
 }
 
 function openOperationalModal(){
     const modal=document.getElementById("operational-modal");
     document.getElementById("operational-message").textContent="";
+    setOperationalStartInputs(operationalCounterState.started_at);
     renderOperationalCounterState();
     modal.classList.add("open");
     modal.setAttribute("aria-hidden","false");
-    document.getElementById("operational-start").focus();
+    document.getElementById("operational-start-date").focus();
 }
 
 function closeOperationalModal(){
@@ -3382,14 +3488,31 @@ function closeOperationalModal(){
 
 async function applyOperationalAction(action){
     const message=document.getElementById("operational-message");
+    const requestBody={action};
+    if(action==="set_start"){
+        const startDate=document.getElementById("operational-start-date").value;
+        const startTime=document.getElementById("operational-start-time").value;
+        if(!startDate||!startTime){
+            message.textContent="Tanggal dan jam mulai wajib diisi.";
+            document.getElementById(!startDate ? "operational-start-date" : "operational-start-time").focus();
+            return;
+        }
+        requestBody.started_at=startDate+"T"+startTime;
+    }
+
     const buttons=document.querySelectorAll(".operational-actions button");
     buttons.forEach(button=>button.disabled=true);
-    message.textContent=action==="reset" ? "Mereset penghitung..." : "Memulai penghitung...";
+    const pendingMessages={
+        reset:"Mereset penghitung...",
+        start_now:"Memulai dari waktu saat ini...",
+        set_start:"Menyimpan tanggal dan jam mulai..."
+    };
+    message.textContent=pendingMessages[action]||"Menyimpan pengaturan...";
     try{
         const response=await fetch("/OperationalDays.json",{
             method:"POST",
             headers:{"Content-Type":"application/json"},
-            body:JSON.stringify({action})
+            body:JSON.stringify(requestBody)
         });
         let result={};
         try{
@@ -3404,14 +3527,14 @@ async function applyOperationalAction(action){
         }
         operationalCounterState=result.state||operationalCounterState;
         setLarge("days",String(operationalCounterState.days??0));
+        setOperationalStartInputs(operationalCounterState.started_at);
         renderOperationalCounterState();
         message.textContent=result.message||"Pengaturan tersimpan.";
         refreshTelemetry();
     }catch(error){
         message.textContent=error.message||"Pengaturan gagal.";
     }finally{
-        document.getElementById("operational-reset").disabled=false;
-        document.getElementById("operational-close").disabled=false;
+        buttons.forEach(button=>button.disabled=false);
         renderOperationalCounterState();
     }
 }
@@ -3979,7 +4102,7 @@ if(referenceReset){
     });
 }
 const operationalPanel=document.getElementById("days-panel");
-operationalPanel.addEventListener("dblclick",openOperationalModal);
+operationalPanel.addEventListener("click",openOperationalModal);
 operationalPanel.addEventListener("keydown",event=>{
     if(event.key==="Enter"||event.key===" "){
         event.preventDefault();
@@ -3991,9 +4114,13 @@ document.getElementById("operational-reset").addEventListener(
     "click",
     ()=>applyOperationalAction("reset")
 );
-document.getElementById("operational-start").addEventListener(
+document.getElementById("operational-save-start").addEventListener(
     "click",
-    ()=>applyOperationalAction("start")
+    ()=>applyOperationalAction("set_start")
+);
+document.getElementById("operational-start-now").addEventListener(
+    "click",
+    ()=>applyOperationalAction("start_now")
 );
 document.getElementById("operational-modal").addEventListener("click",event=>{
     if(event.target.id==="operational-modal"){

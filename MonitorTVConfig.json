@@ -755,7 +755,7 @@
         "IOA": "16388",
         "Coefficient": "0.0036662",
         "CTPT": "0.06",
-        "Formula": "CUSTOM:RAW*COEFFICIENT*CTPT/1.7320508075688772",
+        "Formula": "MULTIPLY_CTPT",
         "Add_Offset": "0.0",
         "Unit": "kV",
         "Decimals": 2,
@@ -781,7 +781,7 @@
         "IOA": "16389",
         "Coefficient": "0.0036662",
         "CTPT": "0.06",
-        "Formula": "CUSTOM:RAW*COEFFICIENT*CTPT/1.7320508075688772",
+        "Formula": "MULTIPLY_CTPT",
         "Add_Offset": "0.0",
         "Unit": "kV",
         "Decimals": 2,
@@ -807,7 +807,7 @@
         "IOA": "16390",
         "Coefficient": "0.0036662",
         "CTPT": "0.06",
-        "Formula": "CUSTOM:RAW*COEFFICIENT*CTPT/1.7320508075688772",
+        "Formula": "MULTIPLY_CTPT",
         "Add_Offset": "0.0",
         "Unit": "kV",
         "Decimals": 2,
@@ -1421,8 +1421,8 @@
     }
   },
   "operational_counter": {
-    "running": false,
-    "started_at_epoch": null,
-    "accumulated_seconds": 0
+    "running": true,
+    "started_at_epoch": 1792117749.0,
+    "accumulated_seconds": 0.0
   }
 }

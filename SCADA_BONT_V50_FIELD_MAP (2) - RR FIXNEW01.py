@@ -9005,23 +9005,38 @@ try:
             with open(temporary, "w", encoding="utf-8") as handle:
                 json.dump(config, handle, ensure_ascii=False, indent=2)
             os.replace(temporary, MONITOR_TV_CONFIG_PATH)
-    def _set_operational_counter(action):
-        """Apply an operator action and persist it atomically."""
+    def _set_operational_counter(action, started_at=None):
+        """Persist a reset, an immediate start, or an operator-selected start."""
         action = str(action or "").strip().lower()
-        if action not in {"reset", "start"}:
+        if action == "start":
+            action = "start_now"
+        if action not in {"reset", "start_now", "set_start"}:
             raise ValueError("Aksi operational days tidak valid")
+
+        selected_epoch = None
+        if action == "set_start":
+            selected_text = str(started_at or "").strip()
+            if not selected_text:
+                raise ValueError("Tanggal dan jam mulai wajib diisi")
+            try:
+                selected_epoch = datetime.datetime.fromisoformat(selected_text).timestamp()
+            except (TypeError, ValueError, OverflowError):
+                raise ValueError("Tanggal atau jam mulai tidak valid") from None
+            if not math.isfinite(selected_epoch) or selected_epoch < 0:
+                raise ValueError("Tanggal atau jam mulai tidak valid")
+
         with MONITOR_TV_CONFIG_LOCK:
             config = _monitor_tv_config()
-            state = _normalize_operational_counter(config.get("operational_counter"))
             if action == "reset":
+                state = _default_operational_counter()
+            else:
                 state = {
-                    "running": False,
-                    "started_at_epoch": None,
+                    "running": True,
+                    "started_at_epoch": (
+                        time.time() if action == "start_now" else selected_epoch
+                    ),
                     "accumulated_seconds": 0.0,
                 }
-            elif not state["running"]:
-                state["running"] = True
-                state["started_at_epoch"] = time.time()
             config["operational_counter"] = state
             _save_monitor_tv_config(config)
         return _operational_counter_snapshot(state)
@@ -9589,13 +9604,22 @@ try:
                 if path == "/OperationalDays.json":
                     if not isinstance(request_body, dict):
                         raise ValueError("Permintaan operational days tidak valid")
-                    state = _set_operational_counter(request_body.get("action"))
-                    message = (
-                        "Operational days direset ke 0"
-                        if request_body.get("action") == "reset"
-                        else "Penghitung operational days dimulai"
+                    action = str(request_body.get("action", "")).strip().lower()
+                    state = _set_operational_counter(
+                        action,
+                        request_body.get("started_at"),
                     )
-                    response = {"ok": True, "message": message, "state": state}
+                    messages = {
+                        "reset": "Operational days direset ke 0",
+                        "start": "Penghitung dimulai dari waktu saat ini",
+                        "start_now": "Penghitung dimulai dari waktu saat ini",
+                        "set_start": "Tanggal dan jam mulai disimpan",
+                    }
+                    response = {
+                        "ok": True,
+                        "message": messages.get(action, "Pengaturan tersimpan"),
+                        "state": state,
+                    }
                 else:
                     config = request_body
                     if not isinstance(config, dict) or not all(k in config for k in ("G1", "G2")):
