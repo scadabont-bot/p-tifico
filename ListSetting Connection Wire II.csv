@@ -1,5 +1,5 @@
 Device_Addr,Bay_Name,Physical_Name,Info_Name,Info_Index,Type,Min_Save_Mode,ASDU,IOA,Coefficient,CTPT,Tolerance,Alarm_Class,UUp_Limit,Up_Limit,Down_Limit,DDown_Limit,Formula,Add_Offset,Unit
-10.100.163.1,Connection Wire II,W2_Ia,W2_Ia,7,Current,2Minute,513,16386,0.000169500,500,0,Warning,1000000,1000000,-1000000,-1000000,MULTIPLY_CTPT,0.0,A
+10.100.163.1,Connection Wire II,W2_Ia,W2_Ia,7,Current,2Minute,513,16386,0.000180455,500,0,Warning,1000000,1000000,-1000000,-1000000,MULTIPLY_CTPT,0.0,A
 10.100.163.1,Connection Wire II,W2_Uab,W2_Uab,8,Voltage,2Minute,1025,16388,0.0036662,0.06,0,Warning,1000000,1000000,-1000000,-1000000,MULTIPLY_CTPT,0.0,kV
 10.100.163.1,Connection Wire II,W2_Ubc,W2_Ubc,9,Voltage,2Minute,1025,16389,0.0036662,0.06,0,Warning,1000000,1000000,-1000000,-1000000,MULTIPLY_CTPT,0.0,kV
 10.100.163.1,Connection Wire II,W2_Uca,W2_Uca,10,Voltage,2Minute,1025,16390,0.0036662,0.06,0,Warning,1000000,1000000,-1000000,-1000000,MULTIPLY_CTPT,0.0,kV

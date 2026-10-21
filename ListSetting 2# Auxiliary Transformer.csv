@@ -1,4 +1,4 @@
 Device_Addr,Bay_Name,Physical_Name,Info_Name,Info_Index,Type,Min_Save_Mode,ASDU,IOA,Coefficient,CTPT,Tolerance,Alarm_Class,UUp_Limit,Up_Limit,Down_Limit,DDown_Limit,Formula,Add_Offset,Unit
 10.100.163.1,2# Auxiliary Transformer,Ia,Ia,1,Current,2Minute,1025,16387,0.00018310546,30,0,Warning,1000000,1000000,-1000000,-1000000,CURRENT_CT,0,A
 10.100.163.1,2# Auxiliary Transformer,Uab,Uab,2,Voltage,2Minute,1025,16388,0.0036662,0.06,0,Warning,1000000,1000000,-1000000,-1000000,LINE_VOLTAGE,0,kV
-10.100.163.1,2# Auxiliary Transformer,P,P,3,Power,2Minute,1025,16385,0.02233389,1.8,0,Warning,1000000,1000000,-1000000,-1000000,POWER,0,kW
+10.100.163.1,2# Auxiliary Transformer,P,P,3,Power,2Minute,1025,16385,0.02233389,2.3,0,Warning,1000000,1000000,-1000000,-1000000,POWER,0,kW
