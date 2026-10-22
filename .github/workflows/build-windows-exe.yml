@@ -1,0 +1,41 @@
+name: Build Windows executable
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build dependencies
+        run: python -m pip install "pyinstaller==6.16.0" "pillow==12.3.0"
+
+      - name: Build GUI executable
+        run: pyinstaller --noconfirm --clean "SCADA BONT - PC2 REALTIME SYNC.spec"
+
+      - name: Name release executable
+        shell: pwsh
+        run: |
+          Copy-Item `
+            "dist/SCADA BONT - PC2 REALTIME SYNC.exe" `
+            "dist/SCADA BONT - PC2 REALTIME SYNC FIXED.exe"
+          Get-FileHash "dist/SCADA BONT - PC2 REALTIME SYNC FIXED.exe" -Algorithm SHA256
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: scada-bont-windows-exe
+          path: dist/SCADA BONT - PC2 REALTIME SYNC FIXED.exe
+          if-no-files-found: error
+          compression-level: 0
