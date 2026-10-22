@@ -18,7 +18,7 @@ import json
 import ssl
 from concurrent.futures import ThreadPoolExecutor
 from tkinter import ttk, messagebox, simpledialog, filedialog, font as tkfont
-from PIL import Image, ImageTk, ImageOps, ImageEnhance, ImageFilter
+from PIL import Image, ImageTk, ImageOps
 
 def _cbz_breaker_state(raw_value, reverse=0):
     """Normalize one YX bit like CBZ8000: 1=closed/red, 0=open/green."""
@@ -5276,14 +5276,14 @@ class SCADAMainUI:
 # ==============================================================================
     def add_overlay_box(
         self, canvas, x, y, w, h, items, font_size=10,
-        scale_box=True, horizontal_lines=False, vertical_line=False,
+        scale_box=True, horizontal_lines=False, vertical_line=True,
         right_edge_x=None
     ):
-        """Create a readable realtime value card for Run Monitor.
+        """Create a simple outlined realtime table for Run Monitor.
 
-        Main cards use 15 px typography. The 14 equipment cards are kept
-        compact automatically so they do not merge into one long black bar.
-        Card geometry follows the design coordinates and remains responsive.
+        Main tables use 15 px typography. The 14 equipment tables stay
+        compact automatically so they do not overlap neighbouring feeders.
+        Table geometry follows the design coordinates and remains responsive.
         """
         original_w = float(w)
         original_h = float(h)
@@ -5294,15 +5294,15 @@ class SCADAMainUI:
         # neighbours; larger cards still grow to fit their contents.
         is_compact_card = original_w <= 90 and item_count >= 4
         if is_compact_card:
-            actual_font = max(8, min(10, int(font_size)))
+            layout_font = max(8, min(10, int(font_size)))
             border = 1
             row_gap = 0
         else:
-            actual_font = max(7, int(font_size))
+            layout_font = max(7, int(font_size))
             border = 2
             row_gap = 1
 
-        card_font = tkfont.Font(family="Arial Narrow", size=actual_font, weight="bold")
+        card_font = tkfont.Font(family="Arial Narrow", size=layout_font, weight="bold")
         widest_name = max((card_font.measure(str(label)) for label, _, _ in items), default=0)
         # Reserve enough value space for live SCADA values, including sign.
         widest_value = max(
@@ -5320,24 +5320,39 @@ class SCADAMainUI:
         else:
             w = max(original_w, content_w)
             h = max(original_h, content_h)
+        # Maximise typography within the existing cells. These sizes are
+        # bounded by the narrowest label/value column and each row's height;
+        # table geometry stays exactly as designed.
+        if is_compact_card:
+            actual_font = 12
+            value_font = 15
+        elif item_count >= 10:
+            actual_font = 21
+            value_font = 20
+        else:
+            actual_font = 20
+            value_font = 19
 
-        # Konsisten dengan panel SCADA: card hitam, teks realtime hijau,
-        # dan garis grid hijau gelap agar tetap terbaca di semua gambar SLD.
-        card_bg = "#000000"
-        card_fg = "#00ff36"
-        value_fg = "#00ff36"
-        grid_color = "#159b36"
+        # Use the dominant neutral grey sampled from the Run Monitor artwork
+        # so table cells blend into the diagram instead of forming light cards.
+        card_bg = "#b3b3b1"
+        card_fg = "#111111"
+        value_fg = "#111111"
+        grid_color = "#202020"
         frame = tk.Frame(
             canvas,
             bg=card_bg,
-            bd=border,
-            relief="solid"
+            bd=0,
+            highlightthickness=0,
         )
         frame.pack_propagate(False)
 
         label_refs = []
+        row_widgets = []
+        horizontal_grid_lines = []
+        divider_line = None
 
-        divider_x = int(round(w * 0.38))
+        divider_x = int(round(w * 0.40))
         uniform_row_h = float(h) / max(1, item_count)
         grid_lines = []
         for row_index, (label, default_val, key) in enumerate(items):
@@ -5359,15 +5374,15 @@ class SCADAMainUI:
                 text=default_val,
                 fg=value_fg,
                 bg=card_bg,
-                font=("Arial Narrow", actual_font, "bold"),
-                anchor="e"
+                font=("Arial Narrow", value_font, "bold"),
+                anchor="w"
             )
-            val_lbl.place(x=divider_x + 2, y=row_y,
-                          width=max(1, int(w) - divider_x - 5),
+            val_lbl.place(x=divider_x + 4, y=row_y,
+                          width=max(1, int(w) - divider_x - 7),
                           height=max(1, next_y - row_y))
 
             self.realtime_labels[key] = val_lbl
-            val_lbl._base_font_size = actual_font
+            val_lbl._base_font_size = value_font
             binding_key = f"run:{key}"
             default_binding = {"page": "Run Monitor", "element": key, "mode": "default"}
             default_binding.update(self._default_run_binding(key))
@@ -5379,16 +5394,30 @@ class SCADAMainUI:
                     lambda _event, bk=binding_key: self._open_binding_dialog(bk, "variables")
                 )
             label_refs.extend((name_lbl, val_lbl))
+            row_widgets.append((name_lbl, val_lbl))
 
             if horizontal_lines and row_index < item_count - 1:
                 line = tk.Frame(frame, bg=grid_color, bd=0, highlightthickness=0)
                 line.place(x=0, y=next_y - 1, width=int(w), height=1)
                 grid_lines.append(line)
+                horizontal_grid_lines.append((line, row_index + 1))
 
         if vertical_line:
             divider_line = tk.Frame(frame, bg=grid_color, bd=0, highlightthickness=0)
             divider_line.place(x=divider_x, y=0, width=1, height=int(h))
             grid_lines.append(divider_line)
+        border_lines = []
+        border_placements = (
+            {"x": 0, "y": 0, "relwidth": 1.0, "height": 1},
+            {"x": 0, "y": 0, "width": 1, "relheight": 1.0},
+            {"relx": 1.0, "x": -1, "y": 0, "width": 1, "relheight": 1.0},
+            {"x": 0, "rely": 1.0, "y": -1, "relwidth": 1.0, "height": 1},
+        )
+        for placement in border_placements:
+            line = tk.Frame(frame, bg=grid_color, bd=0, highlightthickness=0)
+            line.place(**placement)
+            border_lines.append(line)
+            grid_lines.append(line)
         for grid_line in grid_lines:
             grid_line.lift()
         if right_edge_x is not None:
@@ -5411,28 +5440,31 @@ class SCADAMainUI:
             "w": float(w),
             "h": float(h),
             "font_size": float(actual_font),
+            "value_font_size": float(value_font),
             "compact": is_compact_card,
             "scale_box": bool(scale_box),
             "right_edge_x": (
                 float(right_edge_x) if right_edge_x is not None else None
             ),
             "labels": label_refs,
+            "rows": row_widgets,
+            "horizontal_lines": horizontal_grid_lines,
+            "divider_line": divider_line,
+            "border_lines": border_lines,
+            "item_count": item_count,
         })
 
-    # Place the round status lamp in the clear gap below each realtime card
-    # and above the equipment label/terminal triangle.
-    # Circle coordinates follow the supplied 1917x857 reference Run Monitor
-    # canvas.  The reference places the circle centre 160 px below the
-    # breaker centre.
-    RUN_STATUS_Y_OFFSET = 160.0
+    # Place each lower status lamp directly over the blue terminal triangle in
+    # the 1917x857 design image. The 26 px circle extends upward enough to
+    # cover the complete triangle footprint after responsive downscaling.
+    RUN_STATUS_Y_OFFSET = 164.0
 
     def add_status_breaker(self, canvas, x, y, key, initial_color="#ff0000"):
-        """Overlay a live red/green rectangle on the breaker in the SLD."""
-        # The reference breaker body is 17 px wide by 22 px high in the
-        # 1917x857 design canvas.  Use the full body width so the live
-        # indicator completely covers the underlying breaker symbol.
+        """Overlay a live red/green rectangle exactly on the SLD breaker body."""
+        # A 23x22 overlay covers the filled body and its antialiased side
+        # pixels even on compact laptop screens.
         breaker = canvas.create_rectangle(
-            x - 8.5, y - 11, x + 8.5, y + 11,
+            x - 11.5, y - 11, x + 11.5, y + 11,
             fill=initial_color,
             outline="#ffffff",
             width=1,
@@ -5459,18 +5491,17 @@ class SCADAMainUI:
             "kind": "rectangle",
             "x": float(x),
             "y": float(y),
-            "half_w": 8.5,
+            "half_w": 11.5,
             "half_h": 11.0,
         })
 
     def add_status_circle(self, canvas, x, y, key, initial_color="#ff0000"):
-        # Move the Run Monitor status circle approximately 5 cm downward.
-        # The offset is applied in design coordinates and then participates
-        # normally in the existing responsive scaling.
+        # The supplied coordinate is the breaker centre; move to the lower
+        # terminal triangle and cover its full footprint.
         y = y + self.RUN_STATUS_Y_OFFSET
 
         circle = canvas.create_oval(
-            x - 8, y - 8, x + 8, y + 8,
+            x - 13, y - 13, x + 13, y + 13,
             fill=initial_color, outline="#ffffff",
             tags=("run_status",)
         )
@@ -5482,197 +5513,177 @@ class SCADAMainUI:
             "kind": "circle",
             "x": float(x),
             "y": float(y),
-            "r": 8.0
+            "r": 13.0
         })
 
 
-    def _resize_run_monitor(self, event=None):
-        """
-        Responsive Run Monitor.
+    def _schedule_run_monitor_resize(self, _event=None):
+        """Debounce expensive image resizing while the window is changing size."""
+        canvas = getattr(self, "run_canvas", None)
+        if canvas is None:
+            return
+        pending = getattr(self, "_run_resize_job", None)
+        if pending is not None:
+            try:
+                canvas.after_cancel(pending)
+            except Exception:
+                pass
+        self._run_resize_job = canvas.after(75, self._resize_run_monitor)
 
-        The RUNMONITORNEW.jpg background fills the complete available
-        Run Monitor area. Realtime panels, status indicators and RESET
-        follow the same responsive scaling.
-        """
+    def _resize_run_monitor(self, event=None):
+        """Fit the complete Run Monitor and every overlay to its canvas."""
         canvas = self.run_canvas
+        self._run_resize_job = None
 
         view_w = max(1, canvas.winfo_width())
         view_h = max(1, canvas.winfo_height())
-
-        # Original SCADA design coordinate system.
         base_w = float(self._run_base_w)
         base_h = float(self._run_base_h)
 
-        # Gunakan seluruh area kerja. Diagram dan overlay memakai skala yang
-        # sama di kedua sumbu sehingga tidak ada bidang kosong di sisi layar.
-        # Perbedaan rasio layar modern hanya memberi peregangan ringan pada SLD.
-        scale_x = view_w / base_w
-        scale_y = view_h / base_h
-        scale = min(scale_x, scale_y)
-        render_w = max(1, int(round(base_w * scale_x)))
-        render_h = max(1, int(round(base_h * scale_y)))
+        # One uniform scale keeps the SLD, tables, breakers and status lamps in
+        # the same coordinate system on 16:9, 16:10 and smaller laptop screens.
+        scale = max(0.01, min(view_w / base_w, view_h / base_h))
+        render_w = max(1, int(round(base_w * scale)))
+        render_h = max(1, int(round(base_h * scale)))
         offset_x = (view_w - render_w) / 2.0
         offset_y = (view_h - render_h) / 2.0
 
-        self._run_scale_x = scale_x
-        self._run_scale_y = scale_y
+        self._run_scale_x = scale
+        self._run_scale_y = scale
         self._run_scale = scale
         self._run_offset = (offset_x, offset_y)
 
-        # ==========================================================
-        # BACKGROUND IMAGE
-        # ==========================================================
         if hasattr(self, "run_source_image"):
             try:
-                iw = render_w
-                ih = render_h
-
-                rendered = self.run_source_image.resize((iw, ih), Image.Resampling.LANCZOS)
-                # Rendering SLD: naikkan kontras garis tipis dan sharpen simbol
-                # setelah resize agar bagian proteksi generator tidak tampak kabur.
-                rendered = ImageEnhance.Contrast(rendered).enhance(1.18)
-                rendered = rendered.filter(ImageFilter.UnsharpMask(radius=1.5, percent=175, threshold=2))
-                self.run_image = ImageTk.PhotoImage(rendered)
-
+                target_size = (render_w, render_h)
+                if getattr(self, "_run_render_size", None) != target_size:
+                    # The cleaned high-resolution PNG needs no sharpening;
+                    # applying it here reintroduces colored halos around text.
+                    rendered = self.run_source_image.resize(
+                        target_size, Image.Resampling.LANCZOS
+                    )
+                    self.run_image = ImageTk.PhotoImage(rendered)
+                    canvas.itemconfig("responsive_bg", image=self.run_image)
+                    self._run_render_size = target_size
                 canvas.coords("responsive_bg", offset_x, offset_y)
-                canvas.itemconfig(
-                    "responsive_bg",
-                    image=self.run_image
-                )
-
-                # Keep the electrical diagram behind all realtime overlays.
                 canvas.tag_lower("responsive_bg")
-
             except Exception:
                 pass
 
-        # ==========================================================
-        # RESET BUTTON
-        # ==========================================================
-        if hasattr(self, "_run_reset_spec"):
+        if self._run_reset_spec is not None:
             spec = self._run_reset_spec
-            item = spec["item"]
-
-            bx = offset_x + spec["x"] * scale_x
-            by = offset_y + spec["y"] * scale_y
-
-            bw = max(80, int(spec["w"] * scale))
-            bh = max(26, int(spec["h"] * scale))
-
-            canvas.coords(item, bx, by)
-            canvas.itemconfig(
-                item,
-                width=bw,
-                height=bh
-            )
-
+            bx = offset_x + spec["x"] * scale
+            by = offset_y + spec["y"] * scale
+            bw = max(52, int(round(spec["w"] * scale)))
+            bh = max(18, int(round(spec["h"] * scale)))
+            canvas.coords(spec["item"], bx, by)
+            canvas.itemconfig(spec["item"], width=bw, height=bh)
             try:
-                fs = max(
-                    10,
-                    int(
-                        round(
-                            spec["font"] *
-                            max(scale, 0.75)
-                        )
-                    )
-                )
-                spec["widget"].config(
-                    font=("Arial", fs, "bold")
-                )
+                fs = max(7, int(round(spec["font"] * scale)))
+                spec["widget"].config(font=("Arial", fs, "bold"))
             except Exception:
                 pass
 
-        # ==========================================================
-        # REALTIME VALUE PANELS
-        # ==========================================================
         for spec in getattr(self, "_run_overlay_specs", []):
-            item = spec["item"]
-
-            y = offset_y + spec["y"] * scale_y
-            # ======================================================
-            # RESPONSIVE CARD SIZE
-            # ======================================================
-            # Keep each card aligned with the stretched background geometry.
-            # Its design size already guarantees that every text row fits;
-            # scaling here restores the visual proportions of the prior layout.
-            if spec.get("compact") and not spec.get("scale_box", True):
-                # Shrink compact feeder cards on smaller operator windows so
-                # neighbouring cards cannot merge into one black strip. At
-                # the reference 1920px width the cards remain 70px wide.
-                compact_scale = min(1.0, scale_x)
-                w = max(40, int(spec["w"] * compact_scale))
-                h = max(30, int(spec["h"] * min(1.0, scale_y)))
-            elif spec.get("scale_box", True):
-                w = max(40, int(spec["w"] * scale_x))
-                h = max(30, int(spec["h"] * scale_y))
-            else:
-                # Realtime cards retain their calculated content size. Their
-                # positions follow the widened SLD, creating a clean gap
-                # between neighbouring feeder cards instead of one solid bar.
-                w = max(40, int(spec["w"]))
-                h = max(30, int(spec["h"]))
-            if spec.get("right_edge_x") is not None:
-                right_edge = offset_x + spec["right_edge_x"] * scale_x
-                x = right_edge - w
-            else:
-                x = offset_x + spec["x"] * scale_x
-
-
-            canvas.coords(item, x, y)
-            canvas.itemconfig(
-                item,
-                width=w,
-                height=h
+            w = max(24, int(round(spec["w"] * scale)))
+            h = max(
+                max(12, int(spec.get("item_count", 1)) * 6),
+                int(round(spec["h"] * scale)),
             )
+            y = offset_y + spec["y"] * scale
+            if spec.get("right_edge_x") is not None:
+                x = offset_x + spec["right_edge_x"] * scale - w
+            else:
+                x = offset_x + spec["x"] * scale
 
-            # Let typography follow the background scale as well, but use the
-            # smaller axis so wide monitors cannot make text excessively large.
-            minimum_font = 8 if spec.get("compact") else 15
-            fs = max(minimum_font, int(round(spec["font_size"] * scale)))
+            canvas.coords(spec["item"], x, y)
+            canvas.itemconfig(spec["item"], width=w, height=h)
 
-            for lbl in spec["labels"]:
+            item_count = max(1, int(spec.get("item_count", 1)))
+            divider_x = max(8, min(w - 8, int(round(w * 0.40))))
+            padding = max(1, int(round(3 * scale)))
+            for row_index, (name_lbl, val_lbl) in enumerate(spec.get("rows", [])):
+                row_y = int(round(row_index * h / item_count))
+                next_y = int(round((row_index + 1) * h / item_count))
+                row_h = max(1, next_y - row_y)
+                name_lbl.place(
+                    x=padding,
+                    y=row_y,
+                    width=max(1, divider_x - padding - 1),
+                    height=row_h,
+                )
+                val_lbl.place(
+                    x=divider_x + padding,
+                    y=row_y,
+                    width=max(1, w - divider_x - padding - 1),
+                    height=row_h,
+                )
+
+            for line, boundary in spec.get("horizontal_lines", []):
+                line_y = int(round(boundary * h / item_count)) - 1
+                line.place(x=0, y=max(0, line_y), width=w, height=1)
+                line.lift()
+            divider_line = spec.get("divider_line")
+            if divider_line is not None:
+                divider_line.place(x=divider_x, y=0, width=1, height=h)
+                divider_line.lift()
+            for border_line in spec.get("border_lines", []):
+                border_line.lift()
+
+            if item_count >= 10:
+                minimum_font = 9
+            else:
+                minimum_font = 6 if spec.get("compact") else 7
+            label_fs = max(minimum_font, int(round(spec["font_size"] * scale)))
+            value_fs = max(
+                minimum_font + (1 if spec.get("compact") else 0),
+                int(round(spec.get("value_font_size", spec["font_size"]) * scale)),
+            )
+            for name_lbl, val_lbl in spec.get("rows", []):
                 try:
-                    lbl.config(
-                        font=("Arial Narrow", fs, "bold")
-                    )
+                    name_lbl._responsive_font_size = label_fs
+                    name_lbl.config(font=("Arial Narrow", label_fs, "bold"))
+                    val_lbl._responsive_font_size = value_fs
+                    val_lbl.config(font=("Arial Narrow", value_fs, "bold"))
                 except Exception:
                     pass
 
-        # ==========================================================
-        # STATUS INDICATORS
-        # ==========================================================
         for spec in getattr(self, "_run_status_specs", []):
-            cx = offset_x + spec["x"] * scale_x
-            cy = offset_y + spec["y"] * scale_y
-
+            cx = offset_x + spec["x"] * scale
+            cy = offset_y + spec["y"] * scale
             if spec.get("kind") == "rectangle":
-                half_w = max(4.0, spec["half_w"] * scale_x)
-                half_h = max(7.0, spec["half_h"] * scale_y)
+                half_w = max(2.0, spec["half_w"] * scale)
+                half_h = max(3.0, spec["half_h"] * scale)
                 canvas.coords(
                     spec["item"],
-                    cx - half_w, cy - half_h,
-                    cx + half_w, cy + half_h
+                    cx - half_w,
+                    cy - half_h,
+                    cx + half_w,
+                    cy + half_h,
                 )
                 value_item = spec.get("value_item")
                 if value_item is not None:
                     canvas.coords(value_item, cx, cy)
                     canvas.itemconfig(
                         value_item,
-                        font=("Arial", max(7, int(round(8 * max(scale_x, scale_y)))), "bold")
+                        font=("Arial", max(5, int(round(8 * scale))), "bold"),
                     )
             else:
-                r = max(5.0, spec["r"] * scale)
+                radius = max(3.0, spec["r"] * scale)
                 canvas.coords(
                     spec["item"],
-                    cx - r, cy - r,
-                    cx + r, cy + r
+                    cx - radius,
+                    cy - radius,
+                    cx + radius,
+                    cy + radius,
                 )
 
     def build_run_monitor_view(self, parent):
         canvas = tk.Canvas(parent, bg="#c7c7c7", highlightthickness=0)
         canvas.pack(fill="both", expand=True)
         self.run_canvas = canvas
-        self.run_canvas.bind("<Configure>", self._resize_run_monitor)
+        self._run_resize_job = None
+        self._run_render_size = None
 
         # Exact coordinate space of the supplied 1917x857 reference screen.
         # The native SLD asset is resized into this landscape canvas.
@@ -5682,20 +5693,20 @@ class SCADAMainUI:
         self._run_status_specs = []
         self.status_indicator_value_items = {}
         self._run_reset_spec = None
-        self._run_image_path = "RUNMONITORNEW.jpg"
+        self._run_image_path = "RUNMONITORING FINAL.png"
 
         try:
             if not os.path.exists(self._run_image_path):
                 canvas.create_text(
                     self._run_base_w / 2, 50,
-                    text="[RUNMONITORNEW.jpg Diagram Visual System]",
+                    text="[RUNMONITORING FINAL.png Diagram Visual System]",
                     fill="#00ff00",
                     font=("Arial", 16, "bold")
                 )
             else:
                 self.run_source_image = Image.open(self._run_image_path).convert("RGB")
                 # Keep the 1917x857 overlay coordinate system; do not replace
-                # it with the asset's native 1275x832 dimensions.
+                # it with the asset's native 6204x4056 dimensions.
                 # Initial image; the Configure event immediately fits it.
                 self.run_image = ImageTk.PhotoImage(
                     self.run_source_image.resize(
@@ -5747,21 +5758,22 @@ class SCADAMainUI:
         }
 
         self.add_overlay_box(
-            canvas, 83, 125, 106, 82,
+            canvas, 83, 125, 120, 82,
             [("UAB", "0.00", "kv_i_uab"), ("UBC", "0.00", "kv_i_ubc"), ("UCA", "0.00", "kv_i_uca")],
             font_size=15,
             scale_box=False,
             horizontal_lines=True
         )
         self.add_overlay_box(
-            canvas, 1732, 125, 106, 82,
+            canvas, 1732, 125, 120, 82,
             [("UAB", "0.00", "kv_ii_uab"), ("UBC", "0.00", "kv_ii_ubc"), ("UCA", "0.00", "kv_ii_uca")],
             font_size=15,
             scale_box=False,
-            horizontal_lines=True
+            horizontal_lines=True,
+            right_edge_x=1838
         )
         self.add_overlay_box(
-            canvas, 376, 12, 106, 108,
+            canvas, 376, 12, 120, 108,
             [("UAB", "0.00", "wire1_uab"), ("IA", "0.00", "wire1_ia"),
              ("P", "0.00", "wire1_p"), ("Q", "0.00", "wire1_q")],
             font_size=15,
@@ -5770,7 +5782,7 @@ class SCADAMainUI:
             vertical_line=True
         )
         self.add_overlay_box(
-            canvas, 1446, 12, 106, 108,
+            canvas, 1446, 12, 120, 108,
             [("UAB", "0.00", "wire2_uab"), ("IA", "0.00", "wire2_ia"),
              ("P", "0.00", "wire2_p"), ("Q", "0.00", "wire2_q")],
             font_size=15,
@@ -5780,28 +5792,28 @@ class SCADAMainUI:
         )
 
         self.add_overlay_box(
-            # Keep the left panel just inside the vertical dashed boundary.
-            # Its reduced height ends safely above the lower dashed line.
-            canvas, 67, 519, 107, 276,
+            # Enlarge the #1 protection table and keep it fully inside the
+            # left dashed boundary.
+            canvas, 62, 485, 120, 310,
             [("Uab", "0.00", "g1_uab"), ("Ubc", "0.00", "g1_ubc"),
              ("Uca", "0.00", "g1_uca"), ("I A", "0.00", "g1_ia"),
              ("I B", "0.00", "g1_ib"), ("I C", "0.00", "g1_ic"),
              ("P", "0.00", "g1_p"), ("Q", "0.00", "g1_q"),
              ("f", "0.00", "g1_f"), ("COS", "0.00", "g1_cos"),
              ("UE", "0.00", "g1_ue"), ("IE", "0.00", "g1_ie")],
-            font_size=11,
+            font_size=14,
             scale_box=False,
             horizontal_lines=True
         )
         self.add_overlay_box(
-            canvas, 1745, 519, 107, 276,
+            canvas, 1734, 485, 120, 310,
             [("Uab", "0.00", "g2_uab"), ("Ubc", "0.00", "g2_ubc"),
              ("Uca", "0.00", "g2_uca"), ("I A", "0.00", "g2_ia"),
              ("I B", "0.00", "g2_ib"), ("I C", "0.00", "g2_ic"),
              ("P", "0.00", "g2_p"), ("Q", "0.00", "g2_q"),
              ("f", "0.00", "g2_f"), ("COS", "0.00", "g2_cos"),
              ("UE", "0.00", "g2_ue"), ("IE", "0.00", "g2_ie")],
-            font_size=11,
+            font_size=14,
             scale_box=False,
             horizontal_lines=True
         )
@@ -5825,53 +5837,49 @@ class SCADAMainUI:
         ]
         assert len(CARD_ORDER_14) == 14 and len(set(CARD_ORDER_14)) == 14
 
-        # Feeder centres measured from the supplied 1917x857 reference
-        # screenshot.  Keep these independent of an even-spacing formula:
-        # the source SLD has a small centre-to-centre change across the two
-        # 6 kV sections that is visible in the breaker and circle indicators.
-        param_positions = [226, 337.5, 448.5, 558.5, 671.5, 784.5, 896,
-                           1016.5, 1125, 1236.5, 1350.5, 1466.5, 1578, 1691]
+        # Breaker centres measured from the actual red bodies in the cleaned
+        # 1917x857 Run Monitor image.
+        param_positions = [
+            222.0, 332.5, 444.0, 556.0, 668.5, 783.5, 895.0,
+            1016.0, 1127.5, 1239.0, 1353.0, 1468.5, 1580.5, 1693.5,
+        ]
         for idx, x_coord in enumerate(param_positions, start=1):
             self.add_overlay_box(
-                # Right-align each compact card beside its feeder with a
-                # four-pixel clearance from the vertical line.
-                canvas, x_coord - 74, 332, 70, 78,
+                # Keep each compact table clear of the feeder symbol, status
+                # circle and orange equipment label on every screen size.
+                canvas, x_coord - 104, 348, 82, 78,
                 [("UAB", "0.00", f"p{idx}_uab"), ("IA", "0.00", f"p{idx}_ia"),
                  ("P", "0.00", f"p{idx}_p"), ("Q", "0.00", f"p{idx}_q")],
                 font_size=10,
                 scale_box=False,
                 horizontal_lines=True,
                 vertical_line=True,
-                right_edge_x=x_coord - 4
+                right_edge_x=x_coord - 22
             )
 
-        # Breaker rectangles and status circles share the exact feeder centre.
-        # One source of coordinates prevents the two indicator layers drifting.
+        # Breaker rectangles cover the red body; status circles cover the blue
+        # terminal triangle lower on the same feeder centreline.
         bottom_breakers = [
-            (x_coord, 278.5, f"brk_d{idx}", "#ff0000")
+            (x_coord, 279.5, f"brk_d{idx}", "#ff0000")
             for idx, x_coord in enumerate(param_positions, start=1)
         ]
         for bx, by, bid, bcolor in bottom_breakers:
             self.add_status_breaker(canvas, bx, by, bid, bcolor)
             self.add_status_circle(canvas, bx, by, bid, bcolor)
 
-        # The background contains four more solid breaker bodies outside the
-        # 14 feeder row: both Connection Wires and both outer generator paths.
+        # Four additional red breaker bodies outside the fourteen-feeder row.
         additional_breakers = [
-            # Centres measured from the supplied 1917x857 reference image.
-            # These were previously left at the old 1275px canvas positions,
-            # which caused the live square to appear beside the real breaker.
-            (58, 278.5, "brk_g1"),
-            (786, 190, "brk_wire1"),
-            (1132, 190, "brk_wire2"),
-            (1862, 278.5, "brk_g2"),
+            (55.5, 279.5, "brk_g1"),
+            (784.5, 193.5, "brk_wire1"),
+            (1132.0, 193.5, "brk_wire2"),
+            (1862.5, 279.5, "brk_g2"),
         ]
         for bx, by, bid in additional_breakers:
             self.add_status_breaker(
                 canvas, bx, by, bid, FEEDER_BREAKER_OFF_COLOR,
             )
 
-        canvas.bind("<Configure>", self._resize_run_monitor, add="+")
+        canvas.bind("<Configure>", self._schedule_run_monitor_resize)
         canvas.after(100, self._resize_run_monitor)
 
     def build_generator_view(self, parent, gen_num=1):
@@ -8470,10 +8478,11 @@ class SCADAMainUI:
             text = f"{float(value):.{decimals}f}"
         except Exception:
             text = "0.00"
-        # Hindari angka terpotong pada nilai panjang/negatif.
-        base = int(getattr(label, "_base_font_size", 12))
-        size = base if len(text) <= 7 else max(7, base - min(5, (len(text) - 6) // 2))
-        label.config(text=text, fg="#00ff36", bg="#000000", font=("Arial Narrow", size, "bold"))
+        # Keep long/negative values readable without reverting the simple
+        # outlined table to the former black-and-green display style.
+        base = int(getattr(label, "_responsive_font_size", getattr(label, "_base_font_size", 12)))
+        size = base if len(text) <= 7 else max(5, base - min(5, (len(text) - 6) // 2))
+        label.config(text=text, fg="#111111", font=("Arial Narrow", size, "bold"))
 
     def _status_rectangle_style(self, binding_key, value, default_active, valid=True):
         """Render CBZ8000 closed/open states, preserving unknown data quality."""
