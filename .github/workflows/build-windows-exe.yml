@@ -31,6 +31,20 @@ jobs:
             "dist/SCADA BONT - PC2 REALTIME SYNC.exe" `
             "dist/SCADA BONT - PC2 REALTIME SYNC FIXED.exe"
           Get-FileHash "dist/SCADA BONT - PC2 REALTIME SYNC FIXED.exe" -Algorithm SHA256
+      - name: Smoke test executable startup
+        shell: pwsh
+        run: |
+          $executable = Resolve-Path "dist/SCADA BONT - PC2 REALTIME SYNC FIXED.exe"
+          $process = Start-Process `
+            -FilePath $executable `
+            -WorkingDirectory $PWD `
+            -PassThru
+          Start-Sleep -Seconds 10
+          if ($process.HasExited) {
+            throw "Executable exited during startup with code $($process.ExitCode)."
+          }
+          Stop-Process -Id $process.Id -Force
+
 
       - name: Upload executable
         uses: actions/upload-artifact@v4
