@@ -2999,29 +2999,39 @@ body.monitor-display .reference-layout{display:block;}
 <script>
 /* JUNCTION STATUS - WARNA SAJA, POSISI/LAYOUT TIDAK DISENTUH */
 window.setJunctionState = function(id, active, activeColor, inactiveColor, flowMode, value){
-    const el = document.querySelector("." + id);
-
+    const el=document.querySelector("." + id);
     if(!el) return;
 
-    el.classList.remove("j-on", "j-off", "j-flow", "j-blink");
+    const stateClass=active ? "j-on" : "j-off";
+    const flowClass=active && (flowMode==="flow" || flowMode==="blink")
+        ? "j-" + flowMode
+        : "";
+    const visualKey=stateClass + "|" + flowClass;
 
-    if(active){
-        // paksa restart animasi
-        void el.offsetWidth;
-
-        el.classList.add("j-on");
-    }else{
-        el.classList.add("j-off");
+    /*
+       Telemetry arrives every second. Re-applying the same classes used to
+       restart CSS animations and force a synchronous layout on every poll.
+       Only change classes when the visual state actually changes.
+    */
+    if(el.dataset.junctionVisual!==visualKey){
+        el.classList.remove("j-on", "j-off", "j-flow", "j-blink");
+        el.classList.add(stateClass);
+        if(flowClass) el.classList.add(flowClass);
+        el.dataset.junctionVisual=visualKey;
     }
+
     const color=active ? activeColor : inactiveColor;
-    if(color){
+    if(color && el.dataset.junctionColor!==color){
         el.style.setProperty("background-color", color, "important");
         el.style.setProperty("border-color", color, "important");
         el.style.setProperty("color", "#ffffff", "important");
+        el.dataset.junctionColor=color;
     }
-    if(value !== undefined) el.textContent=String(value);
-    if(active && flowMode === "flow") el.classList.add("j-flow");
-    if(active && flowMode === "blink") el.classList.add("j-blink");
+
+    if(value!==undefined){
+        const text=String(value);
+        if(el.textContent!==text) el.textContent=text;
+    }
 };
 
 window.updateJunctionStatus = function(p){
@@ -3170,24 +3180,76 @@ function smallChar(ch){
     `;
 }
 
+/*
+   Update seven-segment nodes in place. Replacing innerHTML for every field on
+   every one-second poll briefly removes all lit segments and produces a
+   visible flash. Stable nodes let the browser repaint only changed segments.
+*/
+function segmentCharKind(ch){
+    if(SEG[ch]) return "digit";
+    if(ch===".") return "dot";
+    if(ch===":") return "separator";
+    if(ch==="-") return "dash";
+    return "spacer";
+}
+
+function segmentNodeKind(node){
+    if(node.classList.contains("seg-digit")) return "digit";
+    if(node.classList.contains("seg-dot")) return "dot";
+    if(node.classList.contains("seg-sep")) return "separator";
+    if(node.classList.contains("seg-dash")) return "dash";
+    return "spacer";
+}
+
+function createSegmentNode(ch, renderer){
+    const template=document.createElement("template");
+    template.innerHTML=renderer(ch).trim();
+    return template.content.firstElementChild;
+}
+
+function updateDigitNode(node, ch){
+    const enabled=SEG[ch] || "";
+    ["a","b","c","d","e","f","g"].forEach(segment=>{
+        const part=node.querySelector(".seg-"+segment);
+        if(part) part.classList.toggle("on", enabled.includes(segment));
+    });
+}
+
+function updateSegmentChildren(container, value, renderer){
+    const chars=String(value).split("");
+    const nodes=Array.from(container.children);
+
+    if(nodes.length!==chars.length){
+        container.innerHTML=chars.map(renderer).join("");
+        return;
+    }
+
+    chars.forEach((ch,index)=>{
+        const node=nodes[index];
+        const wantedKind=segmentCharKind(ch);
+        if(segmentNodeKind(node)!==wantedKind){
+            node.replaceWith(createSegmentNode(ch, renderer));
+        }else if(wantedKind==="digit"){
+            updateDigitNode(node, ch);
+        }
+    });
+}
+
+
 
 /* =========================================================
    LARGE VALUE
    ========================================================= */
 
 function setLarge(id,v){
-
     const e=document.getElementById(id);
+    if(!e) return;
 
-    if(!e){
-        return;
-    }
+    const displayValue=String(v??"--");
+    if(e.dataset.sevenSegmentValue===displayValue) return;
 
-    e.innerHTML=
-        String(v??"--")
-        .split("")
-        .map(largeChar)
-        .join("");
+    updateSegmentChildren(e, displayValue, largeChar);
+    e.dataset.sevenSegmentValue=displayValue;
 }
 
 
@@ -3196,13 +3258,8 @@ function setLarge(id,v){
    ========================================================= */
 
 function setSmall(id,v){
-    console.log("SET SMALL:", id, v); 
-
     const e=document.getElementById(id);
-
-    if(!e){
-        return;
-    }
+    if(!e) return;
 
     const safeValue=(
         v===undefined ||
@@ -3210,108 +3267,48 @@ function setSmall(id,v){
         v===""
     ) ? 0 : v;
 
-    /*
-       SEVEN SEGMENT DENGAN 2 ANGKA DI BELAKANG KOMA
-       ---------------------------------------------------------
-       Contoh:
-         0       -> 0.00
-         12.34   -> 12.34
-         123.45  -> 123.45
-         1234.56 -> 1234.56 (nilai tetap utuh)
-
-       DIGIT_MAP menentukan minimum digit sebelum desimal,
-       sedangkan koma/decimal ditampilkan sebagai titik Seven Segment.
-    */
     const maxDigits=Math.max(
         1,
         Math.floor(Number(DIGIT_MAP[id] ?? 5))
     );
 
     let n=Number(safeValue);
+    if(!Number.isFinite(n)) n=0;
 
-    if(!Number.isFinite(n)){
-        n=0;
-    }
-
-    /*
-       Selalu gunakan 2 angka di belakang koma.
-       Tanda minus tidak ditampilkan agar tetap kompatibel
-       dengan Seven Segment numerik yang sudah ada.
-    */
-    const negative = n < 0;
-    const fixed = Math.abs(n).toFixed(2);
-
-    let parts=fixed.split(".");
+    const negative=n<0;
+    const fixed=Math.abs(n).toFixed(2);
+    const parts=fixed.split(".");
     let integerDigits=parts[0].replace(/[^0-9]/g,"");
     const decimalDigits=parts[1] || "00";
-
-    /*
-       Bagian integer yang melebihi minimum slot tetap ditampilkan utuh.
-    */
-    // Preserve the full measured value when it needs more than one digit.
-
-    /*
-       Jika kurang dari jumlah slot, isi 0 dari sebelah kiri.
-       Contoh DIGIT_MAP = 5:
-           0      -> 00000.00
-           12.34  -> 00012.34
-           123.45 -> 00123.45
-    */
     integerDigits=integerDigits.padStart(maxDigits,"0");
 
     let displayValue=integerDigits+"."+decimalDigits;
+    if(negative) displayValue="-"+displayValue;
 
-    if(negative){
-    displayValue="-"+displayValue;
-    }
-
-    e.innerHTML=
-        '<span class="small-seven">'+
-        displayValue
-            .split("")
-            .map(smallChar)
-            .join("")+
-        '</span>';
-
-    const seg=e.querySelector(".small-seven");
-
+    let seg=e.querySelector(".small-seven");
     if(!seg){
-        return;
+        seg=document.createElement("span");
+        seg.className="small-seven";
+        e.textContent="";
+        e.appendChild(seg);
     }
 
-    /*
-       SCALE INDIVIDUAL
-       ---------------------------------------------------------
-       0.10 = sangat kecil
-       1.00  = ukuran normal
-       2.00  = 2x lebih besar
-       50.00 = 50x lebih besar
+    if(e.dataset.sevenSegmentValue!==displayValue){
+        updateSegmentChildren(seg, displayValue, smallChar);
+        e.dataset.sevenSegmentValue=displayValue;
+    }
 
-       Tidak ada auto-fit agar setting user benar-benar dipakai.
-    */
-    /*
-       FONT SIZE MODE
-       ---------------------------------------------------------
-       Sekarang ukuran Seven Segment dikontrol seperti ukuran font biasa:
-
-           1  = paling kecil
-           24 = ukuran default/current
-           50 = paling besar
-
-       Karena Seven Segment dibuat dari DIV/CSS, font-size saja tidak
-       otomatis mengubah bentuk segmennya. Jadi font-size dijadikan
-       skala visual terhadap ukuran dasar 24px.
-
-       SCALE_MAP tetap dipertahankan sebagai pengali tambahan agar
-       konfigurasi lama tidak rusak.
-    */
     const fontSize=Math.min(50,Math.max(1,Number(FONT_SIZE_MAP[id] ?? 24)));
     const legacyScale=Math.max(0.01,Number(SCALE_MAP[id] ?? 1));
     const scale=(fontSize/24)*legacyScale;
+    const visualKey=fontSize+"|"+scale;
 
-    seg.style.fontSize=fontSize+"px";
-    seg.style.transform="scale("+scale+")";
-    seg.style.transformOrigin="center center";
+    if(seg.dataset.visualKey!==visualKey){
+        seg.style.fontSize=fontSize+"px";
+        seg.style.transform="scale("+scale+")";
+        seg.style.transformOrigin="center center";
+        seg.dataset.visualKey=visualKey;
+    }
 }
 
 
@@ -3546,7 +3543,6 @@ function updatePanel(p){
         return;
     }
 
-    updateJunctionStatus(p);
 
 
     setLarge(
@@ -4071,7 +4067,12 @@ initializeSevenSegments();
    JSON TELEMETRY POLLING - NO FLASK / NO SOCKET.IO
    ========================================================= */
 
+let telemetryRefreshInFlight=false;
+
 async function refreshTelemetry(){
+    if(telemetryRefreshInFlight) return;
+    telemetryRefreshInFlight=true;
+
     const status=document.getElementById("status");
     try{
         const response=await fetch(
@@ -4080,12 +4081,17 @@ async function refreshTelemetry(){
         );
         if(!response.ok) throw new Error("HTTP "+response.status);
         const data=await response.json();
+        /*
+           updatePanel owns the IEC-104 ONLINE/OFFLINE state. A successful HTTP
+           request only proves that the local web server is reachable; it must
+           not overwrite an OFFLINE RTU state with ONLINE.
+        */
         updatePanel(data[monitorId==="G2" ? "p2" : "p1"] || {});
-        status.textContent="ONLINE // "+monitorId+" LIVE TELEMETRY";
-        status.className="status";
     }catch(error){
         status.textContent="OFFLINE // "+monitorId+" LIVE TELEMETRY";
         status.className="status offline";
+    }finally{
+        telemetryRefreshInFlight=false;
     }
 }
 
