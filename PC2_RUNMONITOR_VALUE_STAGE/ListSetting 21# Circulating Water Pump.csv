@@ -1,5 +1,0 @@
-Device_Addr,Bay_Name,Physical_Name,Info_Name,Info_Index,Type,Min_Save_Mode,ASDU,IOA,Coefficient,CTPT,Tolerance,Alarm_Class,UUp_Limit,Up_Limit,Down_Limit,DDown_Limit,Formula,Add_Offset,Unit
-10.100.163.6,21# Circulating Water Pump,Uab,Uab,2,Voltage,2Minute,5377,16388,0.00211438185,0.10392,0,Warning,1000000,1000000,-1000000,-1000000,LINE_VOLTAGE,0.0,kV
-10.100.163.6,21# Circulating Water Pump,Ia,Ia,1,Current,2Minute,5377,16385,0.000183,1.5,0,Warning,1000000,1000000,-1000000,-1000000,CURRENT_CT,0.0,A
-10.100.163.6,21# Circulating Water Pump,P,P,3,Power,2Minute,5377,16391,0.031713999999,0.9,0,Warning,1000000,1000000,-1000000,-1000000,POWER,0.0,kW
-10.100.163.6,21# Circulating Water Pump,Q,Q,4,Power,2Minute,5377,16392,0.031713999999,0.9,0,Warning,1000000,1000000,-1000000,-1000000,POWER,0.0,kVar

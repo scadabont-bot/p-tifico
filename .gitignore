@@ -6,14 +6,15 @@
 /MonitorTV.json
 /Report_*.csv
 
-# Local Python/PyInstaller output.
+# Local Python/packaging output.
 /__pycache__/
 /build/
 /build_mqtt/
 /dist/
 /dist_mqtt/
-/SCADA BONT - PC2 REALTIME SYNC.exe
-/SCADA BONT - PC2 REALTIME SYNC.exe.pre_*
+/release/
+/p-tifico-backup.exe
+/p-tifico-backup-Setup.exe
 
 # Local compiled artifacts.
 *.pyc

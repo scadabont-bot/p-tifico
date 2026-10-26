@@ -1,4 +1,4 @@
-name: Build Windows executable
+name: Build Windows installer
 
 on:
   workflow_dispatch:
@@ -18,38 +18,120 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install build dependencies
+      - name: Install Python build dependencies
         run: python -m pip install "pyinstaller==6.16.0" "pillow==12.3.0"
 
-      - name: Build GUI executable
-        run: pyinstaller --noconfirm --clean "SCADA BONT - PC2 REALTIME SYNC.spec"
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $compiler)) {
+            choco install innosetup --yes --no-progress
+          }
+          if (-not (Test-Path $compiler)) {
+            throw "Inno Setup compiler was not installed."
+          }
 
-      - name: Name release executable
+      - name: Build GUI executable
+        run: pyinstaller --noconfirm --clean p-tifico-backup.spec
+
+      - name: Build Windows installer
         shell: pwsh
         run: |
-          Copy-Item `
-            "dist/SCADA BONT - PC2 REALTIME SYNC.exe" `
-            "dist/SCADA BONT - PC2 REALTIME SYNC FIXED.exe"
-          Get-FileHash "dist/SCADA BONT - PC2 REALTIME SYNC FIXED.exe" -Algorithm SHA256
-      - name: Smoke test executable startup
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
+            "installer\p-tifico-backup.iss"
+
+      - name: Install and verify packaged application
         shell: pwsh
         run: |
-          $executable = Resolve-Path "dist/SCADA BONT - PC2 REALTIME SYNC FIXED.exe"
-          $process = Start-Process `
-            -FilePath $executable `
-            -WorkingDirectory $PWD `
+          $installer = Resolve-Path "dist\p-tifico-backup-Setup.exe"
+          $installDir = Join-Path $env:RUNNER_TEMP "p-tifico-backup-installed"
+          $install = Start-Process `
+            -FilePath $installer `
+            -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$installDir" `
+            -PassThru `
+            -Wait
+          if ($install.ExitCode -ne 0) {
+            throw "Installer exited with code $($install.ExitCode)."
+          }
+
+          $requiredFiles = @(
+            "p-tifico-backup.exe",
+            "SCADA_BONT.ico",
+            "RUNMONITORING FINAL.png",
+            "G1MONITOR.jpg.png",
+            "G2MONITOR.jpg.png",
+            "SYSTEMCONFIG_DARK.png",
+            "AUXILIARY_MATCHED.png",
+            "MONITOR V55.html",
+            "CommunicationConfig.json",
+            "MQTTConfig.json",
+            "UIRealtimeBindings.json",
+            "MonitorTVConfig.json",
+            "CBZ8000AppData.json"
+          )
+          foreach ($file in $requiredFiles) {
+            if (-not (Test-Path (Join-Path $installDir $file))) {
+              throw "Missing installed file: $file"
+            }
+          }
+
+          $listSettings = @(Get-ChildItem $installDir -Filter "ListSetting *.csv")
+          $statusSettings = @(Get-ChildItem $installDir -Filter "StatusSetting *.csv")
+          if ($listSettings.Count -lt 24 -or $statusSettings.Count -lt 24) {
+            throw "Incomplete settings: $($listSettings.Count) ListSetting and $($statusSettings.Count) StatusSetting files."
+          }
+
+          $env:SCADA_SELF_TEST = "1"
+          $selfTest = Start-Process `
+            -FilePath (Join-Path $installDir "p-tifico-backup.exe") `
+            -WorkingDirectory $installDir `
+            -PassThru `
+            -Wait
+          Remove-Item Env:\SCADA_SELF_TEST
+          if ($selfTest.ExitCode -ne 0) {
+            throw "Packaged self-test exited with code $($selfTest.ExitCode)."
+          }
+
+          $application = Start-Process `
+            -FilePath (Join-Path $installDir "p-tifico-backup.exe") `
+            -WorkingDirectory $installDir `
             -PassThru
           Start-Sleep -Seconds 10
-          if ($process.HasExited) {
-            throw "Executable exited during startup with code $($process.ExitCode)."
+          if ($application.HasExited) {
+            throw "Installed application exited during startup with code $($application.ExitCode)."
           }
-          Stop-Process -Id $process.Id -Force
+          Stop-Process -Id $application.Id -Force
 
+          $uninstaller = Join-Path $installDir "unins000.exe"
+          if (-not (Test-Path $uninstaller)) {
+            throw "Installer did not create an uninstaller."
+          }
+          $uninstall = Start-Process `
+            -FilePath $uninstaller `
+            -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" `
+            -PassThru `
+            -Wait
+          if ($uninstall.ExitCode -ne 0) {
+            throw "Uninstaller exited with code $($uninstall.ExitCode)."
+          }
 
-      - name: Upload executable
+      - name: Create checksum
+        shell: pwsh
+        run: |
+          $installer = "dist\p-tifico-backup-Setup.exe"
+          $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  p-tifico-backup-Setup.exe" |
+            Set-Content "dist\p-tifico-backup-Setup.exe.sha256" -Encoding ascii
+          Get-Item $installer
+          Get-Content "dist\p-tifico-backup-Setup.exe.sha256"
+
+      - name: Upload Windows installer
         uses: actions/upload-artifact@v4
         with:
-          name: scada-bont-windows-exe
-          path: dist/SCADA BONT - PC2 REALTIME SYNC FIXED.exe
+          name: p-tifico-backup-windows-installer
+          path: |
+            dist/p-tifico-backup-Setup.exe
+            dist/p-tifico-backup-Setup.exe.sha256
           if-no-files-found: error
           compression-level: 0

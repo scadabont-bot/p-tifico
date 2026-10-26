@@ -1,7 +1,0 @@
-﻿Device Addres,Jian_Ge Id,PhysicalName,InfoName,Info_Index,Type,HissaveMode,Reverse,SetStr,ResetStr,SetVoice,ResetVoice,SetVoiceFile,ResetVoiceFile,AlertLevel,OpenAlertEnable,CloseAlertEnable,OpenRingEnable,CloseRingEnable,OpenFluteEnable,CloseFluteEnable,UseFlag,MansetFlag,Dummy0,Expression,Expression,eventype,ASDU,IOA
-9,9,1# Generator communication status,04YX0900000002,1,32,1,0,1,2,-1,-1,0,0,3,-1,-1,-1,-1,0,0,-1,0,0,,,0,2304,2
-9,9,2# Generator communication status,04YX0900000003,2,32,1,0,1,2,-1,-1,0,0,3,-1,-1,-1,-1,0,0,-1,0,0,,,0,2304,3
-9,9,1# Connection wire communication status,04YX0900000004,3,32,1,0,1,2,-1,-1,0,0,3,-1,-1,-1,-1,0,0,-1,0,0,,,0,2304,4
-9,9,2# Connection wire communication status,04YX0900000005,4,32,1,0,1,2,-1,-1,0,0,3,-1,-1,-1,-1,0,0,-1,0,0,,,0,2304,5
-9,9,1# Plant transformer communication status,04YX0900000006,5,32,1,0,1,2,-1,-1,0,0,3,-1,-1,-1,-1,0,0,-1,0,0,,,0,2304,6
-9,9,2# Plant transformer communication status,04YX0900000007,6,32,1,0,1,2,-1,-1,0,0,3,-1,-1,-1,-1,0,0,-1,0,0,,,0,2304,7

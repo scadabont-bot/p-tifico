@@ -9,16 +9,23 @@ import subprocess
 import threading
 import tkinter as tk
 import socket
+import ipaddress
 import struct
 import csv
+import copy
 import shutil
 import re
 import ast
 import json
 import ssl
+import sqlite3
+import zipfile
+import tempfile
+from xml.sax.saxutils import escape
 from concurrent.futures import ThreadPoolExecutor
-from tkinter import ttk, messagebox, simpledialog, filedialog, font as tkfont
-from PIL import Image, ImageTk, ImageOps
+from tkinter import ttk, messagebox, filedialog, font as tkfont
+from PIL import Image, ImageTk, ImageOps, ImageGrab
+import cbz8000_device_data as cbz_device_data
 
 def _cbz_breaker_state(raw_value, reverse=0):
     """Normalize one YX bit like CBZ8000: 1=closed/red, 0=open/green."""
@@ -37,10 +44,37 @@ try:
     from tkcalendar import DateEntry
 except ImportError:
     class DateEntry(ttk.Entry):
+        """ISO-date entry used when tkcalendar is unavailable."""
+
         def __init__(self, master=None, **kwargs):
-            kwargs.pop("date_pattern", None)
-            kwargs.pop("width", None)
+            for option in (
+                "date_pattern",
+                "background",
+                "foreground",
+                "borderwidth",
+            ):
+                kwargs.pop(option, None)
+            self._date_var = kwargs.pop(
+                "textvariable", tk.StringVar(master)
+            )
+            kwargs["textvariable"] = self._date_var
             super().__init__(master, **kwargs)
+            self.set_date(datetime.date.today())
+
+        def set_date(self, value):
+            if isinstance(value, datetime.datetime):
+                value = value.date()
+            elif not isinstance(value, datetime.date):
+                value = datetime.date.fromisoformat(str(value))
+            self._date_var.set(value.isoformat())
+
+        def get_date(self):
+            try:
+                return datetime.date.fromisoformat(
+                    self._date_var.get().strip()
+                )
+            except (TypeError, ValueError):
+                return datetime.date.today()
 
 VINCI_PORT = 2404
 VINCI_RECONNECT_DELAY = 2.0
@@ -129,6 +163,61 @@ for _rtu in RTU_LIST:
     VINCI_STATUS.setdefault(_rtu["ip"], False)
     HOST_STATUS.setdefault(_rtu["ip"], False)
 
+COMM_DIAGNOSTICS_LOCK = threading.RLock()
+COMM_DIAGNOSTIC_COUNTER_FIELDS = (
+    "connect_attempts",
+    "connections",
+    "disconnects",
+    "errors",
+    "rx_frames",
+    "rx_bytes",
+    "relay_updates",
+)
+
+
+def _new_communication_diagnostic():
+    return {
+        **{field: 0 for field in COMM_DIAGNOSTIC_COUNTER_FIELDS},
+        "last_connected_epoch": None,
+        "last_rx_epoch": None,
+        "last_error_epoch": None,
+        "last_error": "",
+    }
+
+
+COMM_DIAGNOSTICS = {
+    rtu["ip"]: _new_communication_diagnostic() for rtu in RTU_LIST
+}
+COMM_DIAGNOSTICS_META = {"last_reset_epoch": time.time()}
+
+
+def _update_communication_diagnostic(ip, increments=None, **updates):
+    """Atomically update real communication telemetry for one RTU."""
+    address = str(ip)
+    with COMM_DIAGNOSTICS_LOCK:
+        state = COMM_DIAGNOSTICS.setdefault(
+            address, _new_communication_diagnostic()
+        )
+        for field, amount in (increments or {}).items():
+            if field in COMM_DIAGNOSTIC_COUNTER_FIELDS:
+                state[field] = int(state.get(field, 0)) + int(amount)
+        for field, value in updates.items():
+            if field in state:
+                state[field] = value
+
+
+def _reset_communication_diagnostics():
+    """Reset communication counters without changing connection state."""
+    with COMM_DIAGNOSTICS_LOCK:
+        for state in COMM_DIAGNOSTICS.values():
+            for field in COMM_DIAGNOSTIC_COUNTER_FIELDS:
+                state[field] = 0
+            state["last_error_epoch"] = None
+            state["last_error"] = ""
+        COMM_DIAGNOSTICS_META["last_reset_epoch"] = time.time()
+        return len(COMM_DIAGNOSTICS)
+
+
 # Legacy maps are retained only for compatibility with old UI code.
 # They are NOT used for IEC-104 routing; CSV (IP, ASDU, IOA) is authoritative.
 IOA_MAP_RTU1 = {
@@ -156,8 +245,14 @@ APP_DIR = (
     if getattr(sys, "frozen", False)
     else os.path.dirname(os.path.abspath(__file__))
 )
+CBZ8000_DEVICE_DATA_PATH = os.path.join(APP_DIR, "CBZ8000AppData.json")
 COMMUNICATION_CONFIG_PATH = os.path.join(APP_DIR, "CommunicationConfig.json")
 MQTT_CONFIG_PATH = os.path.join(APP_DIR, "MQTTConfig.json")
+TREND_HISTORY_DB = os.path.join(APP_DIR, "TrendHistory.sqlite3")
+TREND_HISTORY_INTERVAL = 60.0
+TREND_HISTORY_STARTED = False
+TREND_HISTORY_LOCK = threading.RLock()
+TREND_HISTORY_RETENTION_DAYS = 400
 
 
 # MQTT is intentionally implemented with the Python standard library.  The
@@ -444,6 +539,103 @@ def _communication_config():
     except Exception:
         pass
     return defaults
+
+COMMUNICATION_MODES = (
+    "master_slave",
+    "parallel",
+    "parallel_direct",
+    "master",
+    "peer",
+)
+
+
+def _validated_ipv4(value, label):
+    try:
+        address = ipaddress.ip_address(str(value).strip())
+    except ValueError as exc:
+        raise ValueError(f"{label} must be a valid IPv4 address.") from exc
+    if address.version != 4:
+        raise ValueError(f"{label} must be an IPv4 address.")
+    return str(address)
+
+
+def _validated_ipv4_list(value, label):
+    if isinstance(value, str):
+        parts = re.split(r"[,;\\s]+", value.strip())
+    elif isinstance(value, (list, tuple, set)):
+        parts = list(value)
+    else:
+        parts = []
+    result = []
+    for part in parts:
+        if str(part).strip():
+            address = _validated_ipv4(part, label)
+            if address not in result:
+                result.append(address)
+    return result
+
+
+def _validate_communication_config(config):
+    """Return a normalized, safe CommunicationConfig payload."""
+    normalized = dict(config or {})
+    mode = str(normalized.get("mode", "")).strip().lower()
+    if mode not in COMMUNICATION_MODES:
+        raise ValueError(
+            "Mode must be one of: " + ", ".join(COMMUNICATION_MODES)
+        )
+    master_ip = _validated_ipv4(
+        normalized.get("master_ip"), "Master IP"
+    )
+    peer_ip = _validated_ipv4(
+        normalized.get("peer_ip"), "Peer IP"
+    )
+    if master_ip == peer_ip:
+        raise ValueError("Master IP and Peer IP must be different.")
+    try:
+        relay_port = int(str(normalized.get("relay_port", "")).strip())
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Relay port must be an integer.") from exc
+    if not 1 <= relay_port <= 65535:
+        raise ValueError("Relay port must be between 1 and 65535.")
+    relay_token = str(normalized.get("relay_token", "")).strip()
+    if not relay_token:
+        raise ValueError("Relay token cannot be empty.")
+
+    node_149 = _validated_ipv4_list(
+        normalized.get("node_149_rtus", []), "Node .149 RTU list"
+    )
+    node_150 = _validated_ipv4_list(
+        normalized.get("node_150_rtus", []), "Node .150 RTU list"
+    )
+    configured_rtus = {str(rtu["ip"]) for rtu in RTU_LIST}
+    unknown_rtus = (set(node_149) | set(node_150)) - configured_rtus
+    if unknown_rtus:
+        raise ValueError(
+            "RTU assignments contain unconfigured addresses: "
+            + ", ".join(sorted(unknown_rtus))
+        )
+    overlap = set(node_149) & set(node_150)
+    if overlap:
+        raise ValueError(
+            "RTUs cannot be assigned to both nodes: "
+            + ", ".join(sorted(overlap))
+        )
+
+    normalized.update({
+        "mode": mode,
+        "master_ip": master_ip,
+        "peer_ip": peer_ip,
+        "relay_port": relay_port,
+        "relay_token": relay_token,
+        "node_149_rtus": node_149,
+        "node_150_rtus": node_150,
+        "tv_editor_allowed_ips": _validated_ipv4_list(
+            normalized.get("tv_editor_allowed_ips", []),
+            "TV editor allowed IPs",
+        ),
+        "description": str(normalized.get("description", "")).strip(),
+    })
+    return normalized
 
 
 def _local_scada_ip():
@@ -779,9 +971,15 @@ def _apply_relay_snapshot(payload):
             except (TypeError, ValueError):
                 continue
         now = time.monotonic()
+        now_epoch = time.time()
         for ip in payload.get("data_store", {}):
             if str(ip) not in owned:
                 RAW_TIMESTAMP[str(ip)] = now
+                _update_communication_diagnostic(
+                    ip,
+                    {"relay_updates": 1},
+                    last_rx_epoch=now_epoch,
+                )
 
 
 def _relay_peer_worker():
@@ -974,6 +1172,491 @@ SETTING_BAY_IP = {
     "23# Circulating Water Pump": "10.100.163.6",
     "Voltage Monitoring": "10.100.163.7",
 }
+
+TREND_DEVICES = tuple(SETTING_BAY_IP)
+TREND_VALUE_KEYS = ("U", "I", "P", "Q", "f")
+TREND_RANGE_PRESETS = {
+    "1 Hour": datetime.timedelta(hours=1),
+    "6 Hours": datetime.timedelta(hours=6),
+    "12 Hours": datetime.timedelta(hours=12),
+    "Daily": datetime.timedelta(days=1),
+    "Weekly": datetime.timedelta(days=7),
+    "Monthly": datetime.timedelta(days=30),
+}
+
+
+def _trend_finite_value(mapping, *keys):
+    """Return the first finite numeric value for the requested keys."""
+    for key in keys:
+        try:
+            value = float(mapping.get(key))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value):
+            return value
+    return None
+
+
+def _trend_device_definition(device_name):
+    """Return the telemetry source and standard trend-variable mapping."""
+    source_ip = str(SETTING_BAY_IP.get(device_name, ""))
+    if device_name == "Connection Wire I":
+        keys = {
+            "U": ("W1_Uab",),
+            "I": ("W1_Ia",),
+            "P": ("W1_P",),
+            "Q": ("W1_Q",),
+            "f": ("W1_f",),
+        }
+        source_kind = "rtu"
+    elif device_name == "Connection Wire II":
+        keys = {
+            "U": ("W2_Uab",),
+            "I": ("W2_Ia",),
+            "P": ("W2_P",),
+            "Q": ("W2_Q",),
+            "f": ("W2_f",),
+        }
+        source_kind = "rtu"
+    elif device_name in (
+        "1# Generator",
+        "2# Generator",
+        "Voltage Monitoring",
+    ):
+        keys = {
+            "U": ("Uab", "Uab_L", "Uan"),
+            "I": ("Ia",),
+            "P": ("P", "P_tot"),
+            "Q": ("Q",),
+            "f": ("f",),
+        }
+        source_kind = "rtu"
+    else:
+        keys = {
+            "U": ("Uab", "Uab_L", "Uan"),
+            "I": ("Ia",),
+            "P": ("P", "P_tot"),
+            "Q": ("Q",),
+            "f": ("f",),
+        }
+        source_kind = "bay"
+    return source_ip, source_kind, keys
+
+
+def _trend_device_snapshot(device_name, captured_at=None):
+    """Build one historian row from the live stores without any UI dependency."""
+    source_ip, source_kind, key_map = _trend_device_definition(device_name)
+    with DATA_LOCK:
+        online = bool(VINCI_STATUS.get(source_ip, False))
+        last_update = RAW_TIMESTAMP.get(source_ip)
+        fresh = bool(
+            online
+            and last_update is not None
+            and float(last_update) > 0.0
+            and (
+                time.monotonic() - float(last_update)
+                <= NETWORK_DEVICE_STALE_SECONDS
+            )
+        )
+        if source_kind == "bay":
+            source_values = dict(BAY_VALUE_STORE.get(device_name, {}))
+        else:
+            source_values = dict(
+                DATA_STORE.get(source_ip, DEFAULT_DATA)
+            )
+
+    values = {
+        key: (
+            _trend_finite_value(source_values, *source_keys)
+            if fresh else None
+        )
+        for key, source_keys in key_map.items()
+    }
+    has_values = any(value is not None for value in values.values())
+    quality = (
+        "ONLINE"
+        if fresh and has_values
+        else "NO DATA"
+        if online
+        else "OFFLINE"
+    )
+    if quality != "ONLINE":
+        values = {key: None for key in TREND_VALUE_KEYS}
+    return {
+        "captured_at": int(
+            time.time() if captured_at is None else captured_at
+        ),
+        "device": str(device_name),
+        "source_ip": source_ip,
+        "quality": quality,
+        **values,
+    }
+
+
+def _trend_history_connect():
+    """Open and initialize the compact process-trend historian."""
+    connection = sqlite3.connect(TREND_HISTORY_DB, timeout=10.0)
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trend_samples (
+            captured_at INTEGER NOT NULL,
+            device TEXT NOT NULL,
+            source_ip TEXT NOT NULL,
+            quality TEXT NOT NULL,
+            voltage REAL,
+            current REAL,
+            active_power REAL,
+            reactive_power REAL,
+            frequency REAL,
+            PRIMARY KEY (captured_at, device)
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_trend_device_time
+        ON trend_samples (device, captured_at)
+        """
+    )
+    return connection
+
+
+def _trend_history_log_once(captured_at=None):
+    """Persist one sample for every trend device, even when no graph is open."""
+    epoch = int(time.time() if captured_at is None else captured_at)
+    rows = [
+        _trend_device_snapshot(device_name, epoch)
+        for device_name in TREND_DEVICES
+    ]
+    with TREND_HISTORY_LOCK:
+        connection = _trend_history_connect()
+        try:
+            connection.executemany(
+                """
+                INSERT OR REPLACE INTO trend_samples (
+                    captured_at, device, source_ip, quality,
+                    voltage, current, active_power,
+                    reactive_power, frequency
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        row["captured_at"],
+                        row["device"],
+                        row["source_ip"],
+                        row["quality"],
+                        row["U"],
+                        row["I"],
+                        row["P"],
+                        row["Q"],
+                        row["f"],
+                    )
+                    for row in rows
+                ],
+            )
+            cutoff = epoch - int(
+                TREND_HISTORY_RETENTION_DAYS * 86400
+            )
+            connection.execute(
+                "DELETE FROM trend_samples WHERE captured_at < ?",
+                (cutoff,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+    return len(rows)
+
+
+def _trend_history_query(
+    device_name, start_epoch, end_epoch, max_points=720,
+):
+    """Read one device range and optionally aggregate it for screen display."""
+    with TREND_HISTORY_LOCK:
+        connection = _trend_history_connect()
+        try:
+            raw_rows = connection.execute(
+                """
+                SELECT captured_at, source_ip, quality,
+                       voltage, current, active_power,
+                       reactive_power, frequency
+                FROM trend_samples
+                WHERE device = ? AND captured_at BETWEEN ? AND ?
+                ORDER BY captured_at
+                """,
+                (
+                    str(device_name),
+                    int(start_epoch),
+                    int(end_epoch),
+                ),
+            ).fetchall()
+        finally:
+            connection.close()
+
+    rows = [
+        {
+            "captured_at": int(row[0]),
+            "source_ip": str(row[1]),
+            "quality": str(row[2]),
+            "U": row[3],
+            "I": row[4],
+            "P": row[5],
+            "Q": row[6],
+            "f": row[7],
+        }
+        for row in raw_rows
+    ]
+    if not max_points or len(rows) <= int(max_points):
+        return rows
+
+    span = max(1, int(end_epoch) - int(start_epoch))
+    bucket_seconds = max(
+        1, int(math.ceil(span / float(max_points)))
+    )
+    buckets = {}
+    for row in rows:
+        bucket = (
+            int(row["captured_at"]) // bucket_seconds
+        ) * bucket_seconds
+        grouped = buckets.setdefault(
+            bucket,
+            {
+                "captured_at": bucket,
+                "source_ip": row["source_ip"],
+                "qualities": [],
+                **{key: [] for key in TREND_VALUE_KEYS},
+            },
+        )
+        grouped["qualities"].append(row["quality"])
+        for key in TREND_VALUE_KEYS:
+            value = row.get(key)
+            if value is not None:
+                grouped[key].append(float(value))
+
+    aggregated = []
+    for bucket in sorted(buckets):
+        grouped = buckets[bucket]
+        qualities = grouped.pop("qualities")
+        quality = (
+            "ONLINE"
+            if "ONLINE" in qualities
+            else "NO DATA"
+            if "NO DATA" in qualities
+            else "OFFLINE"
+        )
+        aggregated.append({
+            "captured_at": grouped["captured_at"],
+            "source_ip": grouped["source_ip"],
+            "quality": quality,
+            **{
+                key: (
+                    sum(grouped[key]) / len(grouped[key])
+                    if grouped[key] else None
+                )
+                for key in TREND_VALUE_KEYS
+            },
+        })
+    return aggregated
+
+
+def _trend_history_worker():
+    """Keep historian sampling independent from all graph windows."""
+    while True:
+        started = time.monotonic()
+        try:
+            _trend_history_log_once()
+        except Exception as exc:
+            print(f"[TREND HISTORIAN] {exc}")
+        elapsed = time.monotonic() - started
+        time.sleep(
+            max(0.25, TREND_HISTORY_INTERVAL - elapsed)
+        )
+
+
+def start_trend_history_logger():
+    """Start the single process-wide historian worker."""
+    global TREND_HISTORY_STARTED
+    if TREND_HISTORY_STARTED:
+        return
+    TREND_HISTORY_STARTED = True
+    threading.Thread(
+        target=_trend_history_worker,
+        daemon=True,
+        name="Process-Trend-Historian",
+    ).start()
+
+
+def _xlsx_column_name(index):
+    name = ""
+    number = int(index)
+    while number:
+        number, remainder = divmod(number - 1, 26)
+        name = chr(65 + remainder) + name
+    return name
+
+
+def _xlsx_text(value):
+    text = re.sub(
+        r"[\x00-\x08\x0b\x0c\x0e-\x1f]",
+        "",
+        str(value),
+    )
+    return escape(text)
+
+
+def _write_xlsx(path, sheet_name, headers, rows):
+    """Write a dependency-free Excel workbook with filters and frozen headers."""
+    output_path = os.path.abspath(path)
+    if not output_path.lower().endswith(".xlsx"):
+        output_path += ".xlsx"
+    safe_sheet = re.sub(r"[\[\]:*?/\\]", " ", str(sheet_name)).strip()
+    safe_sheet = (safe_sheet or "Data")[:31]
+    materialized = [list(row) for row in rows]
+    all_rows = [list(headers)] + materialized
+    column_count = max(1, len(headers))
+    row_count = max(1, len(all_rows))
+
+    widths = []
+    for column_index in range(column_count):
+        longest = len(str(headers[column_index]))
+        for row in materialized[:5000]:
+            if column_index < len(row):
+                longest = max(longest, len(str(row[column_index])))
+        widths.append(min(55, max(10, longest + 2)))
+
+    xml_rows = []
+    for row_index, row in enumerate(all_rows, 1):
+        cells = []
+        for column_index in range(column_count):
+            value = row[column_index] if column_index < len(row) else ""
+            reference = f"{_xlsx_column_name(column_index + 1)}{row_index}"
+            if (
+                row_index > 1
+                and isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and math.isfinite(float(value))
+            ):
+                cells.append(
+                    f'<c r="{reference}" s="2"><v>{float(value)}</v></c>'
+                )
+            else:
+                style = 1 if row_index == 1 else 0
+                cells.append(
+                    f'<c r="{reference}" s="{style}" t="inlineStr">'
+                    f'<is><t xml:space="preserve">{_xlsx_text(value)}</t></is>'
+                    "</c>"
+                )
+        xml_rows.append(
+            f'<row r="{row_index}">{"".join(cells)}</row>'
+        )
+
+    final_column = _xlsx_column_name(column_count)
+    column_xml = "".join(
+        f'<col min="{index}" max="{index}" width="{width}" customWidth="1"/>'
+        for index, width in enumerate(widths, 1)
+    )
+    sheet_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<worksheet xmlns="http://schemas.openxmlformats.org/'
+        'spreadsheetml/2006/main">'
+        f'<dimension ref="A1:{final_column}{row_count}"/>'
+        '<sheetViews><sheetView workbookViewId="0">'
+        '<pane ySplit="1" topLeftCell="A2" activePane="bottomLeft" '
+        'state="frozen"/></sheetView></sheetViews>'
+        '<sheetFormatPr defaultRowHeight="18"/>'
+        f"<cols>{column_xml}</cols>"
+        f'<sheetData>{"".join(xml_rows)}</sheetData>'
+        f'<autoFilter ref="A1:{final_column}{row_count}"/>'
+        '</worksheet>'
+    )
+    styles_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<styleSheet xmlns="http://schemas.openxmlformats.org/'
+        'spreadsheetml/2006/main">'
+        '<fonts count="2">'
+        '<font><sz val="10"/><name val="Aptos"/></font>'
+        '<font><b/><color rgb="FFFFFFFF"/><sz val="10"/>'
+        '<name val="Aptos"/></font></fonts>'
+        '<fills count="3"><fill><patternFill patternType="none"/></fill>'
+        '<fill><patternFill patternType="gray125"/></fill>'
+        '<fill><patternFill patternType="solid">'
+        '<fgColor rgb="FF16324F"/><bgColor indexed="64"/>'
+        '</patternFill></fill></fills>'
+        '<borders count="2"><border/>'
+        '<border><left style="thin"><color rgb="FFD0D7DE"/></left>'
+        '<right style="thin"><color rgb="FFD0D7DE"/></right>'
+        '<top style="thin"><color rgb="FFD0D7DE"/></top>'
+        '<bottom style="thin"><color rgb="FFD0D7DE"/></bottom>'
+        '<diagonal/></border></borders>'
+        '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" '
+        'fillId="0" borderId="0"/></cellStyleXfs>'
+        '<cellXfs count="3">'
+        '<xf numFmtId="0" fontId="0" fillId="0" borderId="1" '
+        'xfId="0" applyBorder="1"/>'
+        '<xf numFmtId="0" fontId="1" fillId="2" borderId="1" '
+        'xfId="0" applyFont="1" applyFill="1" applyBorder="1" '
+        'applyAlignment="1"><alignment horizontal="center"/></xf>'
+        '<xf numFmtId="2" fontId="0" fillId="0" borderId="1" '
+        'xfId="0" applyNumberFormat="1" applyBorder="1"/>'
+        '</cellXfs>'
+        '<cellStyles count="1"><cellStyle name="Normal" xfId="0" '
+        'builtinId="0"/></cellStyles>'
+        '</styleSheet>'
+    )
+    workbook_xml = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<workbook xmlns="http://schemas.openxmlformats.org/'
+        'spreadsheetml/2006/main" xmlns:r="http://schemas.'
+        'openxmlformats.org/officeDocument/2006/relationships">'
+        f'<sheets><sheet name="{_xlsx_text(safe_sheet)}" sheetId="1" '
+        'r:id="rId1"/></sheets></workbook>'
+    )
+    temporary = output_path + ".tmp"
+    with zipfile.ZipFile(
+        temporary, "w", compression=zipfile.ZIP_DEFLATED,
+    ) as workbook:
+        workbook.writestr(
+            "[Content_Types].xml",
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/'
+            'package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.'
+            'openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/xl/workbook.xml" ContentType="application/'
+            'vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+            '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="'
+            'application/vnd.openxmlformats-officedocument.spreadsheetml.'
+            'worksheet+xml"/>'
+            '<Override PartName="/xl/styles.xml" ContentType="application/'
+            'vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+            '</Types>',
+        )
+        workbook.writestr(
+            "_rels/.rels",
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/'
+            'package/2006/relationships"><Relationship Id="rId1" '
+            'Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+            'relationships/officeDocument" Target="xl/workbook.xml"/>'
+            '</Relationships>',
+        )
+        workbook.writestr("xl/workbook.xml", workbook_xml)
+        workbook.writestr(
+            "xl/_rels/workbook.xml.rels",
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/'
+            'package/2006/relationships"><Relationship Id="rId1" '
+            'Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+            'relationships/worksheet" Target="worksheets/sheet1.xml"/>'
+            '<Relationship Id="rId2" Type="http://schemas.openxmlformats.'
+            'org/officeDocument/2006/relationships/styles" '
+            'Target="styles.xml"/></Relationships>',
+        )
+        workbook.writestr("xl/styles.xml", styles_xml)
+        workbook.writestr("xl/worksheets/sheet1.xml", sheet_xml)
+    os.replace(temporary, output_path)
+    return output_path
+
 
 STANDARD_IOA_BOOTSTRAP = {
     "Uan": 16388, "Ubn": 16389, "Ucn": 16390, "In": 16391,
@@ -2353,6 +3036,9 @@ def iec104_client(rtu_info):
     port = rtu_info["port"]
     reconnect_delay = VINCI_RECONNECT_DELAY
     while True:
+        _update_communication_diagnostic(
+            ip, {"connect_attempts": 1}
+        )
         sock = None
         connected_at = None
         try:
@@ -2375,6 +3061,13 @@ def iec104_client(rtu_info):
             connected_at = time.monotonic()
             with DATA_LOCK:
                 VINCI_STATUS[ip] = True
+            _update_communication_diagnostic(
+                ip,
+                {"connections": 1},
+                last_connected_epoch=time.time(),
+                last_error="",
+                last_error_epoch=None,
+            )
             _communication_log(ip, "CONNECTED", f"port={port}")
 
             send_startda(sock)
@@ -2403,6 +3096,11 @@ def iec104_client(rtu_info):
                 last_rx = time.monotonic()
                 # Any received traffic proves the peer is alive.
                 rx_state["testfr_pending_since"] = None
+                _update_communication_diagnostic(
+                    ip,
+                    {"rx_bytes": len(data)},
+                    last_rx_epoch=time.time(),
+                )
                 buffer += data
 
                 while len(buffer) >= 2:
@@ -2417,11 +3115,23 @@ def iec104_client(rtu_info):
                         break
                     frame = buffer[:frame_len]
                     buffer = buffer[frame_len:]
+                    _update_communication_diagnostic(
+                        ip, {"rx_frames": 1}
+                    )
                     _parse_iec104_frame(ip, frame, sock, rx_state)
 
             reconnect_delay = VINCI_RECONNECT_DELAY
         except Exception as exc:
             _communication_log(ip, "DISCONNECTED", f"{type(exc).__name__}: {exc}")
+            increments = {"errors": 1}
+            if connected_at is not None:
+                increments["disconnects"] = 1
+            _update_communication_diagnostic(
+                ip,
+                increments,
+                last_error=f"{type(exc).__name__}: {exc}"[:240],
+                last_error_epoch=time.time(),
+            )
         finally:
             with DATA_LOCK:
                 VINCI_STATUS[ip] = False
@@ -2476,6 +3186,59 @@ def get_network_screen_config(viewport_width):
 # <<< END NETWORK MASTER EDITABLE BLOCK >>>
 
 class SCADAMainUI:
+    ROLE_PASSWORD = "password"
+    ROLE_ORDER = ("Operator", "Admin", "Developer")
+    ROLE_PERMISSIONS = {
+        "Operator": frozenset({"view"}),
+        "Admin": frozenset({"view", "crud", "configure"}),
+        "Developer": frozenset({"view", "crud", "configure"}),
+    }
+    GENERATOR_PROTECTION_SOURCES = {
+        "Generator differential": (
+            "Different Pro soft link",
+            "Different Pro hard link",
+        ),
+        "Stator overload": (
+            "Sym overload signal",
+            "Sym OL soft link",
+            "Sym OL INV soft link",
+            "Sym OL INV hard link",
+        ),
+        "Negative sequence OC": (
+            "Nesq over current",
+            "Nesq over current I soft link",
+            "Nesq over current II soft link",
+            "Nseq over current Pro hard link",
+        ),
+        "Complex voltage OC": (
+            "Complex voltage c",
+            "Complex voltage over current T1 soft link",
+            "Complex voltage over current T2 soft link",
+            "Complex voltage over current Pro hard link",
+        ),
+        "Over voltage": (
+            "Over voltage soft link",
+            "Over voltage Pro hard link",
+        ),
+        "Stator earthing": (
+            "Fund 3rd soft link",
+            "Fund64 soft link",
+            "Fund64 hard link",
+        ),
+        "Loss of magnetism": (
+            "Loss ET I soft link",
+            "Loss ET II soft link",
+            "Loss ET III soft link",
+            "Loss ET hard link",
+        ),
+        "Rotor earthing": (
+            "64R 1GND signal",
+            "64R 1GND soft link",
+            "64R 1GND hard link",
+        ),
+    }
+
+
     def __init__(self, root):
         self.root = root
 
@@ -2493,7 +3256,10 @@ class SCADAMainUI:
 
         self.g1_status = False
         self.g2_status = False
-        self.current_user = "Operator"
+        self.current_user = None
+        self._login_window = None
+        self._shutting_down = False
+        self.user_switch_button = None
         self.vinci_threads_started = False
 
         # ------------------------------------------------------------------
@@ -2568,6 +3334,8 @@ class SCADAMainUI:
         # Start Clock & Background Polling
         self.update_clock()
         self.start_background_polling()
+        start_trend_history_logger()
+        self.root.protocol("WM_DELETE_WINDOW", self.confirm_exit)
 
     # ==========================================================================
     # RESPONSIVE UI HELPERS
@@ -2727,12 +3495,18 @@ class SCADAMainUI:
     def build_top_menu(self):
         menubar = tk.Menu(self.root)
 
-        # Manage Menu
+        # Management Menu
         manage_menu = tk.Menu(menubar, tearoff=0)
-        manage_menu.add_command(label='User Login / Log Off', command=self.action_log_off)
-        manage_menu.add_command(label='User Permissions', command=lambda: messagebox.showinfo("Manage", f"Current User: {self.current_user}\nRole: Administrator"))
+        manage_menu.add_command(
+            label="Switch User...",
+            command=self.action_switch_user,
+        )
+        manage_menu.add_command(
+            label="User Permissions",
+            command=self.show_user_permissions,
+        )
         manage_menu.add_separator()
-        manage_menu.add_command(label='Exit SCADA', command=self.root.quit)
+        manage_menu.add_command(label="Exit SCADA", command=self.confirm_exit)
         menubar.add_cascade(label='Management', menu=manage_menu)
 
         # Supervision Menu
@@ -2742,24 +3516,69 @@ class SCADAMainUI:
         supervision_menu.add_command(label='Generator 2 Status', command=lambda: self.switch_tab("g2_monitor"))
         menubar.add_cascade(label='Supervision', menu=supervision_menu)
 
-        # Maintain Menu
+        # Maintenance Menu
         maintain_menu = tk.Menu(menubar, tearoff=0)
-        maintain_menu.add_command(label='System Diagnostics', command=lambda: messagebox.showinfo("Maintain", "All diagnostic channels operational."))
-        maintain_menu.add_command(label='Reset Communication Counters', command=self.trigger_reset_action)
+        maintenance_state = (
+            "normal" if self.current_user else "disabled"
+        )
+        maintain_menu.add_command(
+            label="System Diagnostics",
+            command=self.open_system_diagnostics,
+            state=maintenance_state,
+        )
+        maintain_menu.add_command(
+            label="Reset Communication Counters",
+            command=self.trigger_reset_action,
+            state=(
+                "normal"
+                if self.has_permission("configure")
+                else "disabled"
+            ),
+        )
         maintain_menu.add_separator()
-        maintain_menu.add_command(label='Parameter Settings', command=self.open_settings_window)
+        maintain_menu.add_command(
+            label="Parameter Settings",
+            command=self.open_settings_window,
+            state=maintenance_state,
+        )
+        maintain_menu.add_command(
+            label="Mapping Run Monitoring",
+            command=self.open_run_monitor_mapping,
+            state=maintenance_state,
+        )
         menubar.add_cascade(label='Maintenance', menu=maintain_menu)
+
+        authenticated_state = (
+            "normal" if self.current_user else "disabled"
+        )
 
         # Setup Menu
         setup_menu = tk.Menu(menubar, tearoff=0)
-        setup_menu.add_command(label='IEC-104 Communication Settings', command=lambda: self.switch_tab("system_config"))
-        menubar.add_cascade(label='Setup', menu=setup_menu)
+        setup_menu.add_command(
+            label="IEC-104 Communication Settings",
+            command=self.open_communication_settings,
+            state=authenticated_state,
+        )
+        setup_menu.add_command(
+            label="Communication Overview",
+            command=lambda: self.switch_tab("system_config"),
+            state=authenticated_state,
+        )
+        menubar.add_cascade(label="Setup", menu=setup_menu)
 
         # Graph Menu
         graph_menu = tk.Menu(menubar, tearoff=0)
-        graph_menu.add_command(label='Real-Time Trend', command=self.action_curve)
-        graph_menu.add_command(label='Historical Alarm Graph', command=self.action_his_alarm)
-        menubar.add_cascade(label='Graph', menu=graph_menu)
+        graph_menu.add_command(
+            label="Process Trend Explorer",
+            command=self.action_curve,
+            state=authenticated_state,
+        )
+        graph_menu.add_command(
+            label="Alarm History Explorer",
+            command=self.action_his_alarm,
+            state=authenticated_state,
+        )
+        menubar.add_cascade(label="Graph", menu=graph_menu)
 
         # Help Menu
         help_menu = tk.Menu(menubar, tearoff=0)
@@ -2769,1233 +3588,3513 @@ class SCADAMainUI:
 
         self.root.config(menu=menubar)
 
-    def open_settings_window(self):
-        """ Form Konfigurasi SCADA: ASDU, IOA, & Auto-create ListSetting (Device).csv """
-        password = simpledialog.askstring(
-            "Administrator Required",
-            "Masukkan password administrator untuk membuka Parameter Settings:",
-            show="*", parent=self.root
-        )
-        if password is None:
+    def open_communication_settings(self):
+        """Open the local IEC-104/relay configuration editor."""
+        existing = getattr(self, "_communication_settings_window", None)
+        if existing is not None and existing.winfo_exists():
+            existing.deiconify()
+            existing.lift()
+            existing.focus_force()
             return
-        if password != "admin":
-            messagebox.showerror("Akses ditolak", "Password administrator tidak benar.", parent=self.root)
-            return
+
+        can_edit = self.has_permission("configure")
         win = tk.Toplevel(self.root)
-        win.title('Parameter Settings')
+        self._communication_settings_window = win
+        self._make_toplevel_responsive(
+            win, "IEC-104 Communication Settings", fullscreen=False,
+        )
         win.configure(bg="#d4d0c8")
 
-        self._make_toplevel_responsive(win, 'Parameter Settings', fullscreen=False)
+        header = tk.Frame(win, bg="#000080", padx=16, pady=12)
+        header.pack(fill="x")
+        tk.Label(
+            header,
+            text="IEC-104 COMMUNICATION SETTINGS",
+            bg="#000080",
+            fg="#ffffff",
+            font=("Segoe UI", 16, "bold"),
+            anchor="w",
+        ).pack(side="left")
+        tk.Label(
+            header,
+            text=(
+                f"{(self.current_user or 'Unauthenticated').upper()}  •  "
+                f"{'EDIT ENABLED' if can_edit else 'READ ONLY'}"
+            ),
+            bg="#000080",
+            fg="#9dffbd" if can_edit else "#ffd966",
+            font=("Segoe UI", 9, "bold"),
+            padx=12,
+            pady=6,
+        ).pack(side="right")
+
+        subtitle = tk.Label(
+            win,
+            text=(
+                "Local station identity, IEC-104 ownership, and authenticated "
+                "realtime relay configuration."
+            ),
+            bg="#eceae4",
+            fg="#333333",
+            font=("Segoe UI", 10),
+            anchor="w",
+            padx=16,
+            pady=9,
+        )
+        subtitle.pack(fill="x")
+
+        body = tk.Frame(win, bg="#d4d0c8", padx=14, pady=12)
+        body.pack(fill="both", expand=True)
+        form = tk.LabelFrame(
+            body,
+            text=" Configuration ",
+            bg="#f4f3ef",
+            fg="#111111",
+            font=("Segoe UI", 10, "bold"),
+            padx=14,
+            pady=12,
+        )
+        form.pack(side="left", fill="both", expand=True, padx=(0, 8))
+        form.grid_columnconfigure(1, weight=1)
+
+        variables = {
+            "mode": tk.StringVar(),
+            "master_ip": tk.StringVar(),
+            "peer_ip": tk.StringVar(),
+            "relay_port": tk.StringVar(),
+            "relay_token": tk.StringVar(),
+            "node_149_rtus": tk.StringVar(),
+            "node_150_rtus": tk.StringVar(),
+            "tv_editor_allowed_ips": tk.StringVar(),
+            "description": tk.StringVar(),
+        }
+        row = 0
+
+        def add_row(label, key, widget=None, help_text=""):
+            nonlocal row
+            tk.Label(
+                form,
+                text=label,
+                bg="#f4f3ef",
+                fg="#111111",
+                font=("Segoe UI", 10, "bold"),
+                anchor="w",
+            ).grid(row=row, column=0, sticky="nw", padx=(0, 12), pady=7)
+            control = widget or ttk.Entry(
+                form,
+                textvariable=variables[key],
+                state="normal" if can_edit else "readonly",
+                font=("Segoe UI", 10),
+            )
+            control.grid(row=row, column=1, sticky="ew", pady=7)
+            if help_text:
+                tk.Label(
+                    form,
+                    text=help_text,
+                    bg="#f4f3ef",
+                    fg="#666666",
+                    font=("Segoe UI", 8),
+                    anchor="w",
+                ).grid(
+                    row=row + 1,
+                    column=1,
+                    sticky="ew",
+                    pady=(0, 4),
+                )
+                row += 1
+            row += 1
+            return control
+
+        mode_combo = ttk.Combobox(
+            form,
+            textvariable=variables["mode"],
+            values=COMMUNICATION_MODES,
+            state="readonly" if can_edit else "disabled",
+            font=("Segoe UI", 10),
+        )
+        add_row(
+            "Connection Mode",
+            "mode",
+            mode_combo,
+            "Changes affect socket ownership after SCADA is restarted.",
+        )
+        add_row("Master IP", "master_ip")
+        add_row("Peer IP", "peer_ip")
+        add_row("Relay Port", "relay_port")
+        token_entry = ttk.Entry(
+            form,
+            textvariable=variables["relay_token"],
+            show="•",
+            state="normal" if can_edit else "readonly",
+            font=("Segoe UI", 10),
+        )
+        add_row("Relay Token", "relay_token", token_entry)
+        add_row(
+            "Node .149 RTUs",
+            "node_149_rtus",
+            help_text="Comma-separated configured RTU IPv4 addresses.",
+        )
+        add_row(
+            "Node .150 RTUs",
+            "node_150_rtus",
+            help_text="An RTU may belong to only one node.",
+        )
+        add_row(
+            "TV Editor Allowed IPs",
+            "tv_editor_allowed_ips",
+            help_text="Comma-separated station IPv4 addresses.",
+        )
+        add_row("Description", "description")
+
+        status_panel = tk.LabelFrame(
+            body,
+            text=" Runtime Status ",
+            bg="#eceae4",
+            fg="#111111",
+            font=("Segoe UI", 10, "bold"),
+            width=390,
+            padx=14,
+            pady=12,
+        )
+        status_panel.pack(side="right", fill="y", padx=(8, 0))
+        status_panel.pack_propagate(False)
+        local_ip = _local_scada_ip()
+        with DATA_LOCK:
+            online_count = sum(bool(value) for value in VINCI_STATUS.values())
+            host_count = sum(bool(value) for value in HOST_STATUS.values())
+        runtime_lines = (
+            ("Detected Local IP", local_ip or "Not detected"),
+            ("Active Mode", _iec104_connection_mode().upper()),
+            ("Owned RTUs", str(len(_owned_rtu_ips()))),
+            ("IEC-104 Online", f"{online_count}/{len(RTU_LIST)}"),
+            ("Hosts Reachable", f"{host_count}/{len(RTU_LIST)}"),
+            ("Configuration File", os.path.basename(COMMUNICATION_CONFIG_PATH)),
+        )
+        for label, value in runtime_lines:
+            tk.Label(
+                status_panel,
+                text=label.upper(),
+                bg="#eceae4",
+                fg="#555555",
+                font=("Segoe UI", 8, "bold"),
+                anchor="w",
+            ).pack(fill="x", pady=(8, 1))
+            tk.Label(
+                status_panel,
+                text=value,
+                bg="#ffffff",
+                fg="#111111",
+                font=("Courier New", 10, "bold"),
+                anchor="w",
+                padx=9,
+                pady=7,
+                relief="solid",
+                bd=1,
+            ).pack(fill="x")
+        tk.Label(
+            status_panel,
+            text=(
+                "Saved communication changes require a SCADA restart. "
+                "Running IEC-104 sessions are never interrupted by this form."
+            ),
+            bg="#fff4cc",
+            fg="#6b4d00",
+            font=("Segoe UI", 9, "bold"),
+            justify="left",
+            wraplength=340,
+            padx=10,
+            pady=10,
+        ).pack(fill="x", pady=(16, 0))
+
+        footer = tk.Frame(win, bg="#d4d0c8", padx=14, pady=10)
+        footer.pack(fill="x")
+        status_var = tk.StringVar()
+        status_label = tk.Label(
+            footer,
+            textvariable=status_var,
+            bg="#d4d0c8",
+            fg="#555555",
+            font=("Segoe UI", 9, "bold"),
+            anchor="w",
+        )
+        status_label.pack(side="left", fill="x", expand=True)
+        current_config = {}
+
+        def load_form():
+            loaded = _communication_config()
+            current_config.clear()
+            current_config.update(loaded)
+            variables["mode"].set(str(loaded.get("mode", "")))
+            variables["master_ip"].set(str(loaded.get("master_ip", "")))
+            variables["peer_ip"].set(str(loaded.get("peer_ip", "")))
+            variables["relay_port"].set(str(loaded.get("relay_port", "")))
+            variables["relay_token"].set(str(loaded.get("relay_token", "")))
+            for key in (
+                "node_149_rtus",
+                "node_150_rtus",
+                "tv_editor_allowed_ips",
+            ):
+                variables[key].set(
+                    ", ".join(map(str, loaded.get(key, [])))
+                )
+            variables["description"].set(
+                str(loaded.get("description", ""))
+            )
+            status_var.set("Configuration loaded from disk.")
+            status_label.configure(fg="#555555")
+
+        def save_form():
+            if not self.require_permission(
+                "configure",
+                "change IEC-104 communication settings",
+                parent=win,
+            ):
+                return
+            candidate = dict(current_config)
+            candidate.update({
+                "mode": variables["mode"].get(),
+                "master_ip": variables["master_ip"].get(),
+                "peer_ip": variables["peer_ip"].get(),
+                "relay_port": variables["relay_port"].get(),
+                "relay_token": variables["relay_token"].get(),
+                "node_149_rtus": variables["node_149_rtus"].get(),
+                "node_150_rtus": variables["node_150_rtus"].get(),
+                "tv_editor_allowed_ips": variables[
+                    "tv_editor_allowed_ips"
+                ].get(),
+                "description": variables["description"].get(),
+            })
+            try:
+                normalized = _validate_communication_config(candidate)
+                temporary = COMMUNICATION_CONFIG_PATH + ".tmp"
+                if os.path.exists(COMMUNICATION_CONFIG_PATH):
+                    timestamp = datetime.datetime.now().strftime(
+                        "%Y%m%d_%H%M%S"
+                    )
+                    shutil.copy2(
+                        COMMUNICATION_CONFIG_PATH,
+                        f"{COMMUNICATION_CONFIG_PATH}.{timestamp}.bak",
+                    )
+                with open(temporary, "w", encoding="utf-8") as handle:
+                    json.dump(
+                        normalized,
+                        handle,
+                        indent=2,
+                        ensure_ascii=False,
+                    )
+                    handle.write("\n")
+                os.replace(temporary, COMMUNICATION_CONFIG_PATH)
+            except Exception as exc:
+                status_var.set(f"Not saved: {exc}")
+                status_label.configure(fg="#8b0000")
+                messagebox.showerror(
+                    "Communication Settings",
+                    str(exc),
+                    parent=win,
+                )
+                return
+            current_config.clear()
+            current_config.update(normalized)
+            status_var.set(
+                "Saved successfully. Restart SCADA to apply socket changes."
+            )
+            status_label.configure(fg="#006000")
+            messagebox.showinfo(
+                "Communication Settings",
+                (
+                    "Configuration saved successfully.\n\n"
+                    "Restart SCADA to apply communication socket changes."
+                ),
+                parent=win,
+            )
+
+        def close_window():
+            self._communication_settings_window = None
+            win.destroy()
+
+        save_button = self._responsive_button(
+            footer,
+            text="Save Changes",
+            command=save_form,
+            bg="#000080",
+            fg="#ffffff",
+            activebackground="#000066",
+            activeforeground="#ffffff",
+        )
+        save_button.pack(side="right", padx=(8, 0))
+        if not can_edit:
+            save_button.configure(state="disabled")
+        self._responsive_button(
+            footer,
+            text="Reload from Disk",
+            command=load_form,
+            bg="#d4d0c8",
+            fg="#111111",
+        ).pack(side="right", padx=(8, 0))
+        self._responsive_button(
+            footer,
+            text="Close",
+            command=close_window,
+            bg="#d4d0c8",
+            fg="#111111",
+        ).pack(side="right")
+
+        win.protocol("WM_DELETE_WINDOW", close_window)
+        win._can_edit = can_edit
+        load_form()
+
+    def open_system_diagnostics(self):
+        """Show live host, IEC-104, relay, and transport diagnostics."""
+        existing = getattr(self, "_system_diagnostics_window", None)
+        if existing is not None and existing.winfo_exists():
+            existing.deiconify()
+            existing.lift()
+            existing.focus_force()
+            return
+
+        win = tk.Toplevel(self.root)
+        self._system_diagnostics_window = win
+        self._make_toplevel_responsive(
+            win, "System Diagnostics", fullscreen=False,
+        )
+        win.configure(bg="#d4d0c8")
+
+        header = tk.Frame(win, bg="#000080", padx=16, pady=12)
+        header.pack(fill="x")
+        tk.Label(
+            header,
+            text="SYSTEM DIAGNOSTICS",
+            bg="#000080",
+            fg="#ffffff",
+            font=("Segoe UI", 16, "bold"),
+            anchor="w",
+        ).pack(fill="x")
+        tk.Label(
+            header,
+            text=(
+                "Live communication state and measured runtime counters. "
+                "No synthetic health result is displayed."
+            ),
+            bg="#000080",
+            fg="#e8e8ff",
+            font=("Segoe UI", 10),
+            anchor="w",
+        ).pack(fill="x", pady=(4, 0))
+
+        summary_var = tk.StringVar(value="Loading communication state...")
+        tk.Label(
+            win,
+            textvariable=summary_var,
+            bg="#eceae4",
+            fg="#111111",
+            font=("Segoe UI", 10, "bold"),
+            anchor="w",
+            padx=14,
+            pady=9,
+        ).pack(fill="x")
+
+        table_host = tk.Frame(
+            win, bg="#7f7f7f", bd=1, relief="sunken"
+        )
+        table_host.pack(fill="both", expand=True, padx=12, pady=10)
+        columns = (
+            "device", "ip", "source", "host", "iec",
+            "attempts", "connections", "errors", "rx",
+            "bytes", "last_rx", "last_error",
+        )
+        headings = {
+            "device": ("Device", 95, "w"),
+            "ip": ("IP Address", 125, "center"),
+            "source": ("Source", 80, "center"),
+            "host": ("Host", 75, "center"),
+            "iec": ("IEC-104", 85, "center"),
+            "attempts": ("Attempts", 80, "e"),
+            "connections": ("Sessions", 80, "e"),
+            "errors": ("Errors", 70, "e"),
+            "rx": ("RX Events", 85, "e"),
+            "bytes": ("RX Bytes", 95, "e"),
+            "last_rx": ("Last RX", 155, "center"),
+            "last_error": ("Last Error", 330, "w"),
+        }
+        ybar = ttk.Scrollbar(table_host, orient="vertical")
+        tree = ttk.Treeview(
+            table_host,
+            columns=columns,
+            show="headings",
+            selectmode="browse",
+            yscrollcommand=ybar.set,
+        )
+        ybar.config(command=tree.yview)
+        ybar.pack(side="right", fill="y")
+        tree.pack(side="left", fill="both", expand=True)
+        self._bind_mousewheel(tree)
+        for column in columns:
+            title, width, anchor = headings[column]
+            tree.heading(column, text=title)
+            tree.column(
+                column,
+                width=width,
+                minwidth=60,
+                anchor=anchor,
+                stretch=column == "last_error",
+            )
+        tree.tag_configure("online", background="#e7f4e4")
+        tree.tag_configure("reachable", background="#fff4cc")
+        tree.tag_configure("offline", background="#f4e2e2")
+
+        footer = tk.Frame(win, bg="#d4d0c8", padx=12, pady=10)
+        footer.pack(fill="x")
+        reset_note = tk.StringVar()
+        tk.Label(
+            footer,
+            textvariable=reset_note,
+            bg="#d4d0c8",
+            fg="#555555",
+            font=("Segoe UI", 9),
+            anchor="w",
+        ).pack(side="left", fill="x", expand=True)
+
+        state = {"after": None}
+
+        def display_time(epoch):
+            if not epoch:
+                return "-"
+            return datetime.datetime.fromtimestamp(epoch).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+
+        def render_rows():
+            if not win.winfo_exists():
+                return
+            with DATA_LOCK:
+                iec_status = dict(VINCI_STATUS)
+                host_status = dict(HOST_STATUS)
+            with COMM_DIAGNOSTICS_LOCK:
+                diagnostics = {
+                    ip: dict(values)
+                    for ip, values in COMM_DIAGNOSTICS.items()
+                }
+                last_reset = COMM_DIAGNOSTICS_META.get(
+                    "last_reset_epoch"
+                )
+
+            owned = _owned_rtu_ips()
+            existing_items = set(tree.get_children())
+            online_count = 0
+            host_count = 0
+            for index, rtu in enumerate(RTU_LIST):
+                ip = str(rtu["ip"])
+                diag = diagnostics.get(
+                    ip, _new_communication_diagnostic()
+                )
+                host_online = bool(host_status.get(ip, False))
+                iec_online = bool(iec_status.get(ip, False))
+                host_count += int(host_online)
+                online_count += int(iec_online)
+                source = "DIRECT" if ip in owned else "RELAY"
+                rx_events = (
+                    int(diag.get("rx_frames", 0))
+                    + int(diag.get("relay_updates", 0))
+                )
+                values = (
+                    rtu.get("name", ip),
+                    ip,
+                    source,
+                    "ONLINE" if host_online else "OFFLINE",
+                    "ONLINE" if iec_online else "OFFLINE",
+                    diag.get("connect_attempts", 0),
+                    diag.get("connections", 0),
+                    diag.get("errors", 0),
+                    rx_events,
+                    diag.get("rx_bytes", 0),
+                    display_time(diag.get("last_rx_epoch")),
+                    diag.get("last_error", "") or "-",
+                )
+                tag = (
+                    "online"
+                    if iec_online
+                    else "reachable"
+                    if host_online
+                    else "offline"
+                )
+                if ip in existing_items:
+                    tree.item(ip, values=values, tags=(tag,))
+                    tree.move(ip, "", index)
+                else:
+                    tree.insert(
+                        "", "end", iid=ip, values=values, tags=(tag,)
+                    )
+
+            mode = _iec104_connection_mode().upper()
+            summary_var.set(
+                f"Mode: {mode}   |   IEC-104 online: "
+                f"{online_count}/{len(RTU_LIST)}   |   "
+                f"Hosts reachable: {host_count}/{len(RTU_LIST)}   |   "
+                f"Updated: {datetime.datetime.now():%H:%M:%S}"
+            )
+            reset_note.set(
+                "Counters are local to this SCADA process. Last reset: "
+                f"{display_time(last_reset)}"
+            )
+
+        def schedule_refresh():
+            if not win.winfo_exists():
+                return
+            render_rows()
+            state["after"] = win.after(1000, schedule_refresh)
+
+        def close_window():
+            if state.get("after") is not None:
+                try:
+                    win.after_cancel(state["after"])
+                except Exception:
+                    pass
+            self._system_diagnostics_window = None
+            win.destroy()
+
+        reset_button = self._responsive_button(
+            footer,
+            text="Reset Counters",
+            command=lambda: (
+                render_rows()
+                if self.trigger_reset_action(parent=win)
+                else None
+            ),
+            bg="#000080",
+            fg="#ffffff",
+            activebackground="#000066",
+            activeforeground="#ffffff",
+        )
+        reset_button.pack(side="right", padx=(8, 0))
+        if not self.has_permission("configure"):
+            reset_button.configure(state="disabled")
+        self._responsive_button(
+            footer,
+            text="Close",
+            command=close_window,
+            bg="#d4d0c8",
+            fg="#111111",
+        ).pack(side="right")
+
+        win.protocol("WM_DELETE_WINDOW", close_window)
+        render_rows()
+        schedule_refresh()
+
+    def open_run_monitor_mapping(self):
+        """Show the live IEC-104 and engineering source of every Run Monitor value."""
+        existing = getattr(self, "_run_monitor_mapping_window", None)
+        if existing is not None and existing.winfo_exists():
+            existing.deiconify()
+            existing.lift()
+            existing.focus_force()
+            return
+
+        win = tk.Toplevel(self.root)
+        self._run_monitor_mapping_window = win
+        self._make_toplevel_responsive(
+            win, "Mapping Run Monitoring", fullscreen=False,
+        )
+        win.configure(bg="#d4d0c8")
+
+        header = tk.Frame(win, bg="#000080", padx=16, pady=12)
+        header.pack(fill="x")
+        tk.Label(
+            header,
+            text="MAPPING RUN MONITORING",
+            bg="#000080",
+            fg="#ffffff",
+            font=("Segoe UI", 16, "bold"),
+            anchor="w",
+        ).pack(fill="x")
+        tk.Label(
+            header,
+            text=(
+                "Nilai aktual mengikuti tampilan Run Monitor. RAW dan parameter "
+                "engineering dibaca langsung dari ListSetting CSV aktif."
+            ),
+            bg="#000080",
+            fg="#e8e8ff",
+            font=("Segoe UI", 10),
+            anchor="w",
+        ).pack(fill="x", pady=(4, 0))
+        tk.Label(
+            header,
+            text=(
+                "Indikator breaker ditampilkan sesuai logika aplikasi saat ini: "
+                "round(Ia, 2) > 0 menghasilkan merah/1."
+            ),
+            bg="#000080",
+            fg="#ffd966",
+            font=("Segoe UI", 10, "bold"),
+            anchor="w",
+        ).pack(fill="x", pady=(2, 0))
+
+        filter_bar = tk.Frame(win, bg="#d4d0c8", padx=12, pady=9)
+        filter_bar.pack(fill="x")
+        tk.Label(
+            filter_bar, text="Area:", bg="#d4d0c8",
+            font=("Segoe UI", 10, "bold"),
+        ).pack(side="left")
+        group_var = tk.StringVar(value="Semua")
+        group_combo = ttk.Combobox(
+            filter_bar, textvariable=group_var, state="readonly", width=34,
+        )
+        group_combo.pack(side="left", padx=(6, 18))
+
+        tk.Label(
+            filter_bar, text="Cari:", bg="#d4d0c8",
+            font=("Segoe UI", 10, "bold"),
+        ).pack(side="left")
+        search_var = tk.StringVar()
+        search_entry = ttk.Entry(filter_bar, textvariable=search_var, width=34)
+        search_entry.pack(side="left", padx=(6, 12))
+
+        status_var = tk.StringVar(value="Menyiapkan mapping...")
+        tk.Label(
+            filter_bar, textvariable=status_var, bg="#d4d0c8",
+            fg="#333333", font=("Segoe UI", 9), anchor="e",
+        ).pack(side="right", fill="x", expand=True)
+
+        table_host = tk.Frame(win, bg="#7f7f7f", bd=1, relief="sunken")
+        table_host.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+
+        columns = (
+            "group", "name", "symbol", "unit", "actual", "quality", "raw",
+            "source", "ip", "asdu", "ioa", "coefficient", "ctpt", "offset",
+            "formula", "calculation",
+        )
+        headings = {
+            "group": ("Area / Bay", 190, "w"),
+            "name": ("Nama Data di Run Monitor", 220, "w"),
+            "symbol": ("Simbol", 75, "center"),
+            "unit": ("Satuan", 70, "center"),
+            "actual": ("Nilai Aktual", 105, "e"),
+            "raw": ("Nilai RAW", 105, "e"),
+            "source": ("Sumber Konfigurasi", 245, "w"),
+            "ip": ("IP RTU", 125, "center"),
+            "asdu": ("ASDU", 75, "e"),
+            "ioa": ("IOA", 85, "e"),
+            "coefficient": ("Coefficient", 105, "e"),
+            "ctpt": ("CT/PT", 90, "e"),
+            "offset": ("Offset", 85, "e"),
+            "formula": ("Formula", 155, "w"),
+            "calculation": ("Perhitungan", 270, "w"),
+            "quality": ("Kualitas", 95, "center"),
+        }
+
+        ybar = ttk.Scrollbar(table_host, orient="vertical")
+        xbar = ttk.Scrollbar(table_host, orient="horizontal")
+        tree = ttk.Treeview(
+            table_host,
+            columns=columns,
+            show="headings",
+            selectmode="browse",
+            yscrollcommand=ybar.set,
+            xscrollcommand=xbar.set,
+        )
+        ybar.config(command=tree.yview)
+        xbar.config(command=tree.xview)
+        ybar.pack(side="right", fill="y")
+        xbar.pack(side="bottom", fill="x")
+        tree.pack(side="left", fill="both", expand=True)
+        self._bind_mousewheel(tree)
+
+        for column in columns:
+            title, width, anchor = headings[column]
+            tree.heading(column, text=title)
+            tree.column(
+                column, width=width, minwidth=55, anchor=anchor, stretch=False,
+            )
+        tree.tag_configure("online", background="#e7f4e4")
+        tree.tag_configure("offline", background="#f4e2e2")
+        tree.tag_configure("no_data", background="#fff4cc")
+
+        footer = tk.Frame(win, bg="#d4d0c8", padx=12)
+        footer.pack(fill="x", pady=(0, 10))
+        tk.Label(
+            footer,
+            text=(
+                "Keterangan: nilai OFFLINE dapat merupakan nilai terakhir yang "
+                "tersimpan; tanda '-' berarti RAW belum pernah diterima."
+            ),
+            bg="#d4d0c8",
+            fg="#555555",
+            font=("Segoe UI", 9),
+            anchor="w",
+        ).pack(side="left", fill="x", expand=True)
+
+        state = {"after": None}
+
+        def render_rows():
+            if not win.winfo_exists():
+                return
+            try:
+                rows = self._run_monitor_mapping_snapshot()
+                groups = ["Semua"] + list(dict.fromkeys(
+                    row["group"] for row in rows
+                ))
+                if tuple(group_combo.cget("values")) != tuple(groups):
+                    group_combo.configure(values=groups)
+                if group_var.get() not in groups:
+                    group_var.set("Semua")
+
+                wanted_group = group_var.get()
+                needle = search_var.get().strip().casefold()
+                visible = []
+                for row in rows:
+                    if wanted_group != "Semua" and row["group"] != wanted_group:
+                        continue
+                    if needle and needle not in " ".join(
+                        str(row.get(column, "")) for column in columns
+                    ).casefold():
+                        continue
+                    visible.append(row)
+
+                existing_items = set(tree.get_children())
+                wanted_items = set()
+                for index, row in enumerate(visible):
+                    item_id = row["key"]
+                    wanted_items.add(item_id)
+                    quality = row["quality"]
+                    if quality == "ONLINE":
+                        tag = "online"
+                    elif quality == "NO DATA":
+                        tag = "no_data"
+                    else:
+                        tag = "offline"
+                    values = tuple(row.get(column, "") for column in columns)
+                    if item_id in existing_items:
+                        tree.item(item_id, values=values, tags=(tag,))
+                        tree.move(item_id, "", index)
+                    else:
+                        tree.insert(
+                            "", "end", iid=item_id, values=values, tags=(tag,),
+                        )
+                for item_id in existing_items - wanted_items:
+                    tree.delete(item_id)
+
+                status_var.set(
+                    f"{len(visible)} dari {len(rows)} mapping | "
+                    f"Refresh {datetime.datetime.now():%H:%M:%S}"
+                )
+            except Exception as exc:
+                status_var.set(f"Mapping tidak dapat diperbarui: {exc}")
+
+        def reload_and_render():
+            _load_setting_engine()
+            render_rows()
+
+        def schedule_refresh():
+            if not win.winfo_exists():
+                return
+            render_rows()
+            state["after"] = win.after(VINCI_UI_REFRESH_MS, schedule_refresh)
+
+        def close_window():
+            if state.get("after") is not None:
+                try:
+                    win.after_cancel(state["after"])
+                except Exception:
+                    pass
+            self._run_monitor_mapping_window = None
+            win.destroy()
+
+        self._responsive_button(
+            footer, text="Muat Ulang Mapping", command=reload_and_render,
+            bg="#000080", fg="#ffffff", activebackground="#000066",
+            activeforeground="#ffffff",
+        ).pack(side="right", padx=(8, 0))
+        self._responsive_button(
+            footer, text="Tutup", command=close_window,
+            bg="#d4d0c8", fg="#111111",
+        ).pack(side="right")
+
+        group_combo.bind("<<ComboboxSelected>>", lambda _event: render_rows())
+        search_var.trace_add("write", lambda *_args: render_rows())
+        win.protocol("WM_DELETE_WINDOW", close_window)
+        reload_and_render()
+        schedule_refresh()
+        search_entry.focus_set()
+
+    def open_settings_window(self):
+        """Open Device Manager with CRUD controls governed by the active role."""
+        can_edit = self.has_permission("crud")
+
+        try:
+            self.cbz_config = cbz_device_data.load_config(
+                CBZ8000_DEVICE_DATA_PATH
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "Device Manager",
+                f"Data aplikasi CBZ8000 tidak dapat dibuka:\n{exc}",
+                parent=self.root,
+            )
+            return
+
+        existing = getattr(self, "_parameter_settings_window", None)
+        if existing is not None and existing.winfo_exists():
+            existing.destroy()
+
+        colors = {
+            "bg": "#d4d0c8",
+            "surface": "#f4f3ef",
+            "surface_alt": "#e3e1da",
+            "panel": "#d4d0c8",
+            "input": "#ffffff",
+            "border": "#7f7f7f",
+            "text": "#111111",
+            "muted": "#555555",
+            "primary": "#000080",
+            "primary_active": "#000066",
+            "success": "#006000",
+            "warning": "#7a4b00",
+            "danger": "#8b0000",
+            "danger_active": "#700000",
+        }
+
+        win = tk.Toplevel(self.root)
+        win.title("SCADA BONT — Device Manager")
+        win.configure(bg=colors["bg"])
+        self._make_toplevel_responsive(
+            win,
+            "SCADA BONT — Device Manager",
+            fullscreen=False,
+        )
         try:
             win.state("zoomed")
         except tk.TclError:
             pass
 
-        style = ttk.Style()
-        style.theme_use('clam')
-        style.configure("Treeview", background="#ffffff", fieldbackground="#ffffff", foreground="#000000", rowheight=28, relief="solid")
-        style.map("Treeview", background=[('selected', '#000080')], foreground=[('selected', '#ffffff')])
-
-        toolbar = tk.Frame(win, bg="#d4d0c8", bd=1, relief="raised")
-        toolbar.pack(fill="x", side="top", ipady=2)
-        for btn_name in ["Device Manage", "System Manage", "Data Manage", "Bay Copy", "IED Copy", "Template", "Import"]:
-            tk.Button(toolbar, text=btn_name, bg="#d4d0c8", font=("Segoe UI", 15), relief="groove", padx=5).pack(side="left", padx=2)
-
-        main_pane = ttk.PanedWindow(win, orient="horizontal")
-        main_pane.pack(fill="both", expand=True, padx=2, pady=2)
-
-        left_frame = tk.Frame(main_pane, bg="#ffffff", bd=1, relief="sunken")
-        main_pane.add(left_frame, weight=1)
-
-        tree = ttk.Treeview(left_frame)
-        tree.pack(fill="both", expand=True)
-
-        root_node = tree.insert("", "end", text="Device", open=True)
-
-        devices_list = [
-            "Connection Wire I", "Connection Wire II", "1# Auxiliary Transformer",
-            "2# Auxiliary Transformer", "1# Generator", "1# Measure Control Box",
-            "2# Generator", "2# Measure Control Box", "Watt Hour Meter",
-            "11# Circulating Water Pump", "12# Circulating Water Pump", "13# Circulating Water Pump",
-            "1# Feed Water Pump", "1# Primary Air Fan", "1# Forced draft Fan",
-            "1# Induced draft Fan", "2# Feed Water Pump", "2# Primary Air Fan",
-            "2# Forced draft Fan", "2# Induced draft Fan",
-            "21# Circulating Water Pump", "22# Circulating Water Pump",
-            "23# Circulating Water Pump", "3# Feed Water Pump", "Voltage Monitoring",
-            "1#G Exciting System Channel I", "2#G Exciting System Channel I",
-            "1#G Exciting System Channel II", "2#G Exciting System Channel II"
-        ]
-        device_default_ip = dict(SETTING_BAY_IP)
-        device_default_ip.update({
-            "3# Feed Water Pump": "10.100.163.7",
-            "1#G Exciting System Channel I": "10.100.163.8",
-            "2#G Exciting System Channel I": "10.100.163.8",
-            "1#G Exciting System Channel II": "10.100.163.8",
-            "2#G Exciting System Channel II": "10.100.163.8",
-        })
-
-        for idx, dev_name in enumerate(devices_list, 1):
-            dev_node = tree.insert(root_node, "end", text=f"{idx}. {dev_name}", open=False)
-            for sub in ["Analog", "Status", "Pulse", "SOE", "Telecontrol", "Sector"]:
-                tree.insert(dev_node, "end", text=sub)
-
-        right_pane = ttk.PanedWindow(main_pane, orient="vertical")
-        main_pane.add(right_pane, weight=4)
-
-        top_frame = tk.Frame(right_pane, bg="#ffffff", bd=1, relief="sunken")
-        right_pane.add(top_frame, weight=2)
-
-        lbl_table_header = tk.Label(top_frame, text="Table Parameter", bg="#d4d0c8", font=("Segoe UI", 10, "bold"), anchor="w")
-        lbl_table_header.pack(fill="x")
-
-        cols = (
-            "Device_Addr", "Bay_Name", "Physical_Name", "Info_Name", "Info_Index",
-            "Type", "Min_Save_Mode", "ASDU", "IOA", "Coefficient", "CTPT", "Tolerance",
-            "Alarm_Class", "UUp_Limit", "Up_Limit", "Down_Limit", "DDown_Limit",
-            "Formula", "Add_Offset", "Unit"
+        style = ttk.Style(win)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        style.configure(
+            "DM.Treeview",
+            background=colors["surface"],
+            fieldbackground=colors["surface"],
+            foreground=colors["text"],
+            bordercolor=colors["border"],
+            lightcolor=colors["border"],
+            darkcolor=colors["border"],
+            rowheight=32,
+            font=("Segoe UI", 10),
+        )
+        style.configure(
+            "DM.Treeview.Heading",
+            background=colors["panel"],
+            foreground=colors["text"],
+            bordercolor=colors["border"],
+            relief="flat",
+            padding=(8, 9),
+            font=("Segoe UI", 10, "bold"),
+        )
+        style.map(
+            "DM.Treeview",
+            background=[("selected", colors["primary"])],
+            foreground=[("selected", "#ffffff")],
+        )
+        style.map(
+            "DM.Treeview.Heading",
+            background=[("active", colors["surface_alt"])],
+        )
+        style.configure(
+            "DM.TEntry",
+            fieldbackground=colors["input"],
+            foreground=colors["text"],
+            insertcolor=colors["text"],
+            bordercolor=colors["border"],
+            lightcolor=colors["border"],
+            darkcolor=colors["border"],
+            padding=(9, 7),
+        )
+        style.configure(
+            "DM.TCombobox",
+            fieldbackground=colors["input"],
+            background=colors["panel"],
+            foreground=colors["text"],
+            arrowcolor=colors["text"],
+            bordercolor=colors["border"],
+            padding=(7, 5),
+        )
+        style.map(
+            "DM.TCombobox",
+            fieldbackground=[
+                ("readonly", colors["input"]),
+                ("disabled", colors["surface"]),
+            ],
+            foreground=[
+                ("readonly", colors["text"]),
+                ("disabled", colors["muted"]),
+            ],
+        )
+        style.configure(
+            "DM.TButton",
+            background=colors["surface_alt"],
+            foreground=colors["text"],
+            bordercolor=colors["border"],
+            padding=(13, 8),
+            font=("Segoe UI", 10, "bold"),
+        )
+        style.map(
+            "DM.TButton",
+            background=[
+                ("active", colors["panel"]),
+                ("pressed", colors["input"]),
+                ("disabled", colors["surface"]),
+            ],
+            foreground=[("disabled", colors["muted"])],
+        )
+        style.configure(
+            "Primary.DM.TButton",
+            background=colors["primary"],
+            foreground="#ffffff",
+            bordercolor=colors["primary"],
+            padding=(14, 8),
+            font=("Segoe UI", 10, "bold"),
+        )
+        style.map(
+            "Primary.DM.TButton",
+            background=[
+                ("active", colors["primary_active"]),
+                ("pressed", "#000050"),
+                ("disabled", colors["surface"]),
+            ],
+            foreground=[("disabled", colors["muted"])],
+        )
+        style.configure(
+            "Danger.DM.TButton",
+            background=colors["surface_alt"],
+            foreground=colors["danger"],
+            bordercolor=colors["danger"],
+            padding=(13, 8),
+            font=("Segoe UI", 10, "bold"),
+        )
+        style.map(
+            "Danger.DM.TButton",
+            background=[
+                ("active", colors["panel"]),
+                ("pressed", "#c4c1b9"),
+                ("disabled", colors["surface"]),
+            ],
+            foreground=[("disabled", colors["muted"])],
+        )
+        style.configure(
+            "DM.Vertical.TScrollbar",
+            background=colors["panel"],
+            troughcolor=colors["bg"],
+            bordercolor=colors["border"],
+            arrowcolor=colors["text"],
+        )
+        style.configure(
+            "DM.Horizontal.TScrollbar",
+            background=colors["panel"],
+            troughcolor=colors["bg"],
+            bordercolor=colors["border"],
+            arrowcolor=colors["text"],
         )
 
-        table_host = tk.Frame(top_frame, bg="#ffffff")
+        header = tk.Frame(
+            win,
+            bg=colors["surface"],
+            height=78,
+            highlightbackground=colors["border"],
+            highlightthickness=0,
+        )
+        header.pack(fill="x")
+        header.pack_propagate(False)
+        title_box = tk.Frame(header, bg=colors["surface"])
+        title_box.pack(side="left", fill="y", padx=(22, 16))
+        tk.Label(
+            title_box,
+            text="SCADA BONT Device Manager",
+            bg=colors["surface"],
+            fg=colors["text"],
+            font=("Segoe UI", 19, "bold"),
+            anchor="w",
+        ).pack(anchor="w", pady=(12, 0))
+        tk.Label(
+            title_box,
+            text=(
+                "Device, point, template, and source-data administration"
+                if can_edit
+                else "Read-only device, point, template, and source-data browser"
+            ),
+            bg=colors["surface"],
+            fg=colors["muted"],
+            font=("Segoe UI", 10),
+            anchor="w",
+        ).pack(anchor="w")
+        source_badge = tk.Label(
+            header,
+            text=(
+                f"{(self.current_user or 'Unauthenticated').upper()}  •  "
+                f"{'CRUD ENABLED' if can_edit else 'READ ONLY'}"
+            ),
+            bg=colors["panel"],
+            fg=colors["success"] if can_edit else colors["warning"],
+            font=("Segoe UI", 9, "bold"),
+            padx=12,
+            pady=6,
+        )
+        source_badge.pack(side="right", padx=22)
+
+        nav = tk.Frame(
+            win,
+            bg=colors["surface_alt"],
+            height=52,
+            highlightbackground=colors["border"],
+            highlightthickness=1,
+        )
+        nav.pack(fill="x")
+        nav.pack_propagate(False)
+
+        body = tk.Frame(win, bg=colors["bg"])
+        body.pack(fill="both", expand=True)
+
+        sidebar = tk.Frame(
+            body,
+            bg=colors["surface"],
+            width=330,
+            highlightbackground=colors["border"],
+            highlightthickness=1,
+        )
+        sidebar.pack(side="left", fill="y", padx=(12, 6), pady=12)
+        sidebar.pack_propagate(False)
+        workspace = tk.Frame(body, bg=colors["bg"])
+        workspace.pack(side="left", fill="both", expand=True, padx=(6, 12), pady=12)
+
+        tk.Label(
+            sidebar,
+            text="DEVICE NAVIGATOR",
+            bg=colors["surface"],
+            fg=colors["muted"],
+            font=("Segoe UI", 9, "bold"),
+            anchor="w",
+        ).pack(fill="x", padx=14, pady=(14, 6))
+        device_search_var = tk.StringVar()
+        device_search = ttk.Entry(
+            sidebar,
+            textvariable=device_search_var,
+            style="DM.TEntry",
+        )
+        device_search.pack(fill="x", padx=12, pady=(0, 10))
+        device_search.insert(0, "")
+        tree_host = tk.Frame(sidebar, bg=colors["surface"])
+        tree_host.pack(fill="both", expand=True, padx=(8, 4), pady=(0, 6))
+        tree = ttk.Treeview(
+            tree_host,
+            show="tree",
+            selectmode="browse",
+            style="DM.Treeview",
+        )
+        tree_scroll = ttk.Scrollbar(
+            tree_host,
+            orient="vertical",
+            command=tree.yview,
+            style="DM.Vertical.TScrollbar",
+        )
+        tree.configure(yscrollcommand=tree_scroll.set)
+        tree.pack(side="left", fill="both", expand=True)
+        tree_scroll.pack(side="right", fill="y")
+        sidebar_count_var = tk.StringVar()
+        tk.Label(
+            sidebar,
+            textvariable=sidebar_count_var,
+            bg=colors["surface_alt"],
+            fg=colors["muted"],
+            font=("Segoe UI", 9),
+            anchor="w",
+            padx=12,
+            pady=8,
+        ).pack(fill="x")
+
+        data_frame = tk.Frame(
+            workspace,
+            bg=colors["surface"],
+            highlightbackground=colors["border"],
+            highlightthickness=1,
+        )
+        overview_frame = tk.Frame(
+            workspace,
+            bg=colors["bg"],
+        )
+
+        context_header = tk.Frame(data_frame, bg=colors["surface"], height=70)
+        context_header.pack(fill="x")
+        context_header.pack_propagate(False)
+        context_text = tk.Frame(context_header, bg=colors["surface"])
+        context_text.pack(side="left", fill="both", expand=True, padx=18)
+        context_title_var = tk.StringVar(value="Devices")
+        context_subtitle_var = tk.StringVar()
+        tk.Label(
+            context_text,
+            textvariable=context_title_var,
+            bg=colors["surface"],
+            fg=colors["text"],
+            font=("Segoe UI", 16, "bold"),
+            anchor="w",
+        ).pack(fill="x", pady=(10, 0))
+        tk.Label(
+            context_text,
+            textvariable=context_subtitle_var,
+            bg=colors["surface"],
+            fg=colors["muted"],
+            font=("Segoe UI", 9),
+            anchor="w",
+        ).pack(fill="x")
+        record_count_var = tk.StringVar(value="0 records")
+        tk.Label(
+            context_header,
+            textvariable=record_count_var,
+            bg=colors["panel"],
+            fg=colors["text"],
+            font=("Segoe UI", 9, "bold"),
+            padx=12,
+            pady=6,
+        ).pack(side="right", padx=18)
+
+        command_bar = tk.Frame(
+            data_frame,
+            bg=colors["surface_alt"],
+            height=56,
+            highlightbackground=colors["border"],
+            highlightthickness=1,
+        )
+        command_bar.pack(fill="x")
+        command_bar.pack_propagate(False)
+        record_search_var = tk.StringVar()
+        tk.Label(
+            command_bar,
+            text="Search",
+            bg=colors["surface_alt"],
+            fg=colors["muted"],
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="left", padx=(14, 7))
+        record_search = ttk.Entry(
+            command_bar,
+            textvariable=record_search_var,
+            style="DM.TEntry",
+            width=28,
+        )
+        record_search.pack(side="left", pady=9)
+
+        action_host = tk.Frame(command_bar, bg=colors["surface_alt"])
+        action_host.pack(side="right", padx=10, pady=8)
+
+        table_host = tk.Frame(data_frame, bg=colors["surface"])
         table_host.pack(fill="both", expand=True)
-        table = ttk.Treeview(table_host, columns=cols, show="headings", height=6)
-        self._bind_mousewheel(table)
-        table_scroll_y = ttk.Scrollbar(table_host, orient="vertical", command=table.yview)
-        table_scroll_x = ttk.Scrollbar(table_host, orient="horizontal", command=table.xview)
-        table.configure(yscrollcommand=table_scroll_y.set, xscrollcommand=table_scroll_x.set)
+        table = ttk.Treeview(
+            table_host,
+            show="headings",
+            selectmode="extended",
+            style="DM.Treeview",
+        )
+        table.tag_configure("even", background=colors["surface"])
+        table.tag_configure("odd", background=colors["input"])
+        table_scroll_y = ttk.Scrollbar(
+            table_host,
+            orient="vertical",
+            command=table.yview,
+            style="DM.Vertical.TScrollbar",
+        )
+        table_scroll_x = ttk.Scrollbar(
+            table_host,
+            orient="horizontal",
+            command=table.xview,
+            style="DM.Horizontal.TScrollbar",
+        )
+        table.configure(
+            yscrollcommand=table_scroll_y.set,
+            xscrollcommand=table_scroll_x.set,
+        )
         table.grid(row=0, column=0, sticky="nsew")
         table_scroll_y.grid(row=0, column=1, sticky="ns")
         table_scroll_x.grid(row=1, column=0, sticky="ew")
         table_host.grid_rowconfigure(0, weight=1)
         table_host.grid_columnconfigure(0, weight=1)
+        self._bind_mousewheel(table)
 
-        def configure_table_columns(display_columns):
-            identifiers = tuple(f"column_{index}" for index in range(len(display_columns)))
-            table.configure(columns=identifiers)
-            for identifier, label in zip(identifiers, display_columns):
-                table.heading(identifier, text=label)
-                width = 170 if label in ("Physical_Name", "PhysicalName", "Info_Name", "InfoName") else 105
-                table.column(identifier, width=width, minwidth=70, anchor="center", stretch=False)
-            return identifiers
-
-        configure_table_columns(cols)
-
-        bottom_frame = tk.Frame(right_pane, bg="#d4d0c8", bd=1, relief="groove", padx=10, pady=10)
-        right_pane.add(bottom_frame, weight=3)
-
-        f1 = tk.Frame(bottom_frame, bg="#d4d0c8")
-        f1.pack(fill="x", pady=2)
-        tk.Label(f1, text="Device_Addr (IP)", bg="#d4d0c8", width=14, anchor="w", font=("Segoe UI", 10)).pack(side="left")
-        e_dev_addr = tk.Entry(f1, width=18)
-        e_dev_addr.insert(0, "192.168.1.10")
-        e_dev_addr.pack(side="left", padx=5)
-
-        tk.Label(f1, text="Bay_Name", bg="#d4d0c8", width=10, anchor="w", font=("Segoe UI", 10)).pack(side="left", padx=(15, 0))
-        cb_bay = ttk.Combobox(f1, values=devices_list, width=32, state="readonly")
-        cb_bay.set("Connection Wire I")
-        cb_bay.pack(side="left", padx=5)
-
-        f2 = tk.Frame(bottom_frame, bg="#d4d0c8")
-        f2.pack(fill="x", pady=2)
-        tk.Label(f2, text="Physical_Name", bg="#d4d0c8", width=14, anchor="w", font=("Segoe UI", 10)).pack(side="left")
-        e_phys = tk.Entry(f2, width=30)
-        e_phys.insert(0, "Ia")
-        e_phys.pack(side="left", padx=5)
-
-        f3 = tk.Frame(bottom_frame, bg="#d4d0c8")
-        f3.pack(fill="x", pady=2)
-        tk.Label(f3, text="Info_Name", bg="#d4d0c8", width=14, anchor="w", font=("Segoe UI", 10)).pack(side="left")
-        e_info = tk.Entry(f3, width=20)
-        e_info.insert(0, "01YC0101004001")
-        e_info.pack(side="left", padx=5)
-
-        tk.Label(f3, text="Info_Index", bg="#d4d0c8", font=("Segoe UI", 10)).pack(side="left", padx=(10, 2))
-        e_idx = tk.Entry(f3, width=6)
-        e_idx.insert(0, "1")
-        e_idx.pack(side="left")
-
-        tk.Label(f3, text="Type", bg="#d4d0c8", font=("Segoe UI", 10)).pack(side="left", padx=(15, 2))
-        cb_type = ttk.Combobox(f3, values=["Current", "Voltage", "Power", "Frequency"], width=10)
-        cb_type.set("Current")
-        cb_type.pack(side="left")
-
-        f4 = tk.Frame(bottom_frame, bg="#d4d0c8")
-        f4.pack(fill="x", pady=2)
-        tk.Label(f4, text="Min_Save_Mode", bg="#d4d0c8", width=14, anchor="w", font=("Segoe UI", 10)).pack(side="left")
-        cb_save = ttk.Combobox(f4, values=["1Minute", "2Minute", "5Minute"], width=10)
-        cb_save.set("2Minute")
-        cb_save.pack(side="left", padx=5)
-
-        tk.Label(f4, text="ASDU", bg="#d4d0c8", font=("Segoe UI", 10, "bold")).pack(side="left", padx=(15, 2))
-        e_asdu = tk.Entry(f4, width=8)
-        e_asdu.insert(0, "1")
-        e_asdu.pack(side="left")
-
-        tk.Label(f4, text="IOA", bg="#d4d0c8", font=("Segoe UI", 10, "bold")).pack(side="left", padx=(15, 2))
-        e_ioa = tk.Entry(f4, width=8)
-        e_ioa.insert(0, "101")
-        e_ioa.pack(side="left")
-
-        f6 = tk.Frame(bottom_frame, bg="#d4d0c8")
-        f6.pack(fill="x", pady=2)
-        tk.Label(f6, text="[Alert_Limit]", bg="#d4d0c8", font=("Segoe UI", 10, "bold")).pack(side="left")
-
-        limit_entries = {}
-        for lbl, val in [("UUp_Limit", "1000000"), ("Up_Limit", "1000000"), ("Down_Limit", "-1000000"), ("DDown_Limit", "-1000000")]:
-            tk.Label(f6, text=lbl, bg="#d4d0c8", font=("Segoe UI", 10)).pack(side="left", padx=(8, 2))
-            e = tk.Entry(f6, width=10)
-            e.insert(0, val)
-            e.pack(side="left")
-            limit_entries[lbl] = e
-
-        f7 = tk.Frame(bottom_frame, bg="#d4d0c8")
-        f7.pack(fill="x", pady=5)
-        tk.Label(f7, text="Coefficient", bg="#d4d0c8", font=("Segoe UI", 10)).pack(side="left")
-        e_cof = tk.Entry(f7, width=10)
-        e_cof.insert(0, "0.000183")
-        e_cof.pack(side="left", padx=(2, 8))
-
-        tk.Label(f7, text="CTPT", bg="#d4d0c8", font=("Segoe UI", 10)).pack(side="left")
-        e_ct = tk.Entry(f7, width=8)
-        e_ct.insert(0, "1.0")
-        e_ct.pack(side="left", padx=(2, 8))
-
-        tk.Label(f7, text="Tolerance", bg="#d4d0c8", font=("Segoe UI", 10)).pack(side="left")
-        e_tol = tk.Entry(f7, width=6)
-        e_tol.insert(0, "0")
-        e_tol.pack(side="left", padx=(2, 8))
-
-        tk.Label(f7, text="Alarm", bg="#d4d0c8", font=("Segoe UI", 10)).pack(side="left")
-        cb_alarm = ttk.Combobox(f7, values=["Normal", "Warning", "Urgent", "Critical"], width=10)
-        cb_alarm.set("Warning")
-        cb_alarm.pack(side="left", padx=2)
-
-        tk.Label(f7, text="Formula", bg="#d4d0c8", font=("Segoe UI", 10)).pack(side="left", padx=(12, 2))
-        cb_formula = ttk.Combobox(
-            f7,
-            values=list(FORMULA_PRESETS.keys()),
-            width=22,
-            state="readonly"
+        status_bar = tk.Frame(
+            data_frame,
+            bg=colors["surface_alt"],
+            height=36,
+            highlightbackground=colors["border"],
+            highlightthickness=1,
         )
-        cb_formula.set("MULTIPLY_CTPT")
-        cb_formula.pack(side="left", padx=2)
-
-        tk.Label(f7, text="Custom", bg="#d4d0c8", font=("Segoe UI", 10)).pack(side="left", padx=(8, 2))
-        e_custom_formula = tk.Entry(f7, width=24)
-        e_custom_formula.pack(side="left", padx=(2, 8))
-
-        def _on_formula_change(event=None):
-            if cb_formula.get().strip().upper() != "CUSTOM":
-                e_custom_formula.delete(0, "end")
-
-        cb_formula.bind("<<ComboboxSelected>>", _on_formula_change)
-
-        f8 = tk.Frame(bottom_frame, bg="#d4d0c8")
-        f8.pack(fill="x", pady=2)
-        tk.Label(f8, text="Add_Offset", bg="#d4d0c8", font=("Segoe UI", 10, "bold")).pack(side="left")
-        e_add = tk.Entry(f8, width=10)
-        e_add.insert(0, "0")
-        e_add.pack(side="left", padx=(2, 8))
-        tk.Label(
-            f8,
-            text="CUSTOM: use RAW, COEFFICIENT, CTPT, ADD_OFFSET",
-            bg="#d4d0c8", font=("Segoe UI", 9)
-        ).pack(side="left", padx=8)
-
-        tk.Label(f8, text="Unit", bg="#d4d0c8", font=("Segoe UI", 10, "bold")).pack(side="left", padx=(12, 2))
-        e_unit = tk.Entry(f8, width=8)
-        e_unit.pack(side="left", padx=(2, 8))
-
-        analog_form_rows = [f1, f2, f3, f4, f6, f7, f8]
-
-        # Dedicated status editor. The original 27 columns are preserved and
-        # decimal ASDU/IOA are appended as the authoritative runtime address.
-        status_form = tk.Frame(bottom_frame, bg="#d4d0c8")
-        status_form.columnconfigure(1, weight=1)
-        status_form.columnconfigure(3, weight=1)
-
-        status_device_var = tk.StringVar()
-        status_bay_var = tk.StringVar(value="Connection Wire I")
-        status_physical_var = tk.StringVar()
-        status_info_var = tk.StringVar()
-        status_index_var = tk.StringVar()
-        status_asdu_var = tk.StringVar()
-        status_ioa_var = tk.StringVar()
-        status_type_var = tk.StringVar(value="32 - General switch")
-        status_hissave_var = tk.StringVar(value="1 - None")
-        status_alert_var = tk.StringVar(value="3 - Normal")
-        status_setstr_var = tk.StringVar()
-        status_resetstr_var = tk.StringVar()
-        status_set_media_file_var = tk.StringVar(value="250")
-        status_reset_media_file_var = tk.StringVar(value="250")
-        status_use_flag_var = tk.StringVar(value="IN")
-        status_expression_var = tk.StringVar()
-
-        status_open_alarm_var = tk.BooleanVar(value=False)
-        status_close_alarm_var = tk.BooleanVar(value=False)
-        status_open_ring_var = tk.BooleanVar(value=True)
-        status_close_ring_var = tk.BooleanVar(value=True)
-        status_open_flute_var = tk.BooleanVar(value=False)
-        status_close_flute_var = tk.BooleanVar(value=False)
-        status_set_media_var = tk.BooleanVar(value=True)
-        status_reset_media_var = tk.BooleanVar(value=True)
-        status_man_set_var = tk.BooleanVar(value=True)
-        status_reverse_var = tk.BooleanVar(value=False)
-        status_dummy_var = tk.BooleanVar(value=False)
-
-        status_label_options = (
-            "0 - none", "1 - alarm", "2 - alarm return", "3 - alarm",
-            "4 - alarm return", "40 - alarm", "41 - alarm return",
+        status_bar.pack(fill="x")
+        status_bar.pack_propagate(False)
+        status_var = tk.StringVar(value="Ready")
+        status_label = tk.Label(
+            status_bar,
+            textvariable=status_var,
+            bg=colors["surface_alt"],
+            fg=colors["muted"],
+            font=("Segoe UI", 9),
+            anchor="w",
+            padx=12,
         )
+        status_label.pack(side="left", fill="both", expand=True)
+        shortcut_label = tk.Label(
+            status_bar,
+            text=(
+                "Double-click to edit  •  Delete removes selection"
+                if can_edit
+                else "READ ONLY  •  Operator may view and export data"
+            ),
+            bg=colors["surface_alt"],
+            fg=colors["muted"],
+            font=("Segoe UI", 9, "bold" if not can_edit else "normal"),
+            padx=12,
+        )
+        shortcut_label.pack(side="right")
 
-        tk.Label(status_form, text="Device_Addr", bg="#d4d0c8", anchor="w").grid(row=0, column=0, sticky="w", padx=(0, 6), pady=3)
-        ttk.Combobox(status_form, textvariable=status_device_var, values=("1",), width=18).grid(row=0, column=1, sticky="ew", pady=3)
-        tk.Label(status_form, text="Bay_Name", bg="#d4d0c8", anchor="w").grid(row=0, column=2, sticky="w", padx=(18, 6), pady=3)
-        ttk.Combobox(status_form, textvariable=status_bay_var,
-                     values=STATUS_BAYS,
-                     state="readonly", width=34).grid(row=0, column=3, sticky="ew", pady=3)
-
-        tk.Label(status_form, text="Physical_Name", bg="#d4d0c8", anchor="w").grid(row=1, column=0, sticky="w", padx=(0, 6), pady=3)
-        tk.Entry(status_form, textvariable=status_physical_var).grid(row=1, column=1, columnspan=3, sticky="ew", pady=3)
-
-        tk.Label(status_form, text="Info_Name", bg="#d4d0c8", anchor="w").grid(row=2, column=0, sticky="w", padx=(0, 6), pady=3)
-        info_row = tk.Frame(status_form, bg="#d4d0c8")
-        info_row.grid(row=2, column=1, sticky="ew", pady=3)
-        info_row.columnconfigure(0, weight=1)
-        tk.Entry(info_row, textvariable=status_info_var).grid(row=0, column=0, sticky="ew")
-        tk.Button(info_row, text="...", width=3, relief="groove").grid(row=0, column=1, padx=(4, 0))
-        tk.Label(status_form, text="Info_Index", bg="#d4d0c8", anchor="w").grid(row=2, column=2, sticky="w", padx=(18, 6), pady=3)
-        index_type_row = tk.Frame(status_form, bg="#d4d0c8")
-        index_type_row.grid(row=2, column=3, sticky="ew", pady=3)
-        tk.Entry(index_type_row, textvariable=status_index_var, width=9).pack(side="left")
-        tk.Label(index_type_row, text="Type", bg="#d4d0c8").pack(side="left", padx=(14, 5))
-        ttk.Combobox(index_type_row, textvariable=status_type_var,
-                     values=("32 - General switch",), width=20).pack(side="left", fill="x", expand=True)
-
-        tk.Label(status_form, text="ASDU (decimal)", bg="#d4d0c8", anchor="w").grid(row=3, column=0, sticky="w", padx=(0, 6), pady=3)
-        tk.Entry(status_form, textvariable=status_asdu_var).grid(row=3, column=1, sticky="ew", pady=3)
-        tk.Label(status_form, text="IOA (decimal)", bg="#d4d0c8", anchor="w").grid(row=3, column=2, sticky="w", padx=(18, 6), pady=3)
-        tk.Entry(status_form, textvariable=status_ioa_var).grid(row=3, column=3, sticky="ew", pady=3)
-
-        tk.Label(status_form, text="His_Save_Mode", bg="#d4d0c8", anchor="w").grid(row=4, column=0, sticky="w", padx=(0, 6), pady=3)
-        ttk.Combobox(status_form, textvariable=status_hissave_var,
-                     values=("0 - None", "1 - None"), width=20).grid(row=4, column=1, sticky="w", pady=3)
-        tk.Label(status_form, text="Alarm_Class", bg="#d4d0c8", anchor="w").grid(row=4, column=2, sticky="w", padx=(18, 6), pady=3)
-        ttk.Combobox(status_form, textvariable=status_alert_var,
-                     values=("0 - Normal", "1 - Warning", "2 - Urgent", "3 - Normal"), width=20).grid(row=4, column=3, sticky="w", pady=3)
-
-        alarm_flags = tk.Frame(status_form, bg="#d4d0c8")
-        alarm_flags.grid(row=5, column=0, columnspan=4, sticky="w", pady=(4, 2))
-        tk.Checkbutton(alarm_flags, text="OPEN ALARM ENABLE", variable=status_open_alarm_var,
-                       bg="#d4d0c8").pack(side="left")
-        tk.Checkbutton(alarm_flags, text="CLOSE ALARM ENABLE", variable=status_close_alarm_var,
-                       bg="#d4d0c8").pack(side="left", padx=(24, 0))
-
-        tk.Label(status_form, text="Set_String", bg="#d4d0c8", anchor="w").grid(row=6, column=0, sticky="w", padx=(0, 6), pady=3)
-        ttk.Combobox(status_form, textvariable=status_setstr_var,
-                     values=status_label_options).grid(row=6, column=1, sticky="ew", pady=3)
-        set_flags = tk.Frame(status_form, bg="#d4d0c8")
-        set_flags.grid(row=6, column=2, columnspan=2, sticky="w", padx=(18, 0), pady=3)
-        tk.Checkbutton(set_flags, text="Open_Ring", variable=status_open_ring_var, bg="#d4d0c8").pack(side="left")
-        tk.Checkbutton(set_flags, text="Open_Flute", variable=status_open_flute_var, bg="#d4d0c8").pack(side="left", padx=(18, 0))
-
-        tk.Label(status_form, text="Reset_String", bg="#d4d0c8", anchor="w").grid(row=7, column=0, sticky="w", padx=(0, 6), pady=3)
-        ttk.Combobox(status_form, textvariable=status_resetstr_var,
-                     values=status_label_options).grid(row=7, column=1, sticky="ew", pady=3)
-        reset_flags = tk.Frame(status_form, bg="#d4d0c8")
-        reset_flags.grid(row=7, column=2, columnspan=2, sticky="w", padx=(18, 0), pady=3)
-        tk.Checkbutton(reset_flags, text="Close_Ring", variable=status_close_ring_var, bg="#d4d0c8").pack(side="left")
-        tk.Checkbutton(reset_flags, text="Close_Flute", variable=status_close_flute_var, bg="#d4d0c8").pack(side="left", padx=(18, 0))
-
-        tk.Checkbutton(status_form, text="Set_Media_Alert", variable=status_set_media_var,
-                       bg="#d4d0c8").grid(row=8, column=0, sticky="w", pady=3)
-        tk.Label(status_form, text="Set_Alert_Media_File", bg="#d4d0c8").grid(row=8, column=1, sticky="w", pady=3)
-        ttk.Combobox(status_form, textvariable=status_set_media_file_var,
-                     values=("250",)).grid(row=8, column=2, columnspan=2, sticky="ew", pady=3)
-
-        tk.Checkbutton(status_form, text="Reset_Media_Alert", variable=status_reset_media_var,
-                       bg="#d4d0c8").grid(row=9, column=0, sticky="w", pady=3)
-        tk.Label(status_form, text="Reset_Alert_Media_File", bg="#d4d0c8").grid(row=9, column=1, sticky="w", pady=3)
-        ttk.Combobox(status_form, textvariable=status_reset_media_file_var,
-                     values=("250",)).grid(row=9, column=2, columnspan=2, sticky="ew", pady=3)
-
-        status_flags = tk.Frame(status_form, bg="#d4d0c8")
-        status_flags.grid(row=10, column=0, columnspan=4, sticky="w", pady=3)
-        tk.Label(status_flags, text="Use_Flag", bg="#d4d0c8").pack(side="left")
-        ttk.Combobox(status_flags, textvariable=status_use_flag_var,
-                     values=("IN", "OUT"), state="readonly", width=10).pack(side="left", padx=(6, 20))
-        tk.Checkbutton(status_flags, text="Man_Set", variable=status_man_set_var, bg="#d4d0c8").pack(side="left")
-        tk.Checkbutton(status_flags, text="Reverse", variable=status_reverse_var, bg="#d4d0c8").pack(side="left", padx=(18, 0))
-
-        tk.Label(status_form, text="Expression", bg="#d4d0c8", anchor="w").grid(row=11, column=0, sticky="w", padx=(0, 6), pady=3)
-        expression_row = tk.Frame(status_form, bg="#d4d0c8")
-        expression_row.grid(row=11, column=1, columnspan=3, sticky="ew", pady=3)
-        expression_row.columnconfigure(0, weight=1)
-        tk.Entry(expression_row, textvariable=status_expression_var).grid(row=0, column=0, sticky="ew")
-        tk.Button(expression_row, text="...", width=3, relief="groove").grid(row=0, column=1, padx=(4, 8))
-        tk.Checkbutton(expression_row, text="Dummy", variable=status_dummy_var,
-                       bg="#d4d0c8").grid(row=0, column=2)
-
-        def get_device_filename(dev_name):
-            clean_filename = "".join(c for c in dev_name if c.isalnum() or c in (' ', '_', '#')).rstrip()
-            return os.path.join(APP_DIR, f"ListSetting {clean_filename}.csv")
-
-        def load_device_csv(dev_name):
-            file_name = get_device_filename(dev_name)
-            rows = []
-            if os.path.exists(file_name):
-                with open(file_name, mode="r", encoding="utf-8-sig") as f:
-                    reader = csv.reader(f)
-                    header = next(reader, None)
-                    for row in reader:
-                        if row:
-                            rows.append(tuple(row))
-            return rows
-
-        def get_status_filename(dev_name):
-            return _status_setting_filename(dev_name)
-
-        def load_status_csv(dev_name):
-            file_name = get_status_filename(dev_name)
-            if dev_name not in STATUS_BAYS or not os.path.exists(file_name):
-                return list(STATUS_SETTING_DISPLAY_COLUMNS), []
-            rows = []
-            with open(file_name, mode="r", encoding="utf-8-sig", newline="") as handle:
-                reader = csv.reader(handle)
-                header = next(reader, None) or list(STATUS_SETTING_DISPLAY_COLUMNS)
-                for row in reader:
-                    if row and any(str(value).strip() for value in row):
-                        padded = list(row[:len(header)]) + [""] * max(0, len(header) - len(row))
-                        rows.append(tuple(padded))
-            return list(header), rows
-
-        def _set_entry(entry, value):
-            entry.delete(0, "end")
-            entry.insert(0, "" if value is None else str(value))
-
-        def _set_combo(combo, value):
-            value = "" if value is None else str(value)
-            combo.set(value)
-
-        def _auto_type_from_physical(physical):
-            """Infer the engineering type from the selected Physical_Name."""
-            p = str(physical or "").strip().lower()
-            if p in {"ia", "ib", "ic", "in", "ie"}:
-                return "Current"
-            if p.startswith("u") or p == "ue":
-                return "Voltage"
-            if p in {"p", "q", "cos"}:
-                return "Power"
-            if p in {"f", "frequency"}:
-                return "Frequency"
-            return None
-
-        selected_original_row = {
-            "values": None, "device": None,
-            "status_index": None, "analog_index": None,
+        active = {
+            "view": "data",
+            "category": "device",
+            "device_index": None,
+            "record_index": None,
         }
-        active_context = {"device": "Connection Wire I", "category": "Analog"}
+        node_context = {}
+        row_context = {}
+        nav_buttons = {}
+        action_buttons = {}
+        search_trace_state = {"suspended": False}
 
-        def populate_form_from_row(values):
-            """Load the exact clicked CSV row into every setting field."""
-            if not values:
-                return
+        def set_status(message, tone="info"):
+            status_var.set(message)
+            status_label.configure(
+                fg={
+                    "success": colors["success"],
+                    "warning": colors["warning"],
+                    "error": colors["danger"],
+                }.get(tone, colors["muted"])
+            )
 
-            row = list(values)
-            if len(row) < len(cols):
-                row += [""] * (len(cols) - len(row))
-            selected_original_row["values"] = tuple(row)
-            selected_original_row["device"] = str(row[1] or cb_bay.get()).strip()
+        def require_crud(action):
+            if can_edit:
+                return True
+            set_status(
+                f"READ ONLY — Operator cannot {action}",
+                "warning",
+            )
+            return False
 
-            _set_entry(e_dev_addr, row[0])
-            _set_combo(cb_bay, row[1])
-            _set_entry(e_phys, row[2])
-            _set_entry(e_info, row[3])
-            _set_entry(e_idx, row[4])
-
-            row_type = str(row[5] or "").strip()
-            inferred_type = _auto_type_from_physical(row[2])
-            if row_type in {"Current", "Voltage", "Power", "Frequency"}:
-                _set_combo(cb_type, row_type)
-            elif inferred_type:
-                _set_combo(cb_type, inferred_type)
-
-            _set_combo(cb_save, row[6])
-            _set_entry(e_asdu, row[7])
-            _set_entry(e_ioa, row[8])
-            _set_entry(e_cof, row[9])
-            _set_entry(e_ct, row[10])
-            _set_entry(e_tol, row[11])
-            _set_combo(cb_alarm, row[12])
-            stored_formula = str(row[17] or "MULTIPLY_CTPT")
-            _set_combo(cb_formula, "CUSTOM" if stored_formula.upper().startswith("CUSTOM:") else stored_formula)
-            if stored_formula.upper().startswith("CUSTOM:"):
-                _set_entry(e_custom_formula, stored_formula.split(":", 1)[1].strip())
-            # Backward compatible with old 19-column CSVs where column 18 was Unit.
-            if len(row) >= 20:
-                _set_entry(e_add, row[18])
-                _set_entry(e_unit, row[19])
+        def switch_workspace(show_overview=False):
+            if show_overview:
+                if data_frame.winfo_manager():
+                    data_frame.pack_forget()
+                if not overview_frame.winfo_manager():
+                    overview_frame.pack(fill="both", expand=True)
+                active["view"] = "overview"
             else:
-                _set_entry(e_add, "0")
-                _set_entry(e_unit, row[18] if len(row) > 18 else "")
+                if overview_frame.winfo_manager():
+                    overview_frame.pack_forget()
+                if not data_frame.winfo_manager():
+                    data_frame.pack(fill="both", expand=True)
+                active["view"] = "data"
 
-            for key, index in (
-                ("UUp_Limit", 13),
-                ("Up_Limit", 14),
-                ("Down_Limit", 15),
-                ("DDown_Limit", 16),
-            ):
-                _set_entry(limit_entries[key], row[index])
+        def configure_columns(category):
+            fields = cbz_device_data.field_names(self.cbz_config, category)
+            identifiers = tuple(f"column_{index}" for index in range(len(fields)))
+            table.configure(columns=identifiers, displaycolumns=identifiers)
+            for identifier, field in zip(identifiers, fields):
+                table.heading(identifier, text=field)
+                normalized = field.casefold()
+                if any(
+                    token in normalized
+                    for token in (
+                        "physical",
+                        "name",
+                        "expression",
+                        "judge",
+                        "comment",
+                        "soundfile",
+                    )
+                ):
+                    width = 225
+                elif "time" in normalized:
+                    width = 170
+                else:
+                    width = 112
+                table.column(
+                    identifier,
+                    width=width,
+                    minwidth=80,
+                    anchor="center",
+                    stretch=False,
+                )
+            return fields
 
-        def _status_bool(value):
-            return str(value or "").strip().lower() in {"-1", "1", "true", "yes", "on"}
 
-        def _choice_number(value, default=""):
-            text = str(value or "").strip()
-            match = re.match(r"^(-?\d+)", text)
-            return match.group(1) if match else (text or default)
+        def selected_record_indices():
+            return sorted(
+                {
+                    row_context[item]
+                    for item in table.selection()
+                    if item in row_context
+                }
+            )
 
-        def _status_string_display(value, reset=False):
-            raw = str(value or "").strip()
-            if not raw:
-                return ""
-            reset_codes = {"2", "4", "41"}
-            return f"{raw} - {'alarm return' if reset or raw in reset_codes else 'alarm'}"
+        def selected_device_index():
+            if active["category"] == "device":
+                selected = selected_record_indices()
+                if selected:
+                    return selected[0]
+            device_index = active.get("device_index")
+            if device_index is not None:
+                return device_index
+            return 0 if cbz_device_data.devices(self.cbz_config) else None
 
-        def populate_status_form(values):
-            """Load one status row, including the decimal ASDU/IOA columns."""
-            if not values:
+        def update_action_state():
+            if not can_edit:
+                for button in action_buttons.values():
+                    button.configure(state="disabled")
                 return
-            row = list(values[:len(STATUS_SETTING_KEYS)])
-            row += [""] * (len(STATUS_SETTING_KEYS) - len(row))
-            selected_original_row["values"] = tuple(row)
-            selected_original_row["device"] = active_context["device"]
+            selected = selected_record_indices()
+            has_selection = bool(selected)
+            has_device = (
+                active["category"] == "device"
+                or active["device_index"] is not None
+            )
+            action_buttons["new"].configure(
+                state="normal" if has_device else "disabled"
+            )
+            for name in ("edit", "duplicate", "delete"):
+                action_buttons[name].configure(
+                    state="normal" if has_selection else "disabled"
+                )
+            if active["category"] != "device":
+                action_buttons["edit"].configure(
+                    state="normal" if len(selected) == 1 else "disabled"
+                )
+                action_buttons["duplicate"].configure(
+                    state="normal" if len(selected) == 1 else "disabled"
+                )
+            elif len(selected) != 1:
+                action_buttons["edit"].configure(state="disabled")
+                action_buttons["duplicate"].configure(state="disabled")
 
-            # The first two InfoName digits are authoritative for status IP.
-            status_device_var.set(_status_info_ip(row[3]) or str(row[0]))
-            status_bay_var.set(active_context["device"])
-            status_physical_var.set(str(row[2]))
-            status_info_var.set(str(row[3]))
-            status_index_var.set(str(row[4]))
-            decoded = _decode_status_info_name(row[3])
-            status_asdu_var.set(str(row[27] or decoded.get("Parsed_ASDU", "")))
-            status_ioa_var.set(str(row[28] or decoded.get("Parsed_IOA", row[4])))
-            status_type_var.set(f"{row[5]} - General switch" if str(row[5]).strip() else "32 - General switch")
-            status_hissave_var.set(f"{row[6]} - None" if str(row[6]).strip() else "0 - None")
-            status_alert_var.set(f"{row[14]} - Normal" if str(row[14]).strip() else "0 - Normal")
-            status_setstr_var.set(_status_string_display(row[8], reset=False))
-            status_resetstr_var.set(_status_string_display(row[9], reset=True))
-            status_set_media_file_var.set(str(row[12] or "250"))
-            status_reset_media_file_var.set(str(row[13] or "250"))
-            status_use_flag_var.set("IN" if _status_bool(row[21]) else "OUT")
-            status_expression_var.set(str(row[24] or row[25] or ""))
+        def refresh_table(
+            category,
+            device_index=None,
+            select_index=0,
+            preserve_search=False,
+        ):
+            switch_workspace(False)
+            active.update(
+                {
+                    "category": category,
+                    "device_index": device_index,
+                    "record_index": None,
+                }
+            )
+            if not preserve_search and record_search_var.get():
+                search_trace_state["suspended"] = True
+                try:
+                    record_search_var.set("")
+                finally:
+                    search_trace_state["suspended"] = False
+            rows = cbz_device_data.records(
+                self.cbz_config,
+                category,
+                device_index,
+            )
+            query = record_search_var.get().strip().casefold()
+            prepared_rows = []
+            for original_index, record in enumerate(rows):
+                values = cbz_device_data.record_values(
+                    self.cbz_config,
+                    category,
+                    record,
+                )
+                if query and query not in " ".join(values).casefold():
+                    continue
+                prepared_rows.append((original_index, values))
 
-            status_reverse_var.set(_status_bool(row[7]))
-            status_set_media_var.set(_status_bool(row[10]))
-            status_reset_media_var.set(_status_bool(row[11]))
-            status_open_alarm_var.set(_status_bool(row[15]))
-            status_close_alarm_var.set(_status_bool(row[16]))
-            status_open_ring_var.set(_status_bool(row[17]))
-            status_close_ring_var.set(_status_bool(row[18]))
-            status_open_flute_var.set(_status_bool(row[19]))
-            status_close_flute_var.set(_status_bool(row[20]))
-            status_man_set_var.set(_status_bool(row[22]))
-            status_dummy_var.set(_status_bool(row[23]))
+            configure_columns(category)
+            row_context.clear()
+            existing_items = table.get_children()
+            if existing_items:
+                table.delete(*existing_items)
+            visible = []
+            for original_index, values in prepared_rows:
+                item = table.insert(
+                    "",
+                    "end",
+                    values=values,
+                    tags=("even" if len(visible) % 2 == 0 else "odd",),
+                )
+                row_context[item] = original_index
+                visible.append(original_index)
 
-        def on_table_select(event=None):
-            """When a parameter row is clicked, immediately load its settings."""
-            selected = table.selection()
+            definition = cbz_device_data.table_definition(
+                self.cbz_config,
+                category,
+            )
+            label = definition["label"]
+            source_table = definition["source_table"]
+            if category == "device":
+                context_title_var.set("Device Master")
+                context_subtitle_var.set(
+                    f"{source_table}  •  identity, type, template, and point totals"
+                )
+            else:
+                configured_device = cbz_device_data.devices(
+                    self.cbz_config
+                )[device_index]
+                bay_name = str(
+                    configured_device["bay"].get("Jiange_name", "")
+                ).strip()
+                address = configured_device["device"].get("Device_addr", "")
+                declared = cbz_device_data.declared_count(
+                    configured_device,
+                    category,
+                )
+                declared_text = (
+                    ""
+                    if declared is None
+                    else f"  •  declared {declared}"
+                )
+                context_title_var.set(f"{label} Points")
+                suffix = (
+                    "  •  ±1000000 means alarm limit disabled"
+                    if category == "analog"
+                    else ""
+                )
+                context_subtitle_var.set(
+                    f"Device {address}  •  {bay_name}  •  {source_table}"
+                    f"{declared_text}{suffix}"
+                )
+            record_count_var.set(
+                f"{len(visible)} shown  /  {len(rows)} records"
+            )
+
+            if visible and select_index is not None:
+                requested = (
+                    int(select_index)
+                    if int(select_index) in visible
+                    else visible[0]
+                )
+                item = next(
+                    (
+                        item_id
+                        for item_id, original in row_context.items()
+                        if original == requested
+                    ),
+                    None,
+                )
+                if item:
+                    table.selection_set(item)
+                    table.focus(item)
+                    table.see(item)
+                    active["record_index"] = requested
+            update_action_state()
+            set_status(
+                f"{len(rows)} {label.lower()} records loaded from application data"
+            )
+
+        def rebuild_tree(select_device=None, select_category=None):
+            for item in tree.get_children():
+                tree.delete(item)
+            node_context.clear()
+            entries = cbz_device_data.devices(self.cbz_config)
+            query = device_search_var.get().strip().casefold()
+            root_node = tree.insert(
+                "",
+                "end",
+                text=f"All devices  ({len(entries)})",
+                open=True,
+            )
+            node_context[root_node] = ("device", None, None)
+            requested_node = root_node
+            visible_count = 0
+            for device_index, item in enumerate(entries):
+                label = cbz_device_data.device_label(item)
+                if query and query not in label.casefold():
+                    continue
+                visible_count += 1
+                device_node = tree.insert(
+                    root_node,
+                    "end",
+                    text=label,
+                    open=(device_index == select_device),
+                )
+                node_context[device_node] = (
+                    "device",
+                    device_index,
+                    device_index,
+                )
+                if device_index == select_device and not select_category:
+                    requested_node = device_node
+                for category in cbz_device_data.CATEGORIES:
+                    category_label = cbz_device_data.CATEGORY_LABELS[category]
+                    count = len(item["sections"][category])
+                    category_node = tree.insert(
+                        device_node,
+                        "end",
+                        text=f"{category_label}  {count}",
+                    )
+                    node_context[category_node] = (
+                        category,
+                        device_index,
+                        0,
+                    )
+                    if (
+                        device_index == select_device
+                        and category == select_category
+                    ):
+                        requested_node = category_node
+            sidebar_count_var.set(
+                f"{visible_count} of {len(entries)} devices visible"
+            )
+            tree.selection_set(requested_node)
+            tree.focus(requested_node)
+            tree.see(requested_node)
+            return requested_node
+
+        def on_tree_select(_event=None):
+            selected = tree.selection()
             if not selected:
                 return
-            if active_context["category"] == "Status":
-                selected_original_row["status_index"] = table.index(selected[0])
-                populate_status_form(table.item(selected[0], "values"))
-            elif active_context["category"] == "Analog":
-                selected_original_row["analog_index"] = table.index(selected[0])
-                populate_form_from_row(table.item(selected[0], "values"))
+            context = node_context.get(selected[0])
+            if not context:
+                return
+            category, device_index, select_index = context
+            refresh_table(category, device_index, select_index)
 
-        def refresh_table_for_device(dev_name, category="Analog"):
-            for item in table.get_children():
-                table.delete(item)
-            active_context.update({"device": dev_name, "category": category})
-            selected_original_row.update({
-                "values": None, "device": None,
-                "status_index": None, "analog_index": None,
-            })
-            cb_bay.set(dev_name)
-
-            if category == "Status":
-                display_columns, data_rows = load_status_csv(dev_name)
-                # Display the authoritative IP encoded in InfoName rather
-                # than the legacy bay/device number stored in column 0.
-                normalized_rows = []
-                for raw_row in data_rows:
-                    row = list(raw_row)
-                    if len(row) < len(STATUS_SETTING_KEYS):
-                        row += [""] * (len(STATUS_SETTING_KEYS) - len(row))
-                    encoded_ip = _status_info_ip(row[3])
-                    if encoded_ip:
-                        row[0] = encoded_ip
-                    normalized_rows.append(tuple(row))
-                data_rows = normalized_rows
-                configure_table_columns(display_columns)
-                lbl_table_header.config(
-                    text=(f"Status Rectangle Only [ Active File: {get_status_filename(dev_name)} ]"
-                          if dev_name in STATUS_BAYS and data_rows
-                          else f"Status Rectangle Only [ belum ada CSV untuk {dev_name} ]")
-                )
-                _show_parameter_form("Status")
-                editable = dev_name in STATUS_BAYS and bool(data_rows)
-                btn_save.configure(state="normal" if editable else "disabled", text=" Save Status ")
-                btn_delete.configure(state="normal" if editable else "disabled", text=" Delete Status ")
-            elif category == "Analog":
-                configure_table_columns(cols)
-                data_rows = load_device_csv(dev_name)
-                lbl_table_header.config(
-                    text=f"Table Parameter [ Active File: {get_device_filename(dev_name)} ]"
-                )
-                _show_parameter_form("Analog")
-                btn_save.configure(state="normal", text=" Save Parameter ")
-                btn_delete.configure(state="normal", text=" Delete Setting ")
-            else:
-                configure_table_columns(cols)
-                data_rows = []
-                lbl_table_header.config(text=f"{category} [ belum dikonfigurasi untuk {dev_name} ]")
-                _show_parameter_form("Empty")
-                btn_save.configure(state="disabled")
-                btn_delete.configure(state="disabled")
-
-            for r in data_rows:
-                table.insert("", "end", values=r)
-
-            if category == "Analog" and not data_rows:
-                _set_entry(e_dev_addr, device_default_ip.get(dev_name, ""))
-
-            # Open the first configured parameter automatically.
-            children = table.get_children()
-            if children:
-                table.selection_set(children[0])
-                table.focus(children[0])
-                if category == "Analog":
-                    selected_original_row["analog_index"] = 0
-                    populate_form_from_row(table.item(children[0], "values"))
-                elif category == "Status":
-                    selected_original_row["status_index"] = 0
-                    populate_status_form(table.item(children[0], "values"))
-
-        def on_tree_select(event):
-            selected = tree.selection()
+        def on_table_select(_event=None):
+            selected = selected_record_indices()
+            active["record_index"] = selected[0] if len(selected) == 1 else None
+            update_action_state()
             if selected:
-                item_text = tree.item(selected[0], "text")
-                clean_name = item_text.split(". ")[-1] if ". " in item_text else item_text
-
-                if clean_name in devices_list:
-                    refresh_table_for_device(clean_name, "Analog")
-                elif tree.parent(selected[0]):
-                    parent_text = tree.item(tree.parent(selected[0]), "text")
-                    p_clean = parent_text.split(". ")[-1] if ". " in parent_text else parent_text
-                    if p_clean in devices_list:
-                        refresh_table_for_device(p_clean, clean_name)
-
-        tree.bind("<<TreeviewSelect>>", on_tree_select)
-        table.bind("<<TreeviewSelect>>", on_table_select)
-
-        def save_or_update_status():
-            active_dev = active_context.get("device", "")
-            if active_dev not in STATUS_BAYS:
-                messagebox.showwarning("Status Parameter", "Status belum tersedia untuk bay ini.", parent=win)
-                return
-            filename = get_status_filename(active_dev)
-            physical = status_physical_var.get().strip()
-            info_name = status_info_var.get().strip()
-            info_index = status_index_var.get().strip()
-            asdu_text = status_asdu_var.get().strip()
-            ioa_text = status_ioa_var.get().strip()
-            if not physical or not info_name or not info_index:
-                messagebox.showwarning(
-                    "Status Parameter",
-                    "Physical_Name, Info_Name, dan Info_Index wajib diisi.",
-                    parent=win,
+                set_status(
+                    f"{len(selected)} record{'s' if len(selected) != 1 else ''} selected"
                 )
-                return
-            try:
-                int(float(info_index))
-            except ValueError:
-                messagebox.showwarning("Status Parameter", "Info_Index harus berupa angka.", parent=win)
-                return
-            try:
-                asdu_value = int(asdu_text)
-                ioa_value = int(ioa_text)
-                if asdu_value < 0 or ioa_value < 0:
-                    raise ValueError
-            except ValueError:
-                messagebox.showwarning(
-                    "Status Parameter",
-                    "ASDU dan IOA wajib berupa angka desimal nol atau lebih besar.",
-                    parent=win,
-                )
-                return
 
-            _header, existing_rows = load_status_csv(active_dev)
-            target_index = selected_original_row.get("status_index")
-            original = list(selected_original_row.get("values") or [])
-            original += [""] * (len(STATUS_SETTING_KEYS) - len(original))
-            original = original[:len(STATUS_SETTING_KEYS)]
-            if not any(original):
-                default_jian_ge = STATUS_BAY_JIAN_IDS.get(active_dev, "1")
-                original = ["1", default_jian_ge, "", "", "", "32", "1", "0", "0", "2",
-                            "-1", "-1", "250", "250", "3", "", "", "-1", "-1",
-                            "0", "0", "-1", "-1", "0", "0", "", "0", "", ""]
-
-            duplicate_index = next((index for index, row in enumerate(existing_rows)
-                                    if index != target_index and len(row) > 4 and
-                                    (str(row[3]).strip() == info_name or
-                                     str(row[4]).strip() == info_index)), None)
-            if duplicate_index is not None:
-                messagebox.showerror(
-                    "Status Parameter",
-                    f"Info_Name atau Info_Index sudah dipakai pada baris {duplicate_index + 2}.",
-                    parent=win,
-                )
-                return
-
-            original_info = str(original[3]).strip()
-            encoded_ip = _status_info_ip(info_name)
-            if not encoded_ip:
-                messagebox.showwarning(
-                    "Status Parameter",
-                    "Info_Name harus diawali dua digit heksadesimal untuk menentukan IP Device.",
-                    parent=win,
-                )
-                return
-            # Device address status is always decoded from InfoName; the
-            # legacy editable column cannot override the encoded RTU IP.
-            original[0] = encoded_ip
-            original[1] = str(original[1]).strip() or STATUS_BAY_JIAN_IDS.get(active_dev, "1")
-            original[2] = physical
-            original[3] = info_name
-            original[4] = info_index
-            original[5] = _choice_number(status_type_var.get(), "32")
-            original[6] = _choice_number(status_hissave_var.get(), "1")
-            original[7] = "1" if status_reverse_var.get() else "0"
-            original[8] = _choice_number(status_setstr_var.get(), "0")
-            original[9] = _choice_number(status_resetstr_var.get(), "2")
-            original[10] = "-1" if status_set_media_var.get() else "0"
-            original[11] = "-1" if status_reset_media_var.get() else "0"
-            original[12] = status_set_media_file_var.get().strip() or "250"
-            original[13] = status_reset_media_file_var.get().strip() or "250"
-            original[14] = _choice_number(status_alert_var.get(), "3")
-            original[15] = "-1" if status_open_alarm_var.get() else ""
-            original[16] = "-1" if status_close_alarm_var.get() else ""
-            original[17] = "-1" if status_open_ring_var.get() else "0"
-            original[18] = "-1" if status_close_ring_var.get() else "0"
-            original[19] = "-1" if status_open_flute_var.get() else "0"
-            original[20] = "-1" if status_close_flute_var.get() else "0"
-            original[21] = "-1" if status_use_flag_var.get() == "IN" else "0"
-            original[22] = "-1" if status_man_set_var.get() else "0"
-            original[23] = "1" if status_dummy_var.get() else "0"
-            original[24] = status_expression_var.get().strip()
-            original[25] = str(original[25])
-            original[26] = str(original[26]).strip() or "0"
-            original[27] = str(asdu_value)
-            original[28] = str(ioa_value)
-
-            updated_rows = [list(row[:len(STATUS_SETTING_KEYS)]) +
-                            [""] * max(0, len(STATUS_SETTING_KEYS) - len(row))
-                            for row in existing_rows]
-            if isinstance(target_index, int) and 0 <= target_index < len(updated_rows):
-                updated_rows[target_index] = original
-            else:
-                target_index = len(updated_rows)
-                updated_rows.append(original)
-
-            try:
-                _atomic_write_csv(filename, STATUS_SETTING_DISPLAY_COLUMNS, updated_rows)
-                _load_status_settings()
-
-                # Keep already selected rectangles attached to the same status
-                # row if its visible description or InfoName is edited.
-                for binding in self.ui_bindings.get("statuses", {}).values():
-                    if not isinstance(binding, dict) or binding.get("Source_Kind") != "rectangle_status_csv":
-                        continue
-                    if str(binding.get("Bay_Name", "")).strip() != active_dev:
-                        continue
-                    if str(binding.get("Info_Name", "")).strip() != original_info:
-                        continue
-                    binding.update({
-                        "Device_Addr": encoded_ip,
-                        "Bay_Name": active_dev,
-                        "Physical_Name": original[2],
-                        "Info_Name": original[3],
-                        "Info_Index": original[4],
-                        "Jian_Ge_Id": original[1],
-                        "ASDU": asdu_value,
-                        "IOA": ioa_value,
-                        "Reverse": original[7],
-                        "SetStr": original[8],
-                        "ResetStr": original[9],
-                    })
-                self._save_ui_bindings()
-                self._synchronize_ui_bindings_from_listsettings(force=True)
-
-                refresh_table_for_device(active_dev, "Status")
-                children = table.get_children()
-                if children and target_index < len(children):
-                    table.selection_set(children[target_index])
-                    table.focus(children[target_index])
-                    table.see(children[target_index])
-                    selected_original_row["status_index"] = target_index
-                    populate_status_form(table.item(children[target_index], "values"))
-                messagebox.showinfo("Status Parameter", f"Status '{physical}' berhasil disimpan.", parent=win)
-            except Exception as exc:
-                messagebox.showerror("Status Parameter", f"Gagal menyimpan CSV status:\n{exc}", parent=win)
-
-        def save_or_update_setting():
-            if active_context["category"] == "Status":
-                save_or_update_status()
-                return
-            if active_context["category"] != "Analog":
-                return
-            active_dev = cb_bay.get()
-            filename = get_device_filename(active_dev)
-            phys_name = e_phys.get().strip()
-
-            new_ip = e_dev_addr.get().strip()
-            new_asdu = e_asdu.get().strip()
-            new_ioa = e_ioa.get().strip()
-            try:
-                normalized_address = (new_ip, int(new_asdu), int(new_ioa))
-            except (TypeError, ValueError):
-                messagebox.showerror(
-                    "Invalid IEC-104 Address",
-                    "Device_Addr, ASDU, dan IOA wajib diisi dengan alamat yang valid.",
-                    parent=win,
-                )
-                if selected_original_row["values"]:
-                    populate_form_from_row(selected_original_row["values"])
-                return
-
-            original_values = selected_original_row["values"]
-            original_device = selected_original_row["device"]
-            conflict = None
-            for setting_file in sorted(os.listdir(APP_DIR)):
-                if not (
-                    setting_file.startswith("ListSetting ")
-                    and setting_file.lower().endswith(".csv")
-                ):
-                    continue
-                setting_path = os.path.join(APP_DIR, setting_file)
-                try:
-                    with open(setting_path, mode="r", encoding="utf-8-sig", newline="") as f:
-                        for row_number, row in enumerate(csv.DictReader(f), 2):
-                            try:
-                                row_address = (
-                                    str(row.get("Device_Addr", "")).strip(),
-                                    int(str(row.get("ASDU", "")).strip()),
-                                    int(str(row.get("IOA", "")).strip()),
-                                )
-                            except (TypeError, ValueError):
-                                continue
-
-                            # The selected row may keep its own address while being edited.
-                            is_original_row = (
-                                original_values is not None
-                                and original_device == active_dev
-                                and os.path.normcase(setting_path) == os.path.normcase(filename)
-                                and str(row.get("Physical_Name", "")).strip()
-                                    == str(original_values[2]).strip()
-                            )
-                            if is_original_row:
-                                continue
-                            # Sharing IP+ASDU+IOA across different settings is
-                            # allowed: each row applies its own engineering formula.
-                            # Reject only a duplicate identity for the same bay/point.
-                            same_setting_identity = (
-                                str(row.get("Bay_Name", "")).strip() == active_dev
-                                and str(row.get("Physical_Name", "")).strip() == phys_name
-                            )
-                            if row_address == normalized_address and same_setting_identity:
-                                conflict = (
-                                    setting_file,
-                                    row_number,
-                                    str(row.get("Bay_Name", "")).strip(),
-                                    str(row.get("Physical_Name", "")).strip(),
-                                )
-                                break
-                except (OSError, csv.Error):
-                    continue
-                if conflict:
-                    break
-
-            if conflict:
-                setting_file, row_number, conflict_bay, conflict_physical = conflict
-                messagebox.showerror(
-                    "IEC-104 Address Already Used",
-                    f"Setting identik untuk {new_ip} / ASDU {new_asdu} / IOA {new_ioa} sudah ada.\n\n"
-                    f"Bay: {conflict_bay}\nPhysical: {conflict_physical}\n"
-                    f"File: {setting_file} (baris {row_number})\n\n"
-                    "Setting tidak disimpan dan form dikembalikan ke nilai sebelumnya.",
-                    parent=win,
-                )
-                if original_values:
-                    populate_form_from_row(original_values)
-                else:
-                    refresh_table_for_device(active_dev)
-                return
-
-            # Preserve Formula as a fallback for old CSV rows. Unit itself is
-            # editable and is always written from the form.
-            existing_rows = load_device_csv(active_dev)
-            old_formula = "DIRECT"
-            original_index = selected_original_row.get("analog_index")
-            original_row = None
-            if isinstance(original_index, int) and 0 <= original_index < len(existing_rows):
-                original_row = existing_rows[original_index]
-            if original_row is None:
-                original_row = next((old_row for old_row in existing_rows
-                                     if len(old_row) > 2 and str(old_row[2]).strip() == phys_name), None)
-            if original_row is not None:
-                if len(original_row) > 17 and original_row[17]:
-                    old_formula = original_row[17]
-
-            inferred_type = cb_type.get().strip()
-            formula_by_type = {
-                "Current": "CURRENT_CT",
-                "Voltage": "LINE_VOLTAGE",
-                "Power": "POWER",
-                "Frequency": "FREQUENCY_OFFSET",
-            }
-            formula = cb_formula.get().strip() or old_formula or formula_by_type.get(inferred_type, "DIRECT")
-            if formula.upper() == "CUSTOM":
-                custom_expr = e_custom_formula.get().strip()
-                if not custom_expr:
-                    messagebox.showerror("Formula", "Custom formula tidak boleh kosong", parent=win)
-                    return
-                formula = "CUSTOM:" + custom_expr
-            unit = e_unit.get().strip()
-            if not unit:
-                unit = {"Current": "A", "Voltage": "kV", "Power": "kW", "Frequency": "Hz"}.get(inferred_type, "")
-
-            new_data = (
-                new_ip,
-                active_dev,
-                phys_name,
-                e_info.get().strip(),
-                e_idx.get().strip(),
-                inferred_type,
-                cb_save.get(),
-                new_asdu,
-                new_ioa,
-                e_cof.get().strip(),
-                e_ct.get().strip(),
-                e_tol.get().strip(),
-                cb_alarm.get(),
-                limit_entries["UUp_Limit"].get().strip(),
-                limit_entries["Up_Limit"].get().strip(),
-                limit_entries["Down_Limit"].get().strip(),
-                limit_entries["DDown_Limit"].get().strip(),
-                formula,
-                e_add.get().strip() or "0",
-                unit
+        def dialog_window(title, subtitle, width=760, height=640):
+            dialog = tk.Toplevel(win)
+            dialog.title(title)
+            dialog.configure(bg=colors["bg"])
+            dialog.transient(win)
+            dialog.geometry(f"{width}x{height}")
+            dialog.minsize(min(width, 560), min(height, 420))
+            dialog.update_idletasks()
+            x = max(win.winfo_rootx() + (win.winfo_width() - width) // 2, 0)
+            y = max(win.winfo_rooty() + (win.winfo_height() - height) // 2, 0)
+            dialog.geometry(f"{width}x{height}+{x}+{y}")
+            top = tk.Frame(dialog, bg=colors["surface"], height=78)
+            top.pack(fill="x")
+            top.pack_propagate(False)
+            tk.Label(
+                top,
+                text=title,
+                bg=colors["surface"],
+                fg=colors["text"],
+                font=("Segoe UI", 16, "bold"),
+                anchor="w",
+            ).pack(fill="x", padx=20, pady=(13, 0))
+            tk.Label(
+                top,
+                text=subtitle,
+                bg=colors["surface"],
+                fg=colors["muted"],
+                font=("Segoe UI", 9),
+                anchor="w",
+            ).pack(fill="x", padx=20)
+            footer = tk.Frame(
+                dialog,
+                bg=colors["surface_alt"],
+                height=58,
+                highlightbackground=colors["border"],
+                highlightthickness=1,
             )
-            updated = False
-            updated_rows = []
+            footer.pack(side="bottom", fill="x")
+            footer.pack_propagate(False)
+            content = tk.Frame(dialog, bg=colors["bg"])
+            content.pack(fill="both", expand=True)
+            dialog.grab_set()
+            return dialog, content, footer
 
-            for row_index, r in enumerate(existing_rows):
-                if isinstance(original_index, int) and row_index == original_index:
-                    updated_rows.append(new_data)
-                    updated = True
+        def open_form_dialog(title, subtitle, sections, save_callback):
+            dialog, content, footer = dialog_window(
+                title,
+                subtitle,
+                width=1000,
+                height=760,
+            )
+            canvas = tk.Canvas(
+                content,
+                bg=colors["bg"],
+                highlightthickness=0,
+            )
+            scrollbar = ttk.Scrollbar(
+                content,
+                orient="vertical",
+                command=canvas.yview,
+                style="DM.Vertical.TScrollbar",
+            )
+            canvas.configure(yscrollcommand=scrollbar.set)
+            canvas.pack(side="left", fill="both", expand=True)
+            scrollbar.pack(side="right", fill="y")
+            form = tk.Frame(canvas, bg=colors["bg"])
+            canvas_window = canvas.create_window(
+                (0, 0),
+                window=form,
+                anchor="nw",
+            )
+            form.bind(
+                "<Configure>",
+                lambda _event: canvas.configure(
+                    scrollregion=canvas.bbox("all")
+                ),
+            )
+            canvas.bind(
+                "<Configure>",
+                lambda event: canvas.itemconfigure(
+                    canvas_window,
+                    width=event.width,
+                ),
+            )
+            self._bind_mousewheel(canvas)
+
+            section_vars = {}
+            for section in sections:
+                category = section["category"]
+                record = section.get("record") or {}
+                locked = set(section.get("locked", ()))
+                definition = cbz_device_data.table_definition(
+                    self.cbz_config,
+                    category,
+                )
+                box = tk.Frame(
+                    form,
+                    bg=colors["surface"],
+                    highlightbackground=colors["border"],
+                    highlightthickness=1,
+                )
+                box.pack(fill="x", padx=18, pady=(16, 0))
+                tk.Label(
+                    box,
+                    text=section["label"],
+                    bg=colors["panel"],
+                    fg=colors["text"],
+                    font=("Segoe UI", 11, "bold"),
+                    anchor="w",
+                    padx=12,
+                    pady=8,
+                ).grid(row=0, column=0, columnspan=4, sticky="ew")
+                variables = {}
+                section_vars[category] = variables
+                for field_index, field in enumerate(definition["fields"]):
+                    row_number = field_index // 2 + 1
+                    pair = field_index % 2
+                    label_column = pair * 2
+                    value_column = label_column + 1
+                    name = field["name"]
+                    sql_type = field["sql_type"]
+                    tk.Label(
+                        box,
+                        text=f"{name}\n{sql_type}",
+                        bg=colors["surface"],
+                        fg=colors["muted"],
+                        font=("Segoe UI", 9),
+                        anchor="w",
+                        justify="left",
+                    ).grid(
+                        row=row_number,
+                        column=label_column,
+                        sticky="w",
+                        padx=(12 if pair == 0 else 20, 8),
+                        pady=7,
+                    )
+                    variable = tk.StringVar(
+                        value=cbz_device_data.format_value(record.get(name))
+                    )
+                    variables[name] = variable
+                    if sql_type == "bit":
+                        widget = ttk.Combobox(
+                            box,
+                            textvariable=variable,
+                            values=("", "0", "1"),
+                            state="readonly",
+                            style="DM.TCombobox",
+                        )
+                    else:
+                        widget = ttk.Entry(
+                            box,
+                            textvariable=variable,
+                            style="DM.TEntry",
+                        )
+                        if name in locked:
+                            widget.configure(state="readonly")
+                    widget.grid(
+                        row=row_number,
+                        column=value_column,
+                        sticky="ew",
+                        padx=(0, 12),
+                        pady=7,
+                    )
+                box.grid_columnconfigure(1, weight=1)
+                box.grid_columnconfigure(3, weight=1)
+
+            error_var = tk.StringVar()
+            tk.Label(
+                footer,
+                textvariable=error_var,
+                bg=colors["surface_alt"],
+                fg=colors["danger"],
+                font=("Segoe UI", 9),
+                anchor="w",
+            ).pack(side="left", fill="x", expand=True, padx=16)
+
+            def submit():
+                payload = {
+                    category: {
+                        name: variable.get()
+                        for name, variable in variables.items()
+                    }
+                    for category, variables in section_vars.items()
+                }
+                try:
+                    save_callback(payload)
+                except Exception as exc:
+                    error_var.set(str(exc))
+                    return
+                dialog.destroy()
+
+            ttk.Button(
+                footer,
+                text="Cancel",
+                command=dialog.destroy,
+                style="DM.TButton",
+            ).pack(side="right", padx=(6, 14), pady=9)
+            ttk.Button(
+                footer,
+                text="Save Changes",
+                command=submit,
+                style="Primary.DM.TButton",
+            ).pack(side="right", padx=6, pady=9)
+            return dialog
+
+        def persist_config():
+            if not can_edit:
+                raise PermissionError(
+                    "The active Operator session is read-only."
+                )
+            cbz_device_data.refresh_counts(self.cbz_config)
+            cbz_device_data.save_config(
+                self.cbz_config,
+                CBZ8000_DEVICE_DATA_PATH,
+            )
+
+        def default_record(category):
+            result = {}
+            definition = cbz_device_data.table_definition(
+                self.cbz_config,
+                category,
+            )
+            for field in definition["fields"]:
+                base_type = field["sql_type"].split("(", 1)[0].lower()
+                result[field["name"]] = (
+                    ""
+                    if base_type
+                    in {"char", "varchar", "nchar", "nvarchar", "datetime"}
+                    else 0
+                )
+            return result
+
+        def open_device_editor(device_index=None, duplicate=False):
+            if not require_crud("create, edit, or copy devices"):
+                return
+            entries = cbz_device_data.devices(self.cbz_config)
+            source_index = device_index
+            if duplicate:
+                source_index = selected_device_index()
+                if source_index is None:
+                    set_status("Select a source device first", "warning")
+                    return
+                source = entries[source_index]
+                device_record = copy.deepcopy(source["device"])
+                bay_record = copy.deepcopy(source["bay"])
+            elif device_index is not None:
+                source = entries[device_index]
+                device_record = copy.deepcopy(source["device"])
+                bay_record = copy.deepcopy(source["bay"])
+            else:
+                device_record = default_record("device")
+                bay_record = default_record("bay")
+
+            if device_index is None or duplicate:
+                next_address = max(
+                    (
+                        int(item["device"]["Device_addr"])
+                        for item in entries
+                    ),
+                    default=0,
+                ) + 1
+                next_bay = max(
+                    (int(item["bay"]["Jiange_id"]) for item in entries),
+                    default=0,
+                ) + 1
+                device_record["Device_addr"] = next_address
+                device_record["Device_jiange"] = next_bay
+                bay_record["Jiange_id"] = next_bay
+                if duplicate:
+                    device_record["Device_name"] = (
+                        f"{str(device_record.get('Device_name', '')).strip()} Copy"
+                    ).strip()
+                    bay_record["Jiange_name"] = (
+                        f"{str(bay_record.get('Jiange_name', '')).strip()} Copy"
+                    ).strip()
                 else:
-                    updated_rows.append(r)
+                    device_record["Device_name"] = "New Device"
+                    bay_record["Jiange_name"] = "New Bay"
 
-            if not updated:
-                updated_rows.append(new_data)
+            device_locked = {
+                "Device_jiange",
+                *(
+                    field
+                    for field in cbz_device_data.DECLARED_COUNT_FIELDS.values()
+                ),
+            }
+            bay_locked = set(cbz_device_data.BAY_COUNT_FIELDS.values())
 
-            try:
-                _atomic_write_csv(filename, cols, updated_rows)
-                _load_setting_engine()
+            def save_device(payload):
+                result_index = cbz_device_data.update_device(
+                    self.cbz_config,
+                    payload["device"],
+                    payload["bay"],
+                    (
+                        None
+                        if duplicate
+                        else device_index
+                    ),
+                    (
+                        source_index
+                        if duplicate
+                        else None
+                    ),
+                )
+                persist_config()
+                rebuild_tree(result_index)
+                refresh_table("device", None, result_index)
+                set_status(
+                    "Complete device copy created"
+                    if duplicate
+                    else "Device and bay saved",
+                    "success",
+                )
 
-                with DATA_LOCK:
-                    ip = e_dev_addr.get().strip()
-                    RAW_STORE.setdefault(ip, {}).pop(phys_name, None)
-                    DATA_STORE.setdefault(ip, DEFAULT_DATA.copy())[phys_name] = 0.0
+            open_form_dialog(
+                (
+                    "Copy Complete Device"
+                    if duplicate
+                    else ("Edit Device" if device_index is not None else "New Device")
+                ),
+                (
+                    "Copies every point section into a new device and bay."
+                    if duplicate
+                    else "Maintain the Device and Jiange records as one transaction."
+                ),
+                (
+                    {
+                        "category": "device",
+                        "label": "Device Identity",
+                        "record": device_record,
+                        "locked": device_locked,
+                    },
+                    {
+                        "category": "bay",
+                        "label": "Bay / Jiange",
+                        "record": bay_record,
+                        "locked": bay_locked,
+                    },
+                ),
+                save_device,
+            )
 
-                self._synchronize_ui_bindings_from_listsettings(force=True)
-                refresh_table_for_device(active_dev)
-                messagebox.showinfo("Success", f"Variable '{phys_name}' saved to '{filename}'!", parent=win)
-            except Exception as ex:
-                messagebox.showerror("Error", f"Failed saving CSV file: {str(ex)}", parent=win)
+        def open_point_editor(record_index=None, duplicate=False):
+            if not require_crud("create, edit, or copy point records"):
+                return
+            category = active["category"]
+            device_index = active["device_index"]
+            if category not in cbz_device_data.CATEGORIES or device_index is None:
+                set_status("Select a point category first", "warning")
+                return
+            rows = cbz_device_data.records(
+                self.cbz_config,
+                category,
+                device_index,
+            )
+            if record_index is not None:
+                if not 0 <= record_index < len(rows):
+                    return
+                record = copy.deepcopy(rows[record_index])
+            else:
+                record = default_record(category)
+            if record_index is None or duplicate:
+                identity_field = (
+                    "Wholecall_Sector"
+                    if category == "sector"
+                    else "Info_index"
+                )
+                record[identity_field] = cbz_device_data.next_identity_value(
+                    self.cbz_config,
+                    category,
+                    device_index,
+                )
+                configured_device = cbz_device_data.devices(
+                    self.cbz_config
+                )[device_index]
+                address_field = (
+                    "Device_Addr"
+                    if category == "sector"
+                    else "device_addr"
+                )
+                record[address_field] = configured_device["device"][
+                    "Device_addr"
+                ]
+                record["JianGe_id"] = configured_device["bay"]["Jiange_id"]
 
-        def delete_selected_status():
-            active_dev = active_context.get("device", "")
-            if active_dev not in STATUS_BAYS:
+            locked = {"device_addr", "Device_Addr", "JianGe_id"}
+
+            def save_point(payload):
+                saved_index = cbz_device_data.update_record(
+                    self.cbz_config,
+                    category,
+                    payload[category],
+                    device_index,
+                    (
+                        None
+                        if duplicate
+                        else record_index
+                    ),
+                )
+                persist_config()
+                rebuild_tree(device_index, category)
+                refresh_table(category, device_index, saved_index)
+                set_status(
+                    f"{cbz_device_data.CATEGORY_LABELS[category]} record saved",
+                    "success",
+                )
+
+            label = cbz_device_data.CATEGORY_LABELS[category]
+            open_form_dialog(
+                (
+                    f"Duplicate {label} Record"
+                    if duplicate
+                    else (
+                        f"Edit {label} Record"
+                        if record_index is not None
+                        else f"New {label} Record"
+                    )
+                ),
+                "Schema-aware values are validated before the JSON data is replaced.",
+                (
+                    {
+                        "category": category,
+                        "label": (
+                            f"{label} / "
+                            f"{cbz_device_data.table_definition(self.cbz_config, category)['source_table']}"
+                        ),
+                        "record": record,
+                        "locked": locked,
+                    },
+                ),
+                save_point,
+            )
+
+        def new_record():
+            if not require_crud("create records"):
+                return
+            if active["category"] == "device":
+                open_device_editor()
+            else:
+                open_point_editor()
+
+        def edit_record(_event=None):
+            if not require_crud("edit records"):
                 return "break"
-            selected_items = table.selection()
-            if not selected_items:
-                messagebox.showwarning("Delete Status", "Pilih status yang akan dihapus.", parent=win)
+            selected = selected_record_indices()
+            if len(selected) != 1:
+                set_status("Select exactly one record to edit", "warning")
                 return "break"
-            indexes = sorted({table.index(item) for item in selected_items})
-            names = [str(table.item(item, "values")[2]) for item in selected_items]
-            if not messagebox.askyesno(
-                "Delete Status",
-                f"Hapus {len(indexes)} status dari {active_dev}?\n\n" + ", ".join(names[:6]),
-                icon="warning", parent=win,
-            ):
-                return "break"
-            filename = get_status_filename(active_dev)
-            _header, rows = load_status_csv(active_dev)
-            remaining = [row for index, row in enumerate(rows) if index not in indexes]
-            try:
-                _atomic_write_csv(filename, STATUS_SETTING_DISPLAY_COLUMNS, remaining)
-                _load_status_settings()
-                self._synchronize_ui_bindings_from_listsettings(force=True)
-                refresh_table_for_device(active_dev, "Status")
-                messagebox.showinfo("Delete Status", f"{len(indexes)} status berhasil dihapus.", parent=win)
-            except Exception as exc:
-                messagebox.showerror("Delete Status", f"Gagal menghapus status:\n{exc}", parent=win)
+            if active["category"] == "device":
+                open_device_editor(selected[0])
+            else:
+                open_point_editor(selected[0])
             return "break"
 
-        def delete_selected_settings(event=None):
-            """Delete only the selected parameter rows from the active ListSetting CSV."""
-            if active_context["category"] == "Status":
-                return delete_selected_status()
-            if active_context["category"] != "Analog":
-                return "break"
-            selected_items = table.selection()
-            if not selected_items:
-                messagebox.showwarning(
-                    "Delete Setting",
-                    "Pilih satu atau beberapa baris setting yang akan dihapus.",
-                    parent=win,
-                )
-                return "break"
+        def duplicate_record():
+            if not require_crud("duplicate records"):
+                return
+            selected = selected_record_indices()
+            if len(selected) != 1:
+                set_status("Select exactly one record to duplicate", "warning")
+                return
+            if active["category"] == "device":
+                open_device_editor(selected[0], duplicate=True)
+            else:
+                open_point_editor(selected[0], duplicate=True)
 
-            active_dev = cb_bay.get().strip()
-            filename = get_device_filename(active_dev)
-            selected_indexes = sorted({table.index(item) for item in selected_items})
-            selected_names = [
-                str(table.item(item, "values")[2])
-                for item in selected_items
-                if len(table.item(item, "values")) > 2
-            ]
-            preview = ", ".join(selected_names[:6])
-            if len(selected_names) > 6:
-                preview += f", dan {len(selected_names) - 6} lainnya"
-
+        def delete_records(_event=None):
+            if not require_crud("delete records"):
+                return "break"
+            selected = selected_record_indices()
+            if not selected:
+                set_status("Select one or more records to delete", "warning")
+                return "break"
+            label = cbz_device_data.CATEGORY_LABELS[active["category"]]
+            cascade_text = (
+                "\nAll point sections for the selected devices will also be deleted."
+                if active["category"] == "device"
+                else ""
+            )
             if not messagebox.askyesno(
-                "Delete Setting",
-                f"Hapus {len(selected_indexes)} setting dari '{active_dev}'?\n\n{preview}\n\n"
-                "Tindakan ini akan mengubah file ListSetting.",
+                "Confirm Delete",
+                f"Delete {len(selected)} {label.lower()} record(s)?"
+                f"{cascade_text}\n\nA timestamped backup will be created.",
                 icon="warning",
                 parent=win,
             ):
                 return "break"
-
-            existing_rows = load_device_csv(active_dev)
-            remaining_rows = [
-                row for index, row in enumerate(existing_rows)
-                if index not in selected_indexes
-            ]
             try:
-                _atomic_write_csv(filename, cols, remaining_rows)
-                _load_setting_engine()
-                self._synchronize_ui_bindings_from_listsettings(force=True)
-                refresh_table_for_device(active_dev)
-                messagebox.showinfo(
-                    "Delete Setting",
-                    f"{len(selected_indexes)} setting berhasil dihapus dari '{active_dev}'.",
-                    parent=win,
-                )
-            except Exception as ex:
+                if active["category"] == "device":
+                    for index in reversed(selected):
+                        cbz_device_data.delete_device(self.cbz_config, index)
+                    persist_config()
+                    rebuild_tree()
+                    refresh_table("device")
+                else:
+                    category = active["category"]
+                    device_index = active["device_index"]
+                    for index in reversed(selected):
+                        cbz_device_data.delete_record(
+                            self.cbz_config,
+                            category,
+                            device_index,
+                            index,
+                        )
+                    persist_config()
+                    rebuild_tree(device_index, category)
+                    refresh_table(category, device_index)
+                set_status(f"{len(selected)} record(s) deleted", "success")
+            except Exception as exc:
+                set_status(str(exc), "error")
                 messagebox.showerror(
-                    "Delete Setting",
-                    f"Gagal menghapus setting: {str(ex)}",
+                    "Delete failed",
+                    str(exc),
                     parent=win,
                 )
             return "break"
 
-        f_btn = tk.Frame(bottom_frame, bg="#d4d0c8")
-        f_btn.pack(fill="x", pady=(10, 0))
+        def show_overview():
+            switch_workspace(True)
+            for child in overview_frame.winfo_children():
+                child.destroy()
+            heading = tk.Frame(overview_frame, bg=colors["bg"])
+            heading.pack(fill="x", pady=(0, 12))
+            tk.Label(
+                heading,
+                text="Configuration Overview",
+                bg=colors["bg"],
+                fg=colors["text"],
+                font=("Segoe UI", 19, "bold"),
+                anchor="w",
+            ).pack(fill="x")
+            tk.Label(
+                heading,
+                text="Current application-data inventory and device coverage",
+                bg=colors["bg"],
+                fg=colors["muted"],
+                font=("Segoe UI", 10),
+                anchor="w",
+            ).pack(fill="x")
 
-        btn_save = tk.Button(f_btn, text=f" {'Save Parameter'} ", bg="#d4d0c8", font=("Segoe UI", 10, "bold"), relief="groove", command=save_or_update_setting)
-        btn_save.pack(side="right", padx=5)
+            counts = cbz_device_data.refresh_counts(self.cbz_config)
+            cards = tk.Frame(overview_frame, bg=colors["bg"])
+            cards.pack(fill="x")
+            card_specs = (
+                ("Devices", counts["devices"], colors["primary"]),
+                ("Analog", counts["analog"], colors["border"]),
+                ("Status", counts["status"], colors["border"]),
+                ("Pulse", counts["pulse"], colors["border"]),
+                ("SOE", counts["soe"], colors["border"]),
+                ("Telecontrol", counts["telecontrol"], colors["border"]),
+                ("Sector", counts["sector"], colors["border"]),
+            )
+            for index, (label, value, accent) in enumerate(card_specs):
+                card = tk.Frame(
+                    cards,
+                    bg=colors["surface"],
+                    highlightbackground=colors["border"],
+                    highlightthickness=1,
+                )
+                card.grid(
+                    row=index // 4,
+                    column=index % 4,
+                    sticky="nsew",
+                    padx=(0 if index % 4 == 0 else 8, 0),
+                    pady=(0, 8),
+                )
+                tk.Frame(card, bg=accent, height=4).pack(fill="x")
+                tk.Label(
+                    card,
+                    text=str(value),
+                    bg=colors["surface"],
+                    fg=colors["text"],
+                    font=("Segoe UI", 22, "bold"),
+                    anchor="w",
+                ).pack(fill="x", padx=14, pady=(10, 0))
+                tk.Label(
+                    card,
+                    text=label.upper(),
+                    bg=colors["surface"],
+                    fg=colors["muted"],
+                    font=("Segoe UI", 9, "bold"),
+                    anchor="w",
+                ).pack(fill="x", padx=14, pady=(0, 12))
+            for column in range(4):
+                cards.grid_columnconfigure(column, weight=1)
 
-        btn_delete = tk.Button(
-            f_btn, text=" Delete Setting ", bg="#c62828", fg="#ffffff",
-            activebackground="#8e0000", activeforeground="#ffffff",
-            font=("Segoe UI", 10, "bold"), relief="groove",
-            command=delete_selected_settings,
-        )
-        btn_delete.pack(side="right", padx=5)
+            coverage_card = tk.Frame(
+                overview_frame,
+                bg=colors["surface"],
+                highlightbackground=colors["border"],
+                highlightthickness=1,
+            )
+            coverage_card.pack(fill="both", expand=True)
+            tk.Label(
+                coverage_card,
+                text="Device Coverage",
+                bg=colors["panel"],
+                fg=colors["text"],
+                font=("Segoe UI", 11, "bold"),
+                anchor="w",
+                padx=12,
+                pady=9,
+            ).pack(fill="x")
+            columns = (
+                "device",
+                "analog",
+                "status",
+                "pulse",
+                "soe",
+                "telecontrol",
+                "sector",
+            )
+            coverage = ttk.Treeview(
+                coverage_card,
+                columns=columns,
+                show="headings",
+                style="DM.Treeview",
+            )
+            headings = {
+                "device": "Device / Bay",
+                "analog": "Analog",
+                "status": "Status",
+                "pulse": "Pulse",
+                "soe": "SOE",
+                "telecontrol": "Telecontrol",
+                "sector": "Sector",
+            }
+            for column in columns:
+                coverage.heading(column, text=headings[column])
+                coverage.column(
+                    column,
+                    width=380 if column == "device" else 105,
+                    anchor="w" if column == "device" else "center",
+                    stretch=(column == "device"),
+                )
+            for device_index, item in enumerate(
+                cbz_device_data.devices(self.cbz_config)
+            ):
+                coverage.insert(
+                    "",
+                    "end",
+                    values=(
+                        cbz_device_data.device_label(item),
+                        *(
+                            len(item["sections"][category])
+                            for category in cbz_device_data.CATEGORIES
+                        ),
+                    ),
+                    tags=("even" if device_index % 2 == 0 else "odd",),
+                )
+            coverage.tag_configure("even", background=colors["surface"])
+            coverage.tag_configure("odd", background=colors["input"])
+            coverage.pack(fill="both", expand=True)
+            set_status("Overview refreshed", "success")
 
-        btn_cancel = tk.Button(f_btn, text=f" {'Cancel'} ", bg="#d4d0c8", font=("Segoe UI", 10), relief="groove", command=win.destroy)
-        btn_cancel.pack(side="right", padx=5)
+        def show_source():
+            source = self.cbz_config["source"]
+            counts = self.cbz_config["counts"]
+            dialog, content, footer = dialog_window(
+                "Database Source",
+                "Traceable origin and integrity information for this configuration.",
+                width=820,
+                height=560,
+            )
+            card = tk.Frame(
+                content,
+                bg=colors["surface"],
+                highlightbackground=colors["border"],
+                highlightthickness=1,
+            )
+            card.pack(fill="x", padx=18, pady=18)
+            rows = (
+                ("Database", f"{source['database']} / SQL Server {source['database_version']}"),
+                ("Input file", source["input_file"]),
+                ("SHA-256", source["input_sha256"]),
+                ("Recovery", "Direct CBZ8000 database-page recovery"),
+            )
+            for row, (label, value) in enumerate(rows):
+                tk.Label(
+                    card,
+                    text=label,
+                    bg=colors["surface"],
+                    fg=colors["muted"],
+                    font=("Segoe UI", 9, "bold"),
+                    anchor="w",
+                ).grid(row=row, column=0, sticky="nw", padx=14, pady=10)
+                tk.Label(
+                    card,
+                    text=value,
+                    bg=colors["surface"],
+                    fg=colors["text"],
+                    font=("Segoe UI", 9),
+                    anchor="w",
+                    justify="left",
+                    wraplength=610,
+                ).grid(row=row, column=1, sticky="ew", padx=14, pady=10)
+            card.grid_columnconfigure(1, weight=1)
+            totals = tk.Frame(content, bg=colors["bg"])
+            totals.pack(fill="x", padx=18)
+            for index, key in enumerate(
+                ("devices", "analog", "status", "pulse", "soe", "telecontrol", "sector")
+            ):
+                total = tk.Frame(
+                    totals,
+                    bg=colors["surface_alt"],
+                    highlightbackground=colors["border"],
+                    highlightthickness=1,
+                )
+                total.grid(
+                    row=index // 4,
+                    column=index % 4,
+                    sticky="nsew",
+                    padx=(0 if index % 4 == 0 else 7, 0),
+                    pady=(0, 7),
+                )
+                tk.Label(
+                    total,
+                    text=str(counts[key]),
+                    bg=colors["surface_alt"],
+                    fg=colors["text"],
+                    font=("Segoe UI", 15, "bold"),
+                ).pack(pady=(8, 0))
+                tk.Label(
+                    total,
+                    text=key.upper(),
+                    bg=colors["surface_alt"],
+                    fg=colors["muted"],
+                    font=("Segoe UI", 8, "bold"),
+                ).pack(pady=(0, 8))
+            for column in range(4):
+                totals.grid_columnconfigure(column, weight=1)
+            ttk.Button(
+                footer,
+                text="Close",
+                command=dialog.destroy,
+                style="Primary.DM.TButton",
+            ).pack(side="right", padx=14, pady=9)
 
-        def _show_parameter_form(category):
-            status_form.pack_forget()
-            for row_widget in analog_form_rows:
-                row_widget.pack_forget()
-            if category == "Status":
-                status_form.pack(fill="both", expand=True, before=f_btn)
-            elif category == "Analog":
-                for row_widget in analog_form_rows:
-                    row_widget.pack(
-                        fill="x",
-                        pady=5 if row_widget is f7 else 2,
-                        before=f_btn,
+        def copy_point_dialog():
+            if not require_crud("copy point records"):
+                return
+            category = active["category"]
+            source_device_index = active["device_index"]
+            selected = selected_record_indices()
+            if (
+                category not in cbz_device_data.CATEGORIES
+                or source_device_index is None
+                or len(selected) != 1
+            ):
+                set_status(
+                    "Select exactly one point record before using Copy Point",
+                    "warning",
+                )
+                return
+            source_index = selected[0]
+            source_record = cbz_device_data.records(
+                self.cbz_config,
+                category,
+                source_device_index,
+            )[source_index]
+            dialog, content, footer = dialog_window(
+                "Copy Point to Device",
+                "The target identity and bay references are assigned automatically.",
+                width=720,
+                height=410,
+            )
+            panel = tk.Frame(
+                content,
+                bg=colors["surface"],
+                highlightbackground=colors["border"],
+                highlightthickness=1,
+            )
+            panel.pack(fill="x", padx=18, pady=18)
+            tk.Label(
+                panel,
+                text=(
+                    f"{cbz_device_data.CATEGORY_LABELS[category]}  •  "
+                    f"{source_record.get('Physicalname', '')}  •  "
+                    f"{source_record.get('Infoname', '')}"
+                ),
+                bg=colors["surface"],
+                fg=colors["text"],
+                font=("Segoe UI", 11, "bold"),
+                anchor="w",
+            ).pack(fill="x", padx=14, pady=(14, 4))
+            tk.Label(
+                panel,
+                text="Target device",
+                bg=colors["surface"],
+                fg=colors["muted"],
+                font=("Segoe UI", 9, "bold"),
+                anchor="w",
+            ).pack(fill="x", padx=14, pady=(14, 5))
+            device_labels = [
+                cbz_device_data.device_label(item)
+                for item in cbz_device_data.devices(self.cbz_config)
+            ]
+            target_var = tk.StringVar(
+                value=device_labels[source_device_index]
+            )
+            target_combo = ttk.Combobox(
+                panel,
+                textvariable=target_var,
+                values=device_labels,
+                state="readonly",
+                style="DM.TCombobox",
+            )
+            target_combo.pack(fill="x", padx=14, pady=(0, 16))
+            error_var = tk.StringVar()
+            tk.Label(
+                footer,
+                textvariable=error_var,
+                bg=colors["surface_alt"],
+                fg=colors["danger"],
+                anchor="w",
+            ).pack(side="left", fill="x", expand=True, padx=14)
+
+            def apply_copy():
+                try:
+                    target_index = device_labels.index(target_var.get())
+                    saved_index = cbz_device_data.copy_record(
+                        self.cbz_config,
+                        category,
+                        source_device_index,
+                        source_index,
+                        target_index,
                     )
+                    persist_config()
+                    dialog.destroy()
+                    rebuild_tree(target_index, category)
+                    refresh_table(category, target_index, saved_index)
+                    set_status("Point copied to target device", "success")
+                except Exception as exc:
+                    error_var.set(str(exc))
 
-        table.bind("<Delete>", delete_selected_settings)
+            ttk.Button(
+                footer,
+                text="Cancel",
+                command=dialog.destroy,
+                style="DM.TButton",
+            ).pack(side="right", padx=(6, 14), pady=9)
+            ttk.Button(
+                footer,
+                text="Copy Point",
+                command=apply_copy,
+                style="Primary.DM.TButton",
+            ).pack(side="right", padx=6, pady=9)
 
-        refresh_table_for_device("Connection Wire I")
+        def template_dialog():
+            if not require_crud("apply templates"):
+                return
+            entries = cbz_device_data.devices(self.cbz_config)
+            if len(entries) < 2:
+                set_status("At least two devices are required", "warning")
+                return
+            device_labels = [
+                cbz_device_data.device_label(item) for item in entries
+            ]
+            source_default = selected_device_index() or 0
+            target_default = 1 if source_default == 0 else 0
+            dialog, content, footer = dialog_window(
+                "Apply Device Template",
+                "Copy one or every point section between devices.",
+                width=760,
+                height=510,
+            )
+            panel = tk.Frame(
+                content,
+                bg=colors["surface"],
+                highlightbackground=colors["border"],
+                highlightthickness=1,
+            )
+            panel.pack(fill="both", expand=True, padx=18, pady=18)
+            source_var = tk.StringVar(value=device_labels[source_default])
+            target_var = tk.StringVar(value=device_labels[target_default])
+            category_options = [
+                "All point categories",
+                *(
+                    cbz_device_data.CATEGORY_LABELS[category]
+                    for category in cbz_device_data.CATEGORIES
+                ),
+            ]
+            category_var = tk.StringVar(value=category_options[0])
+            mode_options = (
+                "Replace target records",
+                "Append with new indexes",
+            )
+            mode_var = tk.StringVar(value=mode_options[0])
+            inputs = (
+                ("Source device", source_var, device_labels),
+                ("Target device", target_var, device_labels),
+                ("Point sections", category_var, category_options),
+                ("Apply mode", mode_var, mode_options),
+            )
+            for row, (label, variable, values) in enumerate(inputs):
+                tk.Label(
+                    panel,
+                    text=label,
+                    bg=colors["surface"],
+                    fg=colors["muted"],
+                    font=("Segoe UI", 9, "bold"),
+                    anchor="w",
+                ).grid(row=row, column=0, sticky="w", padx=14, pady=13)
+                ttk.Combobox(
+                    panel,
+                    textvariable=variable,
+                    values=values,
+                    state="readonly",
+                    style="DM.TCombobox",
+                ).grid(row=row, column=1, sticky="ew", padx=14, pady=13)
+            panel.grid_columnconfigure(1, weight=1)
+            error_var = tk.StringVar()
+            tk.Label(
+                footer,
+                textvariable=error_var,
+                bg=colors["surface_alt"],
+                fg=colors["danger"],
+                anchor="w",
+            ).pack(side="left", fill="x", expand=True, padx=14)
+
+            def apply_template():
+                try:
+                    source_index = device_labels.index(source_var.get())
+                    target_index = device_labels.index(target_var.get())
+                    if category_var.get() == category_options[0]:
+                        categories = tuple(cbz_device_data.CATEGORIES)
+                    else:
+                        categories = (
+                            next(
+                                category
+                                for category in cbz_device_data.CATEGORIES
+                                if cbz_device_data.CATEGORY_LABELS[category]
+                                == category_var.get()
+                            ),
+                        )
+                    replace = mode_var.get() == mode_options[0]
+                    if replace and not messagebox.askyesno(
+                        "Replace target records",
+                        "Existing records in the selected target sections "
+                        "will be replaced. Continue?",
+                        parent=dialog,
+                        icon="warning",
+                    ):
+                        return
+                    cbz_device_data.apply_template(
+                        self.cbz_config,
+                        source_index,
+                        target_index,
+                        categories,
+                        replace,
+                    )
+                    persist_config()
+                    dialog.destroy()
+                    selected_category = categories[0]
+                    rebuild_tree(target_index, selected_category)
+                    refresh_table(selected_category, target_index)
+                    set_status("Device template applied", "success")
+                except Exception as exc:
+                    error_var.set(str(exc))
+
+            ttk.Button(
+                footer,
+                text="Cancel",
+                command=dialog.destroy,
+                style="DM.TButton",
+            ).pack(side="right", padx=(6, 14), pady=9)
+            ttk.Button(
+                footer,
+                text="Apply Template",
+                command=apply_template,
+                style="Primary.DM.TButton",
+            ).pack(side="right", padx=6, pady=9)
+
+        def import_json():
+            if not require_crud("import application data"):
+                return
+            path = filedialog.askopenfilename(
+                parent=win,
+                title="Import CBZ8000 application data",
+                filetypes=(("JSON application data", "*.json"),),
+            )
+            if not path:
+                return
+            try:
+                imported = cbz_device_data.load_config(path)
+                if not messagebox.askyesno(
+                    "Replace application data",
+                    "Replace the current configuration with this validated JSON?\n\n"
+                    "A timestamped backup will be created.",
+                    parent=win,
+                    icon="warning",
+                ):
+                    return
+                self.cbz_config = imported
+                persist_config()
+                rebuild_tree()
+                refresh_table("device")
+                set_status("JSON application data imported", "success")
+            except Exception as exc:
+                messagebox.showerror("Import failed", str(exc), parent=win)
+
+        def import_csv():
+            if not require_crud("import point records"):
+                return
+            category = active["category"]
+            device_index = active["device_index"]
+            if category not in cbz_device_data.CATEGORIES or device_index is None:
+                set_status(
+                    "Select a point category and target device before importing CSV",
+                    "warning",
+                )
+                return
+            path = filedialog.askopenfilename(
+                parent=win,
+                title=f"Import {category} records",
+                filetypes=(("CSV records", "*.csv"),),
+            )
+            if not path:
+                return
+            try:
+                fields = cbz_device_data.field_names(
+                    self.cbz_config,
+                    category,
+                )
+                with open(path, "r", encoding="utf-8-sig", newline="") as handle:
+                    reader = csv.DictReader(handle)
+                    missing = set(fields).difference(reader.fieldnames or ())
+                    if missing:
+                        raise ValueError(
+                            "CSV is missing fields: " + ", ".join(sorted(missing))
+                        )
+                    imported_rows = list(reader)
+                if not imported_rows:
+                    raise ValueError("CSV does not contain any records")
+                candidate = copy.deepcopy(self.cbz_config)
+                identity_field = (
+                    "Wholecall_Sector"
+                    if category == "sector"
+                    else "Info_index"
+                )
+                next_identity = cbz_device_data.next_identity_value(
+                    candidate,
+                    category,
+                    device_index,
+                )
+                for imported_row in imported_rows:
+                    row = dict(imported_row)
+                    row[identity_field] = next_identity
+                    next_identity += 1
+                    cbz_device_data.update_record(
+                        candidate,
+                        category,
+                        row,
+                        device_index,
+                        None,
+                    )
+                self.cbz_config = candidate
+                persist_config()
+                rebuild_tree(device_index, category)
+                refresh_table(category, device_index)
+                set_status(
+                    f"{len(imported_rows)} CSV records imported",
+                    "success",
+                )
+            except Exception as exc:
+                messagebox.showerror("Import failed", str(exc), parent=win)
+
+        def export_json():
+            path = filedialog.asksaveasfilename(
+                parent=win,
+                title="Export complete application data",
+                defaultextension=".json",
+                initialfile="CBZ8000AppData-export.json",
+                filetypes=(("JSON application data", "*.json"),),
+            )
+            if not path:
+                return
+            with open(path, "w", encoding="utf-8") as handle:
+                json.dump(
+                    self.cbz_config,
+                    handle,
+                    ensure_ascii=False,
+                    indent=2,
+                    allow_nan=False,
+                )
+                handle.write("\n")
+            set_status(f"Complete JSON exported to {path}", "success")
+
+        def export_csv():
+            category = active["category"]
+            device_index = active["device_index"]
+            rows = cbz_device_data.records(
+                self.cbz_config,
+                category,
+                device_index,
+            )
+            if not rows:
+                set_status("The current view has no records to export", "warning")
+                return
+            path = filedialog.asksaveasfilename(
+                parent=win,
+                title=f"Export {category} records",
+                defaultextension=".csv",
+                initialfile=f"CBZ8000-{category}.csv",
+                filetypes=(("CSV records", "*.csv"),),
+            )
+            if not path:
+                return
+            fields = cbz_device_data.field_names(self.cbz_config, category)
+            with open(path, "w", encoding="utf-8-sig", newline="") as handle:
+                writer = csv.DictWriter(handle, fieldnames=fields)
+                writer.writeheader()
+                writer.writerows(
+                    {field: record.get(field) for field in fields}
+                    for record in rows
+                )
+            set_status(f"{len(rows)} records exported to {path}", "success")
+
+        def transfer_dialog(mode):
+            if mode == "import" and not require_crud("import data"):
+                return
+            importing = mode == "import"
+            dialog, content, footer = dialog_window(
+                "Import Data" if importing else "Export Data",
+                (
+                    "Validated imports are transactional and never partially applied."
+                    if importing
+                    else "Export the current table or a complete portable backup."
+                ),
+                width=760,
+                height=430,
+            )
+            choices = (
+                (
+                    "Complete application JSON",
+                    (
+                        "Replace all devices, bays, and point sections from a "
+                        "validated application-data file."
+                        if importing
+                        else "Save every device, schema, source reference, and point."
+                    ),
+                    import_json if importing else export_json,
+                ),
+                (
+                    "Current point table CSV",
+                    (
+                        "Append records to the currently selected device and category."
+                        if importing
+                        else "Save every record from the currently selected table."
+                    ),
+                    import_csv if importing else export_csv,
+                ),
+            )
+            for title, description, command in choices:
+                card = tk.Frame(
+                    content,
+                    bg=colors["surface"],
+                    highlightbackground=colors["border"],
+                    highlightthickness=1,
+                )
+                card.pack(fill="x", padx=18, pady=(18 if title == choices[0][0] else 0, 10))
+                text = tk.Frame(card, bg=colors["surface"])
+                text.pack(side="left", fill="both", expand=True, padx=14, pady=12)
+                tk.Label(
+                    text,
+                    text=title,
+                    bg=colors["surface"],
+                    fg=colors["text"],
+                    font=("Segoe UI", 11, "bold"),
+                    anchor="w",
+                ).pack(fill="x")
+                tk.Label(
+                    text,
+                    text=description,
+                    bg=colors["surface"],
+                    fg=colors["muted"],
+                    font=("Segoe UI", 9),
+                    wraplength=500,
+                    justify="left",
+                    anchor="w",
+                ).pack(fill="x", pady=(3, 0))
+
+                def run_choice(callback=command):
+                    dialog.destroy()
+                    callback()
+
+                ttk.Button(
+                    card,
+                    text="Choose File" if importing else "Save As",
+                    command=run_choice,
+                    style="Primary.DM.TButton",
+                ).pack(side="right", padx=14)
+            ttk.Button(
+                footer,
+                text="Close",
+                command=dialog.destroy,
+                style="DM.TButton",
+            ).pack(side="right", padx=14, pady=9)
+
+        def reload_data():
+            try:
+                self.cbz_config = cbz_device_data.load_config(
+                    CBZ8000_DEVICE_DATA_PATH
+                )
+                rebuild_tree()
+                refresh_table("device")
+                set_status("Application data reloaded from disk", "success")
+            except Exception as exc:
+                set_status(str(exc), "error")
+                messagebox.showerror(
+                    "Reload failed",
+                    str(exc),
+                    parent=win,
+                )
+
+        action_buttons["new"] = ttk.Button(
+            action_host,
+            text="New",
+            command=new_record,
+            style="Primary.DM.TButton",
+        )
+        action_buttons["edit"] = ttk.Button(
+            action_host,
+            text="Edit",
+            command=edit_record,
+            style="DM.TButton",
+        )
+        action_buttons["duplicate"] = ttk.Button(
+            action_host,
+            text="Duplicate",
+            command=duplicate_record,
+            style="DM.TButton",
+        )
+        action_buttons["delete"] = ttk.Button(
+            action_host,
+            text="Delete",
+            command=delete_records,
+            style="Danger.DM.TButton",
+        )
+        for name in ("delete", "duplicate", "edit", "new"):
+            action_buttons[name].pack(side="right", padx=4)
+        if not can_edit:
+            for button in action_buttons.values():
+                button.configure(state="disabled")
+
+        nav_specs = (
+            ("Overview", show_overview),
+            ("Devices", lambda: refresh_table("device")),
+            (
+                "Copy Device",
+                lambda: open_device_editor(
+                    selected_device_index(),
+                    duplicate=True,
+                ),
+            ),
+            ("Copy Point", copy_point_dialog),
+            ("Templates", template_dialog),
+            ("Import", lambda: transfer_dialog("import")),
+            ("Export", lambda: transfer_dialog("export")),
+            ("Source", show_source),
+            ("Reload", reload_data),
+        )
+        for label, command in nav_specs:
+            button = ttk.Button(
+                nav,
+                text=label,
+                command=command,
+                style=(
+                    "Primary.DM.TButton"
+                    if label in {"Overview", "Devices"}
+                    else "DM.TButton"
+                ),
+            )
+            button.pack(side="left", padx=(10 if label == "Overview" else 2, 0), pady=7)
+            nav_buttons[label] = button
+        if not can_edit:
+            for label in ("Copy Device", "Copy Point", "Templates", "Import"):
+                nav_buttons[label].configure(state="disabled")
+        ttk.Button(
+            nav,
+            text="Close",
+            command=win.destroy,
+            style="DM.TButton",
+        ).pack(side="right", padx=10, pady=7)
+
+        tree.bind("<<TreeviewSelect>>", on_tree_select)
+        table.bind("<<TreeviewSelect>>", on_table_select)
+        table.bind("<Double-Button-1>", edit_record)
+        table.bind("<Return>", edit_record)
+        table.bind("<Delete>", delete_records)
+        device_search_var.trace_add(
+            "write",
+            lambda *_args: rebuild_tree(
+                active.get("device_index"),
+                (
+                    active.get("category")
+                    if active.get("category") in cbz_device_data.CATEGORIES
+                    else None
+                ),
+            ),
+        )
+        record_search_var.trace_add(
+            "write",
+            lambda *_args: (
+                refresh_table(
+                    active["category"],
+                    active["device_index"],
+                    active.get("record_index"),
+                    preserve_search=True,
+                )
+                if (
+                    active["view"] == "data"
+                    and not search_trace_state["suspended"]
+                )
+                else None
+            ),
+        )
+
+        self._parameter_settings_window = win
+        win._can_edit = can_edit
+        win._device_tree = tree
+        win._parameter_table = table
+        win._active_context = active
+        win._refresh_parameter_table = refresh_table
+        win._show_overview = show_overview
+        win._show_source = show_source
+        win._show_template = template_dialog
+        win._copy_point = copy_point_dialog
+        win._open_device_editor = open_device_editor
+        win._open_point_editor = open_point_editor
+        win._show_transfer = transfer_dialog
+        win._device_search_var = device_search_var
+        win._record_search_var = record_search_var
+
+        rebuild_tree()
+        refresh_table("device")
+        if not can_edit:
+            set_status(
+                "READ ONLY — Operator can inspect and export data; CRUD is disabled",
+                "warning",
+            )
 
 
 # ==============================================================================
 # BLOCK 4: AUTHENTICATION, TOOLBAR & SYSTEM SHORTCUTS
 # ==============================================================================
-    def action_log_off(self):
+    @classmethod
+    def role_has_permission(cls, role, permission):
+        return permission in cls.ROLE_PERMISSIONS.get(role, frozenset())
+
+    def has_permission(self, permission):
+        return self.role_has_permission(self.current_user, permission)
+
+    def require_permission(self, permission, action, parent=None):
+        if self.has_permission(permission):
+            return True
+        messagebox.showwarning(
+            "Read-Only Access",
+            (
+                f"{self.current_user or 'Unauthenticated'} may view SCADA data, "
+                f"but cannot {action}.\n\n"
+                "Switch to an Admin or Developer session to continue."
+            ),
+            parent=parent or self.root,
+        )
+        return False
+
+    def _refresh_user_display(self):
+        role = self.current_user or "No User"
+        self.root.title(f"SCADA BONT — {role}")
+        button = self.user_switch_button
+        if button is not None:
+            try:
+                button.configure(text=f"User: {role}  |  Switch User")
+            except tk.TclError:
+                self.user_switch_button = None
+
+    def _handle_role_change(self, previous_role):
+        if previous_role == self.current_user:
+            self._refresh_user_display()
+            return
+        for attribute in (
+            "_parameter_settings_window",
+            "_communication_settings_window",
+        ):
+            role_sensitive_window = getattr(self, attribute, None)
+            if role_sensitive_window is not None:
+                try:
+                    if role_sensitive_window.winfo_exists():
+                        role_sensitive_window.destroy()
+                except tk.TclError:
+                    pass
+            setattr(self, attribute, None)
+        # Rebuild every role-sensitive menu state.
+        self.build_top_menu()
+        self._refresh_user_display()
+
+    def action_switch_user(self, required=False):
+        existing = self._login_window
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.lift()
+                    existing.focus_force()
+                    return False
+            except tk.TclError:
+                pass
+
+        colors = {
+            "bg": "#06131f",
+            "surface": "#0b2236",
+            "surface_alt": "#102d46",
+            "border": "#214b68",
+            "primary": "#008fa3",
+            "primary_active": "#00a9bf",
+            "accent": "#56d6e6",
+            "text": "#f4f8fb",
+            "muted": "#9db4c5",
+            "danger": "#ff6b6b",
+            "success": "#73e2a7",
+        }
+        result = {"authenticated": False}
         login_win = tk.Toplevel(self.root)
-        login_win.title('SECURITY ACCESS CONTROL')
-        login_win.configure(bg="#1a1c23")
+        self._login_window = login_win
+        login_win.title("SCADA BONT — Secure Access")
+        login_win.configure(bg=colors["bg"])
         login_win.resizable(False, False)
 
         screen_width = login_win.winfo_screenwidth()
         screen_height = login_win.winfo_screenheight()
-        win_width = min(520, max(360, int(screen_width * 0.32)))
-        win_height = min(380, max(270, int(screen_height * 0.32)))
-        center_x = int((screen_width - win_width) / 2)
-        center_y = int((screen_height - win_height) / 2)
-        login_win.geometry(f"{win_width}x{win_height}+{center_x}+{center_y}")
-        login_win.minsize(340, 250)
-
-        login_win.transient(self.root)
-        login_win.grab_set()
-
-        header_frame = tk.Frame(login_win, bg="#111318", height=50)
-        header_frame.pack(fill="x", side="top")
-
-        tk.Label(
-            header_frame,
-            text=f"🔒  {'SECURITY ACCESS CONTROL'}",
-            bg="#111318",
-            fg="#4ea8de",
-            font=("Segoe UI", 10, "bold")
-        ).pack(pady=12)
-
-        body_frame = tk.Frame(login_win, bg="#1a1c23", padx=25, pady=15)
-        body_frame.pack(fill="both", expand=True)
-
-        tk.Label(
-            body_frame,
-            text='Select User Role',
-            bg="#1a1c23",
-            fg="#8d99ae",
-            font=("Segoe UI", 10, "bold")
-        ).pack(anchor="w", pady=(0, 3))
-
-        roles = ["Operator", "Admin", "Developer"]
-        combo_role = ttk.Combobox(body_frame, values=roles, state="readonly", font=("Segoe UI", 10))
-        combo_role.pack(fill="x", pady=(0, 12))
-        combo_role.set(self.current_user if self.current_user in roles else "Operator")
-
-        tk.Label(
-            body_frame,
-            text='Password',
-            bg="#1a1c23",
-            fg="#8d99ae",
-            font=("Segoe UI", 10, "bold")
-        ).pack(anchor="w", pady=(0, 3))
-
-        entry_pass = tk.Entry(
-            body_frame,
-            show="•",
-            font=("Segoe UI", 10),
-            bg="#2b2d42",
-            fg="#ffffff",
-            insertbackground="#ffffff",
-            relief="flat",
-            bd=6
+        win_width = min(640, max(560, int(screen_width * 0.38)))
+        win_height = min(530, max(480, int(screen_height * 0.48)))
+        center_x = max((screen_width - win_width) // 2, 0)
+        center_y = max((screen_height - win_height) // 2, 0)
+        login_win.geometry(
+            f"{win_width}x{win_height}+{center_x}+{center_y}"
         )
-        entry_pass.pack(fill="x", pady=(0, 18))
-        entry_pass.focus_set()
+        if not required:
+            login_win.transient(self.root)
+
+        auth_style = ttk.Style(login_win)
+        auth_style.configure(
+            "Auth.TCombobox",
+            fieldbackground="#163750",
+            background="#163750",
+            foreground=colors["text"],
+            arrowcolor=colors["accent"],
+            bordercolor=colors["border"],
+            padding=(10, 8),
+            font=("Segoe UI", 11),
+        )
+        auth_style.map(
+            "Auth.TCombobox",
+            fieldbackground=[("readonly", "#163750")],
+            foreground=[("readonly", colors["text"])],
+            selectbackground=[("readonly", "#163750")],
+            selectforeground=[("readonly", colors["text"])],
+        )
+
+        header = tk.Frame(login_win, bg="#072b46", height=112)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+        tk.Frame(header, bg=colors["accent"], height=4).pack(fill="x")
+        tk.Label(
+            header,
+            text="SCADA BONT",
+            bg="#072b46",
+            fg=colors["text"],
+            font=("Segoe UI", 21, "bold"),
+            anchor="w",
+        ).pack(fill="x", padx=28, pady=(18, 0))
+        tk.Label(
+            header,
+            text=(
+                "SECURE STARTUP LOGIN"
+                if required
+                else "SWITCH ACTIVE USER"
+            ),
+            bg="#072b46",
+            fg=colors["accent"],
+            font=("Segoe UI", 10, "bold"),
+            anchor="w",
+        ).pack(fill="x", padx=29, pady=(2, 0))
+
+        body = tk.Frame(login_win, bg=colors["bg"], padx=28, pady=22)
+        body.pack(fill="both", expand=True)
+        card = tk.Frame(
+            body,
+            bg=colors["surface"],
+            highlightbackground=colors["border"],
+            highlightthickness=1,
+            padx=22,
+            pady=18,
+        )
+        card.pack(fill="both", expand=True)
+
+        session_text = (
+            f"Current session: {self.current_user}"
+            if self.current_user
+            else "Authentication is required before SCADA can be used."
+        )
+        tk.Label(
+            card,
+            text=session_text,
+            bg=colors["surface_alt"],
+            fg=colors["success"] if self.current_user else colors["accent"],
+            font=("Segoe UI", 10, "bold"),
+            anchor="w",
+            padx=12,
+            pady=8,
+        ).pack(fill="x", pady=(0, 15))
+
+        tk.Label(
+            card,
+            text="USER ROLE",
+            bg=colors["surface"],
+            fg=colors["muted"],
+            font=("Segoe UI", 9, "bold"),
+            anchor="w",
+        ).pack(fill="x")
+        role_var = tk.StringVar(
+            value=(
+                self.current_user
+                if self.current_user in self.ROLE_ORDER
+                else "Operator"
+            )
+        )
+        role_combo = ttk.Combobox(
+            card,
+            textvariable=role_var,
+            values=self.ROLE_ORDER,
+            state="readonly",
+            style="Auth.TCombobox",
+        )
+        role_combo.pack(fill="x", pady=(5, 11))
+
+        permission_var = tk.StringVar()
+        permission_label = tk.Label(
+            card,
+            textvariable=permission_var,
+            bg=colors["surface_alt"],
+            fg=colors["muted"],
+            font=("Segoe UI", 9),
+            anchor="w",
+            justify="left",
+            padx=12,
+            pady=8,
+        )
+        permission_label.pack(fill="x", pady=(0, 13))
+
+        def update_role_summary(_event=None):
+            editable = self.role_has_permission(role_var.get(), "crud")
+            permission_var.set(
+                "Access: View monitoring and configuration"
+                + (" + full data CRUD" if editable else " only (read-only)")
+                + "\nRole shortcut: Ctrl+1 Operator  •  Ctrl+2 Admin  •  Ctrl+3 Developer"
+            )
+            permission_label.configure(
+                fg=colors["success"] if editable else colors["muted"]
+            )
+
+        role_combo.bind("<<ComboboxSelected>>", update_role_summary)
+        update_role_summary()
+
+        tk.Label(
+            card,
+            text="PASSWORD",
+            bg=colors["surface"],
+            fg=colors["muted"],
+            font=("Segoe UI", 9, "bold"),
+            anchor="w",
+        ).pack(fill="x")
+        password_row = tk.Frame(
+            card,
+            bg="#163750",
+            highlightbackground=colors["border"],
+            highlightthickness=1,
+        )
+        password_row.pack(fill="x", pady=(5, 6))
+        password_var = tk.StringVar()
+        password_entry = tk.Entry(
+            password_row,
+            textvariable=password_var,
+            show="•",
+            bg="#163750",
+            fg=colors["text"],
+            insertbackground=colors["text"],
+            selectbackground=colors["primary"],
+            relief="flat",
+            bd=0,
+            font=("Segoe UI", 12),
+        )
+        password_entry.pack(
+            side="left",
+            fill="both",
+            expand=True,
+            padx=(12, 6),
+            pady=10,
+        )
+        show_password = tk.BooleanVar(value=False)
+
+        def toggle_password():
+            password_entry.configure(
+                show="" if show_password.get() else "•"
+            )
+
+        tk.Checkbutton(
+            password_row,
+            text="Show",
+            variable=show_password,
+            command=toggle_password,
+            bg="#163750",
+            fg=colors["muted"],
+            activebackground="#163750",
+            activeforeground=colors["text"],
+            selectcolor="#163750",
+            font=("Segoe UI", 9),
+            bd=0,
+            highlightthickness=0,
+        ).pack(side="right", padx=(4, 10))
+
+        def select_role(role):
+            role_var.set(role)
+            update_role_summary()
+            password_entry.focus_set()
+
+        for shortcut, role in (
+            ("<Control-Key-1>", "Operator"),
+            ("<Control-Key-2>", "Admin"),
+            ("<Control-Key-3>", "Developer"),
+        ):
+            login_win.bind(
+                shortcut,
+                lambda _event, selected=role: select_role(selected),
+            )
+
+        status_var = tk.StringVar()
+        status_label = tk.Label(
+            card,
+            textvariable=status_var,
+            bg=colors["surface"],
+            fg=colors["danger"],
+            font=("Segoe UI", 9, "bold"),
+            anchor="w",
+        )
+        status_label.pack(fill="x", pady=(0, 4))
+
+        footer = tk.Frame(body, bg=colors["bg"])
+        footer.pack(fill="x", pady=(14, 0))
+
+        def cancel_login():
+            self._login_window = None
+            login_win.destroy()
 
         def validate_login():
-            selected_role = combo_role.get()
-            entered_password = entry_pass.get()
+            selected_role = role_var.get()
+            if selected_role not in self.ROLE_ORDER:
+                status_var.set("Select a valid user role.")
+                return
+            if password_var.get() != self.ROLE_PASSWORD:
+                status_var.set("Password is incorrect. Access was not changed.")
+                password_var.set("")
+                password_entry.focus_set()
+                return
+            previous_role = self.current_user
+            self.current_user = selected_role
+            result["authenticated"] = True
+            self._login_window = None
+            login_win.grab_release()
+            login_win.destroy()
+            self._handle_role_change(previous_role)
 
-            if entered_password == "ADMIN":
-                self.current_user = selected_role
-                messagebox.showinfo("Access Granted", f"Authorized as: {self.current_user}")
-                login_win.destroy()
-            else:
-                messagebox.showerror("Access Denied", "Incorrect Password!")
-                entry_pass.delete(0, tk.END)
+        def footer_action(text, command, background, foreground, hover):
+            control = tk.Label(
+                footer,
+                text=text,
+                bg=background,
+                fg=foreground,
+                font=("Segoe UI", 10, "bold"),
+                padx=24,
+                pady=11,
+                cursor="hand2",
+            )
+            control.bind("<Button-1>", lambda _event: command())
+            control.bind(
+                "<Enter>",
+                lambda _event: control.configure(bg=hover, fg=colors["text"]),
+            )
+            control.bind(
+                "<Leave>",
+                lambda _event: control.configure(
+                    bg=background,
+                    fg=foreground,
+                ),
+            )
+            return control
 
-        btn_frame = tk.Frame(body_frame, bg="#1a1c23")
-        btn_frame.pack(fill="x")
-
-        btn_login = tk.Button(
-            btn_frame,
-            text='Login',
-            bg="#2563eb",
-            fg="#ffffff",
-            activebackground="#1d4ed8",
-            activeforeground="#ffffff",
-            font=("Segoe UI", 10, "bold"),
-            relief="flat",
-            height=2,
-            width=16,
-            cursor="hand2",
-            command=validate_login
+        primary_button = footer_action(
+            "Login" if required else "Switch User",
+            validate_login,
+            colors["primary"],
+            colors["text"],
+            colors["primary_active"],
         )
-        btn_login.pack(side="left")
+        primary_button.pack(side="right")
+        footer_action(
+            "Exit Application" if required else "Cancel",
+            cancel_login,
+            colors["surface_alt"],
+            colors["text"],
+            colors["border"],
+        ).pack(side="right", padx=(0, 10))
 
-        btn_cancel = tk.Button(
-            btn_frame,
-            text='Cancel',
-            bg="#374151",
-            fg="#d1d5db",
-            activebackground="#4b5563",
-            activeforeground="#ffffff",
-            font=("Segoe UI", 10, "bold"),
-            relief="flat",
-            height=2,
-            width=12,
-            cursor="hand2",
-            command=login_win.destroy
+        login_win.protocol("WM_DELETE_WINDOW", cancel_login)
+        login_win.bind("<Escape>", lambda _event: cancel_login())
+        password_entry.bind("<Return>", lambda _event: validate_login())
+        role_combo.bind(
+            "<Return>",
+            lambda _event: password_entry.focus_set(),
+            add="+",
         )
-        btn_cancel.pack(side="right")
+        login_win.grab_set()
+        login_win.lift()
+        if required:
+            try:
+                login_win.attributes("-topmost", True)
+            except tk.TclError:
+                pass
+        login_win.after(120, password_entry.focus_force)
+        if required:
+            self.root.wait_window(login_win)
+            return result["authenticated"]
+        return None
 
-        entry_pass.bind("<Return>", lambda e: validate_login())
+    def show_user_permissions(self):
+        colors = {
+            "bg": "#071521",
+            "surface": "#0d263a",
+            "surface_alt": "#12344d",
+            "border": "#24516d",
+            "primary": "#008fa3",
+            "accent": "#55d6e5",
+            "text": "#f4f8fb",
+            "muted": "#9eb6c7",
+            "success": "#73e2a7",
+            "denied": "#ff8c8c",
+        }
+        dialog = tk.Toplevel(self.root)
+        dialog.title("SCADA BONT — User Permissions")
+        dialog.configure(bg=colors["bg"])
+        dialog.resizable(False, False)
+        dialog.transient(self.root)
+        dialog.grab_set()
+        width, height = 760, 430
+        dialog.update_idletasks()
+        x = max((dialog.winfo_screenwidth() - width) // 2, 0)
+        y = max((dialog.winfo_screenheight() - height) // 2, 0)
+        dialog.geometry(f"{width}x{height}+{x}+{y}")
 
-    def create_log_off_button(self, parent_container):
-        btn_logoff = tk.Button(
+        header = tk.Frame(dialog, bg="#072b46", height=96)
+        header.pack(fill="x")
+        header.pack_propagate(False)
+        tk.Frame(header, bg=colors["accent"], height=4).pack(fill="x")
+        tk.Label(
+            header,
+            text="User Permissions",
+            bg="#072b46",
+            fg=colors["text"],
+            font=("Segoe UI", 19, "bold"),
+            anchor="w",
+        ).pack(fill="x", padx=26, pady=(16, 0))
+        tk.Label(
+            header,
+            text=f"Active session: {self.current_user}",
+            bg="#072b46",
+            fg=colors["accent"],
+            font=("Segoe UI", 10, "bold"),
+            anchor="w",
+        ).pack(fill="x", padx=27)
+
+        content = tk.Frame(dialog, bg=colors["bg"], padx=24, pady=22)
+        content.pack(fill="both", expand=True)
+        columns = ("ROLE", "VIEW", "CRUD", "CONFIGURE")
+        widths = (20, 17, 17, 20)
+        for column, (label, width_chars) in enumerate(zip(columns, widths)):
+            tk.Label(
+                content,
+                text=label,
+                width=width_chars,
+                bg=colors["primary"],
+                fg=colors["text"],
+                font=("Segoe UI", 9, "bold"),
+                padx=8,
+                pady=10,
+                relief="solid",
+                bd=1,
+            ).grid(row=0, column=column, sticky="nsew")
+
+        for row, role in enumerate(self.ROLE_ORDER, start=1):
+            active = role == self.current_user
+            row_bg = "#17445d" if active else colors["surface"]
+            values = (
+                f"{role}{'  (ACTIVE)' if active else ''}",
+                "Allowed",
+                "Allowed" if self.role_has_permission(role, "crud") else "Read only",
+                "Allowed" if self.role_has_permission(role, "configure") else "Read only",
+            )
+            for column, value in enumerate(values):
+                allowed = value == "Allowed"
+                tk.Label(
+                    content,
+                    text=value,
+                    bg=row_bg,
+                    fg=(
+                        colors["success"]
+                        if allowed
+                        else (
+                            colors["denied"]
+                            if value == "Read only"
+                            else colors["text"]
+                        )
+                    ),
+                    font=("Segoe UI", 10, "bold" if active or column == 0 else "normal"),
+                    padx=8,
+                    pady=15,
+                    relief="solid",
+                    bd=1,
+                ).grid(row=row, column=column, sticky="nsew")
+        for column in range(4):
+            content.grid_columnconfigure(column, weight=1)
+
+        tk.Label(
+            content,
+            text=(
+                "Operator can view monitoring and configuration data. "
+                "Admin and Developer can create, edit, copy, import, and delete data."
+            ),
+            bg=colors["bg"],
+            fg=colors["muted"],
+            font=("Segoe UI", 9),
+            justify="left",
+            anchor="w",
+            wraplength=690,
+        ).grid(row=4, column=0, columnspan=4, sticky="ew", pady=(18, 0))
+        close_button = tk.Label(
+            dialog,
+            text="Close",
+            bg=colors["primary"],
+            fg=colors["text"],
+            font=("Segoe UI", 10, "bold"),
+            padx=28,
+            pady=9,
+            cursor="hand2",
+        )
+        close_button.bind("<Button-1>", lambda _event: dialog.destroy())
+        close_button.bind(
+            "<Enter>",
+            lambda _event: close_button.configure(bg="#00a9bf"),
+        )
+        close_button.bind(
+            "<Leave>",
+            lambda _event: close_button.configure(bg=colors["primary"]),
+        )
+        close_button.pack(side="bottom", pady=(0, 16))
+
+    def confirm_exit(self):
+        if self._shutting_down:
+            return
+        if not messagebox.askyesno(
+            "Exit SCADA",
+            (
+                "Close SCADA BONT and stop this operator session?\n\n"
+                "Live monitoring on this workstation will stop."
+            ),
+            icon="warning",
+            parent=self.root,
+        ):
+            return
+        self._shutting_down = True
+        try:
+            self.root.quit()
+        finally:
+            self.root.destroy()
+
+    def create_user_switch_button(self, parent_container):
+        role = self.current_user or "No User"
+        button = tk.Button(
             parent_container,
-            text=f"🚪 {'Log Off'}",
+            text=f"User: {role}  |  Switch User",
             bg="#ece9d8",
             fg="#000000",
             font=("Segoe UI", 10),
             relief="flat",
             bd=1,
-            padx=6,
+            padx=8,
             pady=3,
             cursor="hand2",
-            command=self.action_log_off
+            command=self.action_switch_user,
         )
-        btn_logoff.bind("<Enter>", lambda e: btn_logoff.config(relief="raised", bg="#f1efe2"))
-        btn_logoff.bind("<Leave>", lambda e: btn_logoff.config(relief="flat", bg="#ece9d8"))
-        return btn_logoff
+        button.bind(
+            "<Enter>",
+            lambda _event: button.config(relief="raised", bg="#f1efe2"),
+        )
+        button.bind(
+            "<Leave>",
+            lambda _event: button.config(relief="flat", bg="#ece9d8"),
+        )
+        self.user_switch_button = button
+        return button
 
     def build_toolbar(self):
         toolbar_frame = tk.Frame(self.root, bg="#ece9d8", height=44, relief="raised", bd=1)
         toolbar_frame.pack(fill="x", side="top")
 
-        btn_log_off = self.create_log_off_button(toolbar_frame)
-        btn_log_off.pack(side="left", padx=2, pady=3)
+        switch_button = self.create_user_switch_button(toolbar_frame)
+        switch_button.pack(side="left", padx=2, pady=3)
 
         shortcuts = [
             ("📊", 'Report', self.action_report),
-            ("📈", 'Curve', self.action_curve),
-            ("📜", 'Historical Alarm', self.action_his_alarm),
+            ("📈", 'Process Trend', self.action_curve),
+            ("📜", 'Alarm History', self.action_his_alarm),
             ("🚨", 'Real-Time Alarm', self.action_alarm),
             ("◀️", 'Previous', self.action_prev_tab),
             ("▶️", 'Next', self.action_next_tab),
@@ -4017,136 +7116,539 @@ class SCADAMainUI:
             btn.bind("<Leave>", lambda e, b=btn: b.config(relief="flat", bg="#ece9d8"))
 
     def action_report(self):
-        """Live/historical engineering report.
+        """Open the live and historical engineering report explorer."""
+        existing = getattr(self, "_report_window", None)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.deiconify()
+                    existing.lift()
+                    existing.focus_force()
+                    return
+            except tk.TclError:
+                pass
 
-        Each Bay already configured in ListSetting *.csv appears in the left
-        report menu. Its CSV is recorded automatically every two seconds with
-        Date, Time and every configured Physical_Name as a separate column.
-        """
+        palette = {
+            "navy": "#16324f",
+            "navy_dark": "#10263c",
+            "toolbar": "#e7ebf0",
+            "workspace": "#cfd5dc",
+            "panel": "#ffffff",
+            "border": "#9aa7b4",
+            "text": "#17212b",
+            "muted": "#5f6b76",
+            "blue": "#0068b5",
+            "green": "#20834e",
+            "row_alt": "#f2f5f8",
+        }
         report_win = tk.Toplevel(self.root)
-        report_win.title("Report")
-        self._make_toplevel_responsive(report_win, "Report", fullscreen=True)
-        report_win.configure(bg="#2b2b2b")
-        report_win.bind("<Escape>", lambda e: report_win.destroy())
+        self._report_window = report_win
+        self._make_toplevel_responsive(
+            report_win,
+            "Report Explorer",
+            fullscreen=False,
+        )
+        report_win.configure(bg=palette["workspace"])
 
-        header_frame = tk.Frame(report_win, bg="#1e1e1e", height=60)
-        header_frame.pack(fill="x", side="top")
-        title_label = tk.Label(header_frame, text="📊 REPORT - 2 SECOND DATA LOGGER",
-                               font=("Consolas", 18, "bold"), fg="#6FFFE9", bg="#1e1e1e")
-        title_label.pack(side="left", padx=25, pady=15)
-        close_btn = tk.Button(header_frame, text="✕ Close (ESC)", font=("Consolas", 10, "bold"),
-                              bg="#ff4d4d", fg="white", bd=0, padx=15, pady=8,
-                              cursor="hand2", command=report_win.destroy)
-        close_btn.pack(side="right", padx=20, pady=12)
+        def close_report():
+            self._report_window = None
+            report_win.destroy()
 
-        filter_frame = tk.Frame(report_win, bg="#1e1e1e", bd=1, relief="solid")
-        filter_frame.pack(fill="x", padx=25, pady=(15, 0))
-        tk.Label(filter_frame, text="Start Date:", font=("Consolas", 10, "bold"),
-                 fg="#ffffff", bg="#1e1e1e").pack(side="left", padx=(15, 5), pady=12)
-        dp_start_date = DateEntry(filter_frame, width=12, background="#0066cc", foreground="white",
-                                  borderwidth=2, date_pattern="yyyy-mm-dd", font=("Consolas", 10))
-        dp_start_date.pack(side="left", padx=(0, 15), pady=12)
-        tk.Label(filter_frame, text="End Date:", font=("Consolas", 10, "bold"),
-                 fg="#ffffff", bg="#1e1e1e").pack(side="left", padx=(5, 5), pady=12)
-        dp_end_date = DateEntry(filter_frame, width=12, background="#0066cc", foreground="white",
-                                borderwidth=2, date_pattern="yyyy-mm-dd", font=("Consolas", 10))
-        dp_end_date.pack(side="left", padx=(0, 15), pady=12)
-        lbl_active_file = tk.Label(filter_frame, text="Select Report Menu...", font=("Consolas", 10, "bold"),
-                                   fg="#6FFFE9", bg="#1e1e1e")
-        lbl_active_file.pack(side="right", padx=20)
+        report_win.bind("<Escape>", lambda _event: close_report())
+        report_win.protocol("WM_DELETE_WINDOW", close_report)
 
-        main_container = tk.Frame(report_win, bg="#2b2b2b")
-        main_container.pack(fill="both", expand=True, padx=25, pady=15)
-        style = ttk.Style()
-        style.configure("ReportGrid.Treeview.Heading", background="#1e1e1e", foreground="#ffffff",
-                        font=("Consolas", 10, "bold"), rowheight=32)
-        style.configure("ReportGrid.Treeview", background="#2b2b2b", foreground="#ffffff",
-                        fieldbackground="#2b2b2b", rowheight=28, font=("Consolas", 9))
-        style.map("ReportGrid.Treeview", background=[("selected", "#0066cc")])
+        title_bar = tk.Frame(
+            report_win,
+            bg=palette["navy"],
+            height=58,
+        )
+        title_bar.pack(fill="x")
+        title_group = tk.Frame(title_bar, bg=palette["navy"])
+        title_group.pack(side="left", padx=18, pady=8)
+        tk.Label(
+            title_group,
+            text="REPORT EXPLORER",
+            bg=palette["navy"],
+            fg="#ffffff",
+            font=("Segoe UI", 16, "bold"),
+            anchor="w",
+        ).pack(fill="x")
+        tk.Label(
+            title_group,
+            text=(
+                "Engineering records by source and date range • "
+                "realtime source files are recorded every 2 seconds"
+            ),
+            bg=palette["navy"],
+            fg="#c8d7e6",
+            font=("Segoe UI", 9),
+            anchor="w",
+        ).pack(fill="x")
+        tk.Button(
+            title_bar,
+            text="Close",
+            command=close_report,
+            font=("Segoe UI", 10, "bold"),
+            bg="#f4f6f8",
+            fg=palette["text"],
+            activebackground="#ffffff",
+            relief="raised",
+            bd=1,
+            padx=18,
+            pady=5,
+            cursor="hand2",
+        ).pack(side="right", padx=18, pady=13)
 
-        menu_frame = tk.Frame(main_container, bg="#1e1e1e", bd=2, relief="groove", width=300)
-        menu_frame.pack(side="left", fill="y", padx=(0, 15))
-        menu_frame.pack_propagate(False)
-        tk.Label(menu_frame, text="REPORT / BAY LIST", font=("Consolas", 11, "bold"),
-                 fg="#ffffff", bg="#1e1e1e").pack(fill="x", pady=10)
-        tree_menu = ttk.Treeview(menu_frame, columns=("report_name",), show="tree", style="ReportGrid.Treeview")
+        filter_frame = tk.Frame(
+            report_win,
+            bg=palette["toolbar"],
+            bd=1,
+            relief="raised",
+        )
+        filter_frame.pack(fill="x", padx=10, pady=(8, 4))
+        tk.Label(
+            filter_frame,
+            text="Date Range",
+            bg=palette["toolbar"],
+            fg=palette["text"],
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="left", padx=(12, 7), pady=9)
+        tk.Label(
+            filter_frame,
+            text="From",
+            bg=palette["toolbar"],
+            fg=palette["text"],
+            font=("Segoe UI", 9),
+        ).pack(side="left", padx=(0, 4))
+        dp_start_date = DateEntry(
+            filter_frame,
+            width=11,
+            date_pattern="yyyy-mm-dd",
+            font=("Segoe UI", 9),
+        )
+        dp_start_date.pack(side="left", padx=(0, 9), pady=9)
+        tk.Label(
+            filter_frame,
+            text="To",
+            bg=palette["toolbar"],
+            fg=palette["text"],
+            font=("Segoe UI", 9),
+        ).pack(side="left", padx=(0, 4))
+        dp_end_date = DateEntry(
+            filter_frame,
+            width=11,
+            date_pattern="yyyy-mm-dd",
+            font=("Segoe UI", 9),
+        )
+        dp_end_date.pack(side="left", padx=(0, 10), pady=9)
+
+        button_options = {
+            "font": ("Segoe UI", 9, "bold"),
+            "relief": "raised",
+            "bd": 1,
+            "padx": 12,
+            "pady": 4,
+            "cursor": "hand2",
+        }
+        apply_button = tk.Button(
+            filter_frame,
+            text="Apply",
+            bg="#f8f9fa",
+            fg=palette["text"],
+            **button_options,
+        )
+        apply_button.pack(side="left", padx=3, pady=7)
+        export_button = tk.Button(
+            filter_frame,
+            text="Export CSV",
+            bg="#dcefe3",
+            fg="#145d36",
+            **button_options,
+        )
+        export_button.pack(side="left", padx=3, pady=7)
+        tk.Label(
+            filter_frame,
+            text="LOGGER SOURCE  •  2 second records",
+            bg=palette["toolbar"],
+            fg=palette["green"],
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="right", padx=14)
+
+        content = tk.PanedWindow(
+            report_win,
+            orient="horizontal",
+            bg=palette["workspace"],
+            bd=0,
+            sashwidth=6,
+            sashrelief="raised",
+        )
+        content.pack(fill="both", expand=True, padx=10, pady=4)
+
+        source_panel = tk.Frame(
+            content,
+            bg=palette["panel"],
+            bd=1,
+            relief="solid",
+            width=290,
+        )
+        table_panel = tk.Frame(
+            content,
+            bg=palette["panel"],
+            bd=1,
+            relief="solid",
+        )
+        content.add(source_panel, minsize=235, width=290, stretch="never")
+        content.add(table_panel, minsize=620, stretch="always")
+
+        tk.Label(
+            source_panel,
+            text="REPORT SOURCES",
+            bg=palette["navy_dark"],
+            fg="#ffffff",
+            font=("Segoe UI", 10, "bold"),
+            anchor="w",
+            padx=12,
+            pady=8,
+        ).pack(fill="x")
+        tk.Label(
+            source_panel,
+            text="Select a source to load its records",
+            bg=palette["panel"],
+            fg=palette["muted"],
+            font=("Segoe UI", 9),
+            anchor="w",
+            padx=12,
+            pady=7,
+        ).pack(fill="x")
+
+        style = ttk.Style(report_win)
+        style.configure(
+            "ReportExplorer.Treeview.Heading",
+            background=palette["navy_dark"],
+            foreground="#ffffff",
+            font=("Segoe UI", 9, "bold"),
+            padding=(7, 7),
+            relief="raised",
+        )
+        style.map(
+            "ReportExplorer.Treeview.Heading",
+            background=[("active", palette["navy"])],
+        )
+        style.configure(
+            "ReportExplorer.Treeview",
+            background=palette["panel"],
+            foreground=palette["text"],
+            fieldbackground=palette["panel"],
+            rowheight=27,
+            font=("Segoe UI", 9),
+            borderwidth=0,
+        )
+        style.map(
+            "ReportExplorer.Treeview",
+            background=[("selected", "#c8def1")],
+            foreground=[("selected", palette["text"])],
+        )
+        style.configure(
+            "ReportSource.Treeview",
+            background=palette["panel"],
+            foreground=palette["text"],
+            fieldbackground=palette["panel"],
+            rowheight=27,
+            font=("Segoe UI", 9),
+            borderwidth=0,
+        )
+        style.map(
+            "ReportSource.Treeview",
+            background=[("selected", "#c8def1")],
+            foreground=[("selected", palette["text"])],
+        )
+
+        source_tree_frame = tk.Frame(source_panel, bg=palette["panel"])
+        source_tree_frame.pack(fill="both", expand=True, padx=7, pady=(0, 7))
+        source_scrollbar = ttk.Scrollbar(
+            source_tree_frame,
+            orient="vertical",
+        )
+        tree_menu = ttk.Treeview(
+            source_tree_frame,
+            show="tree",
+            style="ReportSource.Treeview",
+            yscrollcommand=source_scrollbar.set,
+        )
+        source_scrollbar.configure(command=tree_menu.yview)
+        tree_menu.column("#0", width=260, minwidth=180, stretch=True)
+        tree_menu.pack(side="left", fill="both", expand=True)
+        source_scrollbar.pack(side="right", fill="y")
         self._bind_mousewheel(tree_menu)
-        tree_menu.pack(side="left", fill="both", expand=True, padx=5, pady=5)
 
-        grid_frame = tk.Frame(main_container, bg="#2b2b2b", bd=2, relief="groove")
-        grid_frame.pack(side="right", fill="both", expand=True)
+        table_header = tk.Frame(table_panel, bg=palette["panel"])
+        table_header.pack(fill="x", padx=10, pady=(8, 5))
+        selected_source_label = tk.Label(
+            table_header,
+            text="Select a report source",
+            bg=palette["panel"],
+            fg=palette["navy"],
+            font=("Segoe UI", 11, "bold"),
+            anchor="w",
+        )
+        selected_source_label.pack(side="left")
+        active_file_label = tk.Label(
+            table_header,
+            text="",
+            bg=palette["panel"],
+            fg=palette["muted"],
+            font=("Segoe UI", 9),
+            anchor="e",
+        )
+        active_file_label.pack(side="right")
+
+        grid_frame = tk.Frame(table_panel, bg=palette["panel"])
+        grid_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
         tree_data = None
-        selected = {"bay": None, "path": None, "columns": []}
+        selected = {
+            "bay": None,
+            "path": None,
+            "columns": [],
+            "headings": [],
+            "rows": [],
+        }
+
+        status_frame = tk.Frame(
+            report_win,
+            bg=palette["toolbar"],
+            bd=1,
+            relief="sunken",
+        )
+        status_frame.pack(fill="x", padx=10, pady=(0, 8))
+        status_label = tk.Label(
+            status_frame,
+            text="Ready",
+            bg=palette["toolbar"],
+            fg=palette["muted"],
+            font=("Segoe UI", 9),
+            anchor="w",
+        )
+        status_label.pack(side="left", padx=10, pady=4)
+        row_count_label = tk.Label(
+            status_frame,
+            text="0 records",
+            bg=palette["toolbar"],
+            fg=palette["navy"],
+            font=("Segoe UI", 9, "bold"),
+        )
+        row_count_label.pack(side="right", padx=10, pady=4)
 
         def rebuild_table(columns):
             nonlocal tree_data
             for child in grid_frame.winfo_children():
                 child.destroy()
-            frame = tk.Frame(grid_frame, bg="#2b2b2b")
-            frame.pack(fill="both", expand=True)
-            ybar = ttk.Scrollbar(frame, orient="vertical")
-            xbar = ttk.Scrollbar(frame, orient="horizontal")
-            names = ["Date", "Time"] + [c[0] for c in columns]
-            tree_data = ttk.Treeview(frame, columns=tuple(f"c{i}" for i in range(len(names))),
-                                     show="headings", style="ReportGrid.Treeview",
-                                     yscrollcommand=ybar.set, xscrollcommand=xbar.set)
-            ybar.config(command=tree_data.yview); xbar.config(command=tree_data.xview)
-            for i, name in enumerate(names):
-                tree_data.heading(f"c{i}", text=name.upper())
-                tree_data.column(f"c{i}", width=105 if i < 2 else 130, anchor="center")
-            tree_data.pack(side="top", fill="both", expand=True)
-            ybar.pack(side="right", fill="y"); xbar.pack(side="bottom", fill="x")
+            names = ["Date", "Time"] + [column[0] for column in columns]
+            identifiers = tuple(f"c{i}" for i in range(len(names)))
+            tree_data = ttk.Treeview(
+                grid_frame,
+                columns=identifiers,
+                show="headings",
+                style="ReportExplorer.Treeview",
+            )
+            vertical = ttk.Scrollbar(
+                grid_frame,
+                orient="vertical",
+                command=tree_data.yview,
+            )
+            horizontal = ttk.Scrollbar(
+                grid_frame,
+                orient="horizontal",
+                command=tree_data.xview,
+            )
+            tree_data.configure(
+                yscrollcommand=vertical.set,
+                xscrollcommand=horizontal.set,
+            )
+            grid_frame.grid_rowconfigure(0, weight=1)
+            grid_frame.grid_columnconfigure(0, weight=1)
+            tree_data.grid(row=0, column=0, sticky="nsew")
+            vertical.grid(row=0, column=1, sticky="ns")
+            horizontal.grid(row=1, column=0, sticky="ew")
+            for index, name in enumerate(names):
+                column_id = identifiers[index]
+                tree_data.heading(column_id, text=name.upper())
+                width = 105 if index < 2 else max(125, min(len(name) * 9, 210))
+                tree_data.column(
+                    column_id,
+                    width=width,
+                    minwidth=80,
+                    anchor="center" if index < 2 else "w",
+                    stretch=False,
+                )
+            tree_data.tag_configure("odd", background=palette["panel"])
+            tree_data.tag_configure("even", background=palette["row_alt"])
+            tree_data.tag_configure(
+                "empty",
+                background="#fff8dc",
+                foreground=palette["muted"],
+            )
             self._bind_mousewheel(tree_data)
+            selected["headings"] = names
+        def read_recent_rows(path, start_dt, end_dt, limit=5000):
+            """Read newest matching CSV rows without scanning a large log from its start."""
+            header = list(selected["headings"])
+            if not os.path.exists(path) or not os.path.getsize(path):
+                return header, [], False
+            with open(
+                path,
+                "r",
+                newline="",
+                encoding="utf-8-sig",
+            ) as handle:
+                header = next(csv.reader(handle), header)
+
+            rows = []
+            truncated = False
+            block_size = 1024 * 1024
+            with open(path, "rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                position = handle.tell()
+                remainder = b""
+                while position > 0:
+                    read_size = min(block_size, position)
+                    position -= read_size
+                    handle.seek(position)
+                    data = handle.read(read_size) + remainder
+                    lines = data.split(b"\n")
+                    if position > 0:
+                        remainder = lines.pop(0)
+                    else:
+                        remainder = b""
+                    for raw_line in reversed(lines):
+                        if not raw_line.strip():
+                            continue
+                        try:
+                            row = next(csv.reader([
+                                raw_line.decode("utf-8-sig", errors="replace")
+                            ]))
+                        except (csv.Error, StopIteration):
+                            continue
+                        if len(row) < 2:
+                            continue
+                        try:
+                            row_date = datetime.datetime.strptime(
+                                row[0],
+                                "%Y-%m-%d",
+                            ).date()
+                        except ValueError:
+                            continue
+                        if row_date > end_dt:
+                            continue
+                        if row_date < start_dt:
+                            return header, rows, truncated
+                        rows.append(row)
+                        if len(rows) >= limit:
+                            truncated = True
+                            return header, rows, truncated
+            return header, rows, truncated
+
 
         def load_selected():
             if not selected["path"]:
                 return
+            start_dt = dp_start_date.get_date()
+            end_dt = dp_end_date.get_date()
+            if start_dt > end_dt:
+                messagebox.showwarning(
+                    "Invalid Date Range",
+                    "The From date must not be later than the To date.",
+                    parent=report_win,
+                )
+                return
             try:
-                start_dt = dp_start_date.get_date()
-                end_dt = dp_end_date.get_date()
-                with open(selected["path"], "r", newline="", encoding="utf-8-sig") as f:
-                    reader = csv.reader(f)
-                    header = next(reader, [])
-                    rows = []
-                    for row in reader:
-                        if len(row) < 2:
-                            continue
-                        try:
-                            d = datetime.datetime.strptime(row[0], "%Y-%m-%d").date()
-                        except ValueError:
-                            continue
-                        if start_dt <= d <= end_dt:
-                            rows.append(row)
-                # Show newest first, as a report normally does.
+                header, rows, truncated = read_recent_rows(
+                    selected["path"],
+                    start_dt,
+                    end_dt,
+                )
+                selected["rows"] = rows
                 if tree_data is not None:
                     for item in tree_data.get_children():
                         tree_data.delete(item)
-                    for row in reversed(rows):
+                    for index, row in enumerate(rows):
                         padded = row + [""] * max(0, len(header) - len(row))
-                        tree_data.insert("", "end", values=padded[:len(header)])
+                        tree_data.insert(
+                            "",
+                            "end",
+                            values=padded[:len(header)],
+                            tags=("even" if index % 2 else "odd",),
+                        )
                     if not rows:
-                        tree_data.insert("", "end", values=["-", "-"] + ["No data"] * max(0, len(header)-2))
+                        tree_data.insert(
+                            "",
+                            "end",
+                            values=["-", "-"] + (
+                                ["No data in selected range"] *
+                                max(0, len(header) - 2)
+                            ),
+                            tags=("empty",),
+                        )
+                row_count_label.configure(
+                    text=(
+                        f"{len(rows):,}{'+' if truncated else ''} "
+                        "records shown"
+                    )
+                )
+                status_label.configure(
+                    text=(
+                        f"{start_dt:%Y-%m-%d} to {end_dt:%Y-%m-%d}"
+                        "  •  newest records first"
+                        f"{'  •  display limited to 5,000' if truncated else ''}"
+                    )
+                )
             except Exception as exc:
-                messagebox.showerror("Report Error", f"Error reading report:\n{exc}")
+                selected["rows"] = []
+                row_count_label.configure(text="Load failed")
+                messagebox.showerror(
+                    "Report Error",
+                    f"Error reading report:\n{exc}",
+                    parent=report_win,
+                )
 
-        def select_bay(event=None):
+        def select_bay(_event=None):
             items = tree_menu.selection()
             if not items:
                 return
-            iid = items[0]
+            item_id = items[0]
             groups = _report_group_settings()
-            bay = tree_menu.item(iid, "text").strip()
+            bay = tree_menu.item(item_id, "text").strip()
             special_reports = {
-                "__all_realtime__": (os.path.join(APP_DIR, "Report_All_Realtime_Variables.csv"),
-                                       ["Date", "Time", "Device_Addr", "Bay_Name", "Physical_Name", "Info_Name", "Type", "ASDU", "IOA", "Unit", "Value"]),
-                "__rectangle_status__": (self.rectangle_report_file,
-                                          ["Date", "Time", "Page", "Rectangle", "Binding", "State", "Value", "Operator", "Threshold", "Device_Addr", "Bay_Name", "Physical_Name", "ASDU", "IOA"]),
+                "__all_realtime__": (
+                    os.path.join(
+                        APP_DIR,
+                        "Report_All_Realtime_Variables.csv",
+                    ),
+                    [
+                        "Date", "Time", "Device_Addr", "Bay_Name",
+                        "Physical_Name", "Info_Name", "Type", "ASDU",
+                        "IOA", "Unit", "Value",
+                    ],
+                ),
+                "__rectangle_status__": (
+                    self.rectangle_report_file,
+                    [
+                        "Date", "Time", "Page", "Rectangle", "Binding",
+                        "State", "Value", "Operator", "Threshold",
+                        "Device_Addr", "Bay_Name", "Physical_Name",
+                        "ASDU", "IOA",
+                    ],
+                ),
             }
-            if iid in special_reports:
-                path, header = special_reports[iid]
+            if item_id in special_reports:
+                path, header = special_reports[item_id]
                 if os.path.exists(path) and os.path.getsize(path):
                     try:
-                        with open(path, "r", newline="", encoding="utf-8-sig") as handle:
+                        with open(
+                            path,
+                            "r",
+                            newline="",
+                            encoding="utf-8-sig",
+                        ) as handle:
                             header = next(csv.reader(handle), header)
                     except Exception:
                         pass
@@ -4157,57 +7659,94 @@ class SCADAMainUI:
             selected["bay"] = bay
             selected["path"] = path
             selected["columns"] = columns
-            lbl_active_file.config(text=f"Bay: {bay} | File: {os.path.basename(path)}")
+            selected_source_label.configure(text=bay)
+            active_file_label.configure(text=os.path.basename(path))
             rebuild_table(columns)
             load_selected()
 
+        def export_to_csv():
+            if not selected["path"] or not selected["rows"]:
+                messagebox.showwarning(
+                    "Export Report",
+                    "There are no records in the selected date range.",
+                    parent=report_win,
+                )
+                return
+            safe_source = re.sub(
+                r"[^A-Za-z0-9._-]+",
+                "_",
+                selected.get("bay") or "SCADA",
+            ).strip("_")
+            initial = (
+                f"Export_Report_{safe_source}_"
+                f"{dp_start_date.get_date()}_to_{dp_end_date.get_date()}.csv"
+            )
+            path = filedialog.asksaveasfilename(
+                parent=report_win,
+                title="Export Report",
+                defaultextension=".csv",
+                filetypes=[("CSV Files", "*.csv")],
+                initialfile=initial,
+            )
+            if not path:
+                return
+            try:
+                with open(
+                    path,
+                    "w",
+                    newline="",
+                    encoding="utf-8-sig",
+                ) as handle:
+                    writer = csv.writer(handle)
+                    writer.writerow(selected["headings"])
+                    writer.writerows(selected["rows"])
+                messagebox.showinfo(
+                    "Export Complete",
+                    f"Report exported to:\n{path}",
+                    parent=report_win,
+                )
+            except Exception as exc:
+                messagebox.showerror(
+                    "Export Failed",
+                    str(exc),
+                    parent=report_win,
+                )
+
         groups = _report_group_settings()
-        tree_menu.insert("", "end", iid="__all_realtime__", text="All Realtime Variables (2 sec)")
-        tree_menu.insert("", "end", iid="__rectangle_status__", text="Rectangle Status Events")
+        tree_menu.insert(
+            "",
+            "end",
+            iid="__all_realtime__",
+            text="All Realtime Variables (2 sec)",
+        )
+        tree_menu.insert(
+            "",
+            "end",
+            iid="__rectangle_status__",
+            text="Rectangle Status Events",
+        )
         if groups:
             for bay in groups:
                 tree_menu.insert("", "end", iid=bay, text=bay)
         else:
-            # Keep the original report names visible even before ListSetting CSVs exist.
             for name in [
-                "Connection Wire I", "Connection Wire II", "1# Auxiliary Transformer", "2# Auxiliary Transformer",
-                "1# Generator", "1# Measure Control Box", "2# Generator", "2# Measure Control Box",
-                "Watt Hour Meter", "11# Circulating Water Pump", "12# Circulating Water Pump",
-                "13# Circulating Water Pump", "1# Feed Water Pump", "1# Primary Air Fan",
-                "1# Forced draft Fan", "1# Induced draft Fan", "2# Feed Water Pump",
-                "2# Primary Air Fan", "2# Forced draft Fan", "2# Induced draft Fan", "Voltage Monitoring"
+                "Connection Wire I", "Connection Wire II",
+                "1# Auxiliary Transformer", "2# Auxiliary Transformer",
+                "1# Generator", "1# Measure Control Box", "2# Generator",
+                "2# Measure Control Box", "Watt Hour Meter",
+                "11# Circulating Water Pump",
+                "12# Circulating Water Pump",
+                "13# Circulating Water Pump", "1# Feed Water Pump",
+                "1# Primary Air Fan", "1# Forced draft Fan",
+                "1# Induced draft Fan", "2# Feed Water Pump",
+                "2# Primary Air Fan", "2# Forced draft Fan",
+                "2# Induced draft Fan", "Voltage Monitoring",
             ]:
                 tree_menu.insert("", "end", iid=name, text=name)
 
         tree_menu.bind("<<TreeviewSelect>>", select_bay)
-
-        def export_to_csv():
-            if tree_data is None:
-                return
-            items = tree_data.get_children()
-            if not items:
-                messagebox.showwarning("Export Warning", "No data in table to export!")
-                return
-            initial = f"Export_Report_{selected.get('bay') or 'SCADA'}_{dp_start_date.get_date()}_to_{dp_end_date.get_date()}.csv"
-            path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV Files", "*.csv")], initialfile=initial)
-            if not path:
-                return
-            try:
-                with open(path, "w", newline="", encoding="utf-8-sig") as f:
-                    writer = csv.writer(f)
-                    headings = [tree_data.heading(c, "text") for c in tree_data["columns"]]
-                    writer.writerow(headings)
-                    for item in items:
-                        writer.writerow(tree_data.item(item, "values"))
-                messagebox.showinfo("Export Successful", f"Report exported to:\n{path}")
-            except Exception as exc:
-                messagebox.showerror("Export Failed", str(exc))
-
-        tk.Button(filter_frame, text="🔍 Apply Filter", font=("Consolas", 10, "bold"),
-                  bg="#0066cc", fg="white", bd=0, padx=15, pady=5, command=load_selected).pack(side="left", padx=10, pady=12)
-        tk.Button(filter_frame, text="📥 Export Data", font=("Consolas", 10, "bold"),
-                  bg="#00994d", fg="white", bd=0, padx=15, pady=5, command=export_to_csv).pack(side="left", padx=5, pady=12)
-
+        apply_button.configure(command=load_selected)
+        export_button.configure(command=export_to_csv)
         children = tree_menu.get_children()
         if children:
             tree_menu.selection_set(children[0])
@@ -4215,697 +7754,1632 @@ class SCADAMainUI:
             select_bay()
 
     def action_curve(self):
-        """Display a rolling trend sourced directly from the live IEC-104 stores."""
+        """Open the persistent IEC-104 process-trend historian."""
+        existing = getattr(self, "_curve_window", None)
+        if existing is not None and existing.winfo_exists():
+            existing.deiconify()
+            existing.lift()
+            existing.focus_force()
+            return
+
+        palette = {
+            "navy": "#16324f",
+            "navy_dark": "#10263c",
+            "toolbar": "#e7ebf0",
+            "workspace": "#cfd5dc",
+            "panel": "#ffffff",
+            "border": "#9aa7b4",
+            "text": "#17212b",
+            "muted": "#5f6b76",
+            "grid": "#d7dee6",
+            "blue": "#0068b5",
+            "orange": "#e27a1f",
+            "red": "#c83c3c",
+            "purple": "#7651a8",
+            "green": "#20834e",
+            "warning": "#aa7000",
+        }
         curve_win = tk.Toplevel(self.root)
-        curve_win.title("Real-Time Parameter Trend")
+        self._curve_window = curve_win
         self._make_toplevel_responsive(
-            curve_win, "Real-Time Parameter Trend", fullscreen=True,
+            curve_win, "Process Trend Explorer", fullscreen=False,
         )
-        curve_win.configure(bg="#0b0e14")
-        curve_win.bind("<Escape>", lambda _event: curve_win.destroy())
+        curve_win.configure(bg=palette["workspace"])
 
-        header_frame = tk.Frame(curve_win, bg="#161b22", height=50)
-        header_frame.pack(fill="x", side="top")
+        def close_curve():
+            self._curve_window = None
+            curve_win.destroy()
+
+        curve_win.bind("<Escape>", lambda _event: close_curve())
+        curve_win.protocol("WM_DELETE_WINDOW", close_curve)
+
+        title_bar = tk.Frame(
+            curve_win, bg=palette["navy"], height=58,
+        )
+        title_bar.pack(fill="x")
+        title_group = tk.Frame(title_bar, bg=palette["navy"])
+        title_group.pack(side="left", padx=18, pady=8)
         tk.Label(
-            header_frame,
-            text="REAL-TIME IEC-104 PARAMETER TREND",
-            font=("Segoe UI", 16, "bold"),
-            fg="#00f0ff",
-            bg="#161b22",
-        ).pack(side="left", padx=20, pady=10)
-        tk.Button(
-            header_frame,
-            text="Close (ESC)",
-            font=("Segoe UI", 10, "bold"),
-            bg="#d9534f",
+            title_group,
+            text="PROCESS TREND EXPLORER",
+            bg=palette["navy"],
             fg="#ffffff",
-            bd=0,
-            padx=15,
-            pady=6,
-            cursor="hand2",
-            command=curve_win.destroy,
-        ).pack(side="right", padx=20, pady=10)
-
-        ctrl_frame = tk.Frame(curve_win, bg="#161b22", bd=1, relief="solid")
-        ctrl_frame.pack(fill="x", padx=15, pady=(10, 0))
-        selected_label = tk.Label(
-            ctrl_frame,
-            text="Selected: Connection Wire I",
-            fg="#00f0ff",
-            bg="#161b22",
-            font=("Segoe UI", 10, "bold"),
-        )
-        selected_label.pack(side="left", padx=15, pady=8)
+            font=("Segoe UI", 16, "bold"),
+            anchor="w",
+        ).pack(fill="x")
         tk.Label(
-            ctrl_frame,
-            text="Live source • 1 second interval • 120 samples",
-            fg="#8b949e",
-            bg="#161b22",
-            font=("Segoe UI", 10),
-        ).pack(side="right", padx=15)
+            title_group,
+            text=(
+                "Persistent IEC-104 historian • data collection continues "
+                "while this window is closed"
+            ),
+            bg=palette["navy"],
+            fg="#c8d7e6",
+            font=("Segoe UI", 9),
+            anchor="w",
+        ).pack(fill="x")
+        tk.Button(
+            title_bar,
+            text="Close",
+            command=close_curve,
+            font=("Segoe UI", 10, "bold"),
+            bg="#f4f6f8",
+            fg=palette["text"],
+            activebackground="#ffffff",
+            relief="raised",
+            bd=1,
+            padx=18,
+            pady=5,
+            cursor="hand2",
+        ).pack(side="right", padx=18, pady=13)
+
+        tool_frame = tk.Frame(
+            curve_win,
+            bg=palette["toolbar"],
+            bd=1,
+            relief="raised",
+        )
+        tool_frame.pack(fill="x", padx=10, pady=(8, 4))
+
+        range_var = tk.StringVar(value="1 Hour")
+        tk.Label(
+            tool_frame,
+            text="Time Range",
+            bg=palette["toolbar"],
+            fg=palette["text"],
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="left", padx=(12, 5), pady=9)
+        range_combo = ttk.Combobox(
+            tool_frame,
+            textvariable=range_var,
+            values=tuple(TREND_RANGE_PRESETS) + ("Custom",),
+            state="readonly",
+            width=11,
+            font=("Segoe UI", 9),
+        )
+        range_combo.pack(side="left", padx=(0, 12), pady=9)
+
+        tk.Label(
+            tool_frame,
+            text="From",
+            bg=palette["toolbar"],
+            fg=palette["text"],
+            font=("Segoe UI", 9),
+        ).pack(side="left", padx=(0, 4))
+        start_date = DateEntry(
+            tool_frame,
+            width=11,
+            date_pattern="yyyy-mm-dd",
+            font=("Segoe UI", 9),
+        )
+        start_date.pack(side="left", padx=(0, 9), pady=9)
+        tk.Label(
+            tool_frame,
+            text="To",
+            bg=palette["toolbar"],
+            fg=palette["text"],
+            font=("Segoe UI", 9),
+        ).pack(side="left", padx=(0, 4))
+        end_date = DateEntry(
+            tool_frame,
+            width=11,
+            date_pattern="yyyy-mm-dd",
+            font=("Segoe UI", 9),
+        )
+        end_date.pack(side="left", padx=(0, 10), pady=9)
+
+        toolbar_button_options = {
+            "font": ("Segoe UI", 9, "bold"),
+            "relief": "raised",
+            "bd": 1,
+            "padx": 12,
+            "pady": 4,
+            "cursor": "hand2",
+        }
+        apply_button = tk.Button(
+            tool_frame,
+            text="Apply",
+            bg="#f8f9fa",
+            fg=palette["text"],
+            **toolbar_button_options,
+        )
+        apply_button.pack(side="left", padx=3, pady=7)
+        refresh_button = tk.Button(
+            tool_frame,
+            text="Capture Now",
+            bg="#dbe8f5",
+            fg=palette["navy_dark"],
+            **toolbar_button_options,
+        )
+        refresh_button.pack(side="left", padx=3, pady=7)
+        export_button = tk.Button(
+            tool_frame,
+            text="Export Excel",
+            bg="#dcefe3",
+            fg="#145d36",
+            **toolbar_button_options,
+        )
+        export_button.pack(side="left", padx=3, pady=7)
+        tk.Label(
+            tool_frame,
+            text="Historian ACTIVE  •  60 second sampling",
+            bg=palette["toolbar"],
+            fg=palette["green"],
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="right", padx=14)
+
+        status_bar = tk.Frame(
+            curve_win, bg=palette["workspace"],
+        )
+        status_bar.pack(fill="x", padx=10, pady=3)
+        selected_label = tk.Label(
+            status_bar,
+            text="Connection Wire I",
+            bg=palette["workspace"],
+            fg=palette["navy"],
+            font=("Segoe UI", 11, "bold"),
+        )
+        selected_label.pack(side="left")
+        range_label = tk.Label(
+            status_bar,
+            text="",
+            bg=palette["workspace"],
+            fg=palette["muted"],
+            font=("Segoe UI", 9),
+        )
+        range_label.pack(side="left", padx=16)
+        sample_count_label = tk.Label(
+            status_bar,
+            text="0 records",
+            bg=palette["workspace"],
+            fg=palette["muted"],
+            font=("Segoe UI", 9, "bold"),
+        )
+        sample_count_label.pack(side="right")
+        quality_label = tk.Label(
+            status_bar,
+            text="CHECKING",
+            bg=palette["workspace"],
+            fg=palette["warning"],
+            font=("Segoe UI", 9, "bold"),
+        )
+        quality_label.pack(side="right", padx=14)
 
         main_pane = ttk.PanedWindow(curve_win, orient="horizontal")
-        main_pane.pack(fill="both", expand=True, padx=15, pady=10)
-
-        left_frame = tk.Frame(main_pane, bg="#161b22", bd=1, relief="solid")
+        main_pane.pack(
+            fill="both", expand=True, padx=10, pady=(2, 10),
+        )
+        left_frame = tk.Frame(
+            main_pane,
+            bg=palette["panel"],
+            bd=1,
+            relief="sunken",
+        )
         main_pane.add(left_frame, weight=1)
         tk.Label(
             left_frame,
-            text="Device Tree View",
-            font=("Segoe UI", 10, "bold"),
+            text="EQUIPMENT",
+            bg=palette["navy_dark"],
             fg="#ffffff",
-            bg="#21262d",
-        ).pack(fill="x", pady=(0, 5), ipady=5)
+            font=("Segoe UI", 9, "bold"),
+            anchor="w",
+            padx=10,
+            pady=7,
+        ).pack(fill="x")
 
-        devices_list = [
-            "Connection Wire I", "Connection Wire II",
-            "1# Auxiliary Transformer", "2# Auxiliary Transformer",
-            "1# Generator", "1# Measure Control Box",
-            "2# Generator", "2# Measure Control Box",
-            "Watt Hour Meter", "11# Circulating Water Pump",
-            "12# Circulating Water Pump", "13# Circulating Water Pump",
-            "1# Feed Water Pump", "1# Primary Air Fan",
-            "1# Forced draft Fan", "1# Induced draft Fan",
-            "2# Feed Water Pump", "2# Primary Air Fan",
-            "2# Forced draft Fan", "2# Induced draft Fan",
-            "21# Circulating Water Pump", "22# Circulating Water Pump",
-            "23# Circulating Water Pump", "Voltage Monitoring",
-        ]
-
-        style = ttk.Style()
+        style = ttk.Style(curve_win)
         style.configure(
-            "CurveTree.Treeview",
-            background="#0d1117",
-            foreground="#c9d1d9",
-            fieldbackground="#0d1117",
-            rowheight=24,
+            "TrendDevice.Treeview",
+            background="#ffffff",
+            foreground=palette["text"],
+            fieldbackground="#ffffff",
+            rowheight=25,
+            font=("Segoe UI", 9),
+            borderwidth=0,
         )
         style.map(
-            "CurveTree.Treeview",
-            background=[("selected", "#1f6feb")],
-            foreground=[("selected", "#ffffff")],
+            "TrendDevice.Treeview",
+            background=[("selected", "#c6ddf2")],
+            foreground=[("selected", palette["navy_dark"])],
+        )
+        style.configure(
+            "TrendData.Treeview",
+            background="#ffffff",
+            foreground=palette["text"],
+            fieldbackground="#ffffff",
+            rowheight=24,
+            font=("Segoe UI", 9),
+        )
+        style.configure(
+            "TrendData.Treeview.Heading",
+            background=palette["navy_dark"],
+            foreground="#ffffff",
+            font=("Segoe UI", 9, "bold"),
+            padding=(5, 6),
+        )
+        style.map(
+            "TrendData.Treeview",
+            background=[("selected", "#c6ddf2")],
+            foreground=[("selected", palette["text"])],
         )
 
         tree_dev = ttk.Treeview(
-            left_frame, show="tree", style="CurveTree.Treeview",
+            left_frame,
+            show="tree",
+            style="TrendDevice.Treeview",
         )
         self._bind_mousewheel(tree_dev)
         tree_dev.pack(fill="both", expand=True)
         root_node = tree_dev.insert(
-            "", "end", text="Power Grid Devices", open=True,
+            "", "end", text="BONT Process Equipment", open=True,
         )
-        for index, device_name in enumerate(devices_list, 1):
-            tree_dev.insert(
-                root_node, "end", text=f"{index}. {device_name}",
+        device_items = {}
+        for index, device_name in enumerate(TREND_DEVICES, 1):
+            device_items[device_name] = tree_dev.insert(
+                root_node,
+                "end",
+                text=f"{index:02d}  {device_name}",
             )
+        tk.Label(
+            left_frame,
+            text=(
+                "History file\n"
+                f"{os.path.basename(TREND_HISTORY_DB)}\n\n"
+                f"Retention\n{TREND_HISTORY_RETENTION_DAYS} days"
+            ),
+            bg="#f3f5f7",
+            fg=palette["muted"],
+            font=("Segoe UI", 8),
+            justify="left",
+            anchor="w",
+            padx=10,
+            pady=9,
+        ).pack(fill="x")
 
-        right_frame = tk.Frame(main_pane, bg="#0b0e14")
-        main_pane.add(right_frame, weight=4)
-        right_split = ttk.PanedWindow(right_frame, orient="vertical")
+        right_frame = tk.Frame(
+            main_pane, bg=palette["workspace"],
+        )
+        main_pane.add(right_frame, weight=5)
+        value_frame = tk.Frame(
+            right_frame,
+            bg=palette["panel"],
+            bd=1,
+            relief="sunken",
+        )
+        value_frame.pack(fill="x", pady=(0, 4))
+        value_header = tk.Frame(
+            value_frame, bg=palette["navy_dark"],
+        )
+        value_header.pack(fill="x")
+        selected_value_label = tk.Label(
+            value_header,
+            text="CURVE VALUES  •  SELECTED: LATEST RECORD",
+            bg=palette["navy_dark"],
+            fg="#ffffff",
+            font=("Segoe UI", 9, "bold"),
+            anchor="w",
+            padx=9,
+            pady=5,
+        )
+        selected_value_label.pack(side="left", fill="x", expand=True)
+        current_value_label = tk.Label(
+            value_header,
+            text="CURRENT: CHECKING",
+            bg=palette["navy_dark"],
+            fg="#c8d7e6",
+            font=("Segoe UI", 9, "bold"),
+            anchor="e",
+            padx=9,
+            pady=5,
+        )
+        current_value_label.pack(side="right")
+        value_columns = (
+            "number",
+            "tag",
+            "description",
+            "selected",
+            "current",
+            "unit",
+            "upper",
+            "lower",
+        )
+        curve_value_table = ttk.Treeview(
+            value_frame,
+            columns=value_columns,
+            show=("tree", "headings"),
+            height=len(TREND_VALUE_KEYS),
+            selectmode="none",
+            style="TrendData.Treeview",
+        )
+        curve_value_table.heading("#0", text="CURVE")
+        curve_value_table.column(
+            "#0", width=76, minwidth=66, stretch=False, anchor="center",
+        )
+        value_headings = {
+            "number": "NO.",
+            "tag": "TAG NAME",
+            "description": "DESCRIPTION",
+            "selected": "SELECTED VALUE",
+            "current": "CURRENT VALUE",
+            "unit": "UNIT",
+            "upper": "UPPER LIMIT",
+            "lower": "LOWER LIMIT",
+        }
+        value_widths = {
+            "number": 50,
+            "tag": 105,
+            "description": 220,
+            "selected": 120,
+            "current": 120,
+            "unit": 80,
+            "upper": 105,
+            "lower": 105,
+        }
+        for column in value_columns:
+            curve_value_table.heading(
+                column, text=value_headings[column],
+            )
+            curve_value_table.column(
+                column,
+                width=value_widths[column],
+                minwidth=45,
+                anchor=(
+                    "w"
+                    if column in ("tag", "description")
+                    else "center"
+                ),
+                stretch=(column == "description"),
+            )
+        curve_value_table.pack(fill="x")
+
+        right_split = ttk.PanedWindow(
+            right_frame, orient="vertical",
+        )
         right_split.pack(fill="both", expand=True)
 
-        charts_frame = tk.Frame(right_split, bg="#0b0e14")
+        charts_frame = tk.Frame(
+            right_split, bg=palette["workspace"],
+        )
         right_split.add(charts_frame, weight=3)
         canvas_ui = tk.Canvas(
-            charts_frame, bg="#0d1117", highlightthickness=1,
-            highlightbackground="#30363d",
+            charts_frame,
+            bg=palette["panel"],
+            highlightthickness=1,
+            highlightbackground=palette["border"],
         )
-        canvas_ui.pack(fill="both", expand=True, pady=(0, 5))
+        canvas_ui.pack(fill="both", expand=True, pady=(0, 4))
         canvas_power = tk.Canvas(
-            charts_frame, bg="#0d1117", highlightthickness=1,
-            highlightbackground="#30363d",
+            charts_frame,
+            bg=palette["panel"],
+            highlightthickness=1,
+            highlightbackground=palette["border"],
         )
-        canvas_power.pack(fill="both", expand=True, pady=(5, 0))
+        canvas_power.pack(fill="both", expand=True, pady=(4, 0))
 
         table_frame = tk.Frame(
-            right_split, bg="#161b22", bd=1, relief="solid",
+            right_split,
+            bg=palette["panel"],
+            bd=1,
+            relief="sunken",
         )
         right_split.add(table_frame, weight=2)
         tk.Label(
             table_frame,
-            text="LIVE SAMPLE PREVIEW",
-            font=("Segoe UI", 10, "bold"),
-            fg="#8b949e",
-            bg="#161b22",
+            text="HISTORIAN RECORDS",
+            bg=palette["navy_dark"],
+            fg="#ffffff",
+            font=("Segoe UI", 9, "bold"),
             anchor="w",
-        ).pack(fill="x", padx=5, pady=2)
-        columns = ("time", "voltage", "current", "active", "reactive", "frequency")
-        sample_table = ttk.Treeview(
+            padx=9,
+            pady=5,
+        ).pack(fill="x")
+        columns = (
+            "timestamp",
+            "quality",
+            "source",
+            "voltage",
+            "current",
+            "active",
+            "reactive",
+            "frequency",
+        )
+        table = ttk.Treeview(
             table_frame,
             columns=columns,
             show="headings",
-            style="CurveTree.Treeview",
+            style="TrendData.Treeview",
         )
         headings = {
-            "time": "TIME",
+            "timestamp": "TIMESTAMP",
+            "quality": "QUALITY",
+            "source": "SOURCE IP",
             "voltage": "U (kV)",
-            "current": "IA (A)",
+            "current": "I (A)",
             "active": "P (kW)",
             "reactive": "Q (kVar)",
             "frequency": "f (Hz)",
         }
         for column in columns:
-            sample_table.heading(column, text=headings[column])
-            sample_table.column(column, width=105, anchor="center", stretch=True)
-        self._bind_mousewheel(sample_table)
-        sample_table.pack(fill="both", expand=True)
+            table.heading(column, text=headings[column])
+            table.column(column, width=110, anchor="center")
+        table.column("timestamp", width=160)
+        table.column("quality", width=85)
+        table.column("source", width=115)
+        self._fit_tree_columns(
+            table,
+            columns,
+            [135, 75, 95, 75, 75, 75, 80, 75],
+            [1.7, 0.9, 1.1, 1, 1, 1, 1, 1],
+        )
+        table.tag_configure(
+            "online", foreground=palette["green"],
+        )
+        table.tag_configure(
+            "offline", foreground=palette["red"],
+        )
+        table.tag_configure(
+            "no_data", foreground=palette["warning"],
+        )
+        self._bind_mousewheel(table)
+        table.pack(fill="both", expand=True)
 
         active_device = {"name": "Connection Wire I"}
         samples = []
+        current_range = {"start": 0, "end": 0}
         plot_colors = {
-            "U": "#00f0ff",
-            "I": "#f6c344",
-            "P": "#ff6b6b",
-            "Q": "#a78bfa",
-            "f": "#14d84a",
+            "U": palette["blue"],
+            "I": palette["orange"],
+            "P": palette["red"],
+            "Q": palette["purple"],
+            "f": palette["green"],
         }
+        curve_descriptions = {
+            "U": "Voltage",
+            "I": "Current",
+            "P": "Active Power",
+            "Q": "Reactive Power",
+            "f": "Frequency",
+        }
+        curve_units = {
+            "U": "kV",
+            "I": "A",
+            "P": "kW",
+            "Q": "kVar",
+            "f": "Hz",
+        }
+        curve_value_items = {}
+        for index, key in enumerate(TREND_VALUE_KEYS, 1):
+            color_tag = f"curve_{key}"
+            curve_value_table.tag_configure(
+                color_tag, foreground=plot_colors[key],
+            )
+            curve_value_items[key] = curve_value_table.insert(
+                "",
+                "end",
+                text="━━━━",
+                tags=(color_tag,),
+                values=(
+                    f"{index:02d}",
+                    key,
+                    curve_descriptions[key],
+                    "--",
+                    "--",
+                    curve_units[key],
+                    "--",
+                    "--",
+                ),
+            )
+        selected_sample = {"row": None}
+        history_item_samples = {}
 
-        def finite_value(mapping, *keys):
-            for key in keys:
+
+        def selected_time_range():
+            now = datetime.datetime.now()
+            preset = range_var.get()
+            if preset in TREND_RANGE_PRESETS:
+                start = now - TREND_RANGE_PRESETS[preset]
+                end = now
                 try:
-                    value = float(mapping.get(key))
-                except (TypeError, ValueError):
-                    continue
-                if math.isfinite(value):
-                    return value
-            return None
+                    start_date.set_date(start.date())
+                    end_date.set_date(end.date())
+                except Exception:
+                    pass
+            else:
+                start = datetime.datetime.combine(
+                    start_date.get_date(), datetime.time.min,
+                )
+                end = datetime.datetime.combine(
+                    end_date.get_date(), datetime.time.max,
+                )
+                if start > end:
+                    start, end = end, start
+            return start, end
 
-        def live_values(device_name):
-            with DATA_LOCK:
-                if device_name == "Connection Wire I":
-                    data = dict(DATA_STORE.get("10.100.163.1", DEFAULT_DATA))
-                    return {
-                        "U": finite_value(data, "W1_Uab"),
-                        "I": finite_value(data, "W1_Ia"),
-                        "P": finite_value(data, "W1_P"),
-                        "Q": finite_value(data, "W1_Q"),
-                        "f": finite_value(data, "W1_f"),
-                    }
-                if device_name == "Connection Wire II":
-                    data = dict(DATA_STORE.get("10.100.163.1", DEFAULT_DATA))
-                    return {
-                        "U": finite_value(data, "W2_Uab"),
-                        "I": finite_value(data, "W2_Ia"),
-                        "P": finite_value(data, "W2_P"),
-                        "Q": finite_value(data, "W2_Q"),
-                        "f": finite_value(data, "W2_f"),
-                    }
-                if device_name == "1# Generator":
-                    data = dict(DATA_STORE.get(self.GEN_1_IP, DEFAULT_DATA))
-                elif device_name == "2# Generator":
-                    data = dict(DATA_STORE.get(self.GEN_2_IP, DEFAULT_DATA))
-                elif device_name == "Voltage Monitoring":
-                    data = dict(DATA_STORE.get("10.100.163.7", DEFAULT_DATA))
-                else:
-                    data = dict(BAY_VALUE_STORE.get(device_name, {}))
-                    if not data:
-                        device_ip = SETTING_BAY_IP.get(device_name, "")
-                        data = dict(DATA_STORE.get(device_ip, DEFAULT_DATA))
-            return {
-                "U": finite_value(data, "Uab", "Uab_L", "Uan"),
-                "I": finite_value(data, "Ia"),
-                "P": finite_value(data, "P", "P_tot"),
-                "Q": finite_value(data, "Q"),
-                "f": finite_value(data, "f"),
-            }
+        def format_axis_time(epoch, total_span):
+            value = datetime.datetime.fromtimestamp(epoch)
+            if total_span <= 86400:
+                return value.strftime("%H:%M")
+            if total_span <= 7 * 86400:
+                return value.strftime("%d %b %H:%M")
+            return value.strftime("%d %b")
+        def format_trend_number(value):
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return "--"
+            if not math.isfinite(number):
+                return "--"
+            return f"{number:.3f}"
+
+        def format_trend_limit(value):
+            try:
+                number = float(str(value).strip().replace(",", "."))
+            except (TypeError, ValueError):
+                return "--"
+            if not math.isfinite(number) or abs(number) >= 999999.0:
+                return "--"
+            return f"{number:g}"
+
+        def trend_curve_metadata(device_name):
+            _source_ip, _source_kind, key_map = (
+                _trend_device_definition(device_name)
+            )
+            with SETTING_LOCK:
+                registry = [dict(row) for row in SETTING_REGISTRY]
+            device_rows = [
+                row for row in registry
+                if _norm_text(row.get("Bay_Name")) == device_name
+            ]
+            metadata = {}
+            for key in TREND_VALUE_KEYS:
+                candidates = key_map.get(key, ())
+                row = next(
+                    (
+                        item
+                        for candidate in candidates
+                        for item in device_rows
+                        if _norm_text(item.get("Physical_Name"))
+                        == candidate
+                    ),
+                    None,
+                )
+                metadata[key] = {
+                    "tag": (
+                        _norm_text(row.get("Physical_Name"))
+                        if row else ""
+                    ) or (candidates[0] if candidates else key),
+                    "description": curve_descriptions[key],
+                    "unit": (
+                        _norm_text(row.get("Unit"))
+                        if row else ""
+                    ) or curve_units[key],
+                    "upper": format_trend_limit(
+                        row.get("Up_Limit") if row else None,
+                    ),
+                    "lower": format_trend_limit(
+                        row.get("Down_Limit") if row else None,
+                    ),
+                }
+            return metadata
+
+        def refresh_curve_values():
+            device_name = active_device["name"]
+            metadata = trend_curve_metadata(device_name)
+            current = _trend_device_snapshot(device_name)
+            selected = selected_sample["row"]
+            if selected is None and samples:
+                selected = samples[-1]
+                selected_sample["row"] = selected
+
+            if selected is not None:
+                selected_timestamp = datetime.datetime.fromtimestamp(
+                    selected["captured_at"],
+                ).strftime("%Y-%m-%d %H:%M:%S")
+                selected_quality = selected.get("quality", "NO DATA")
+                selected_value_label.configure(
+                    text=(
+                        "CURVE VALUES  •  SELECTED: "
+                        f"{selected_timestamp}  •  {selected_quality}"
+                    ),
+                )
+            else:
+                selected_value_label.configure(
+                    text="CURVE VALUES  •  SELECTED: NO RECORD",
+                )
+
+            current_quality = current.get("quality", "NO DATA")
+            current_color = {
+                "ONLINE": "#7de2a7",
+                "OFFLINE": "#ff9c9c",
+                "NO DATA": "#ffd27a",
+            }.get(current_quality, "#c8d7e6")
+            current_value_label.configure(
+                text=(
+                    f"CURRENT: {current_quality}  •  "
+                    f"{current.get('source_ip', '-')}"
+                ),
+                fg=current_color,
+            )
+
+            for index, key in enumerate(TREND_VALUE_KEYS, 1):
+                item = metadata[key]
+                curve_value_table.item(
+                    curve_value_items[key],
+                    values=(
+                        f"{index:02d}",
+                        item["tag"],
+                        item["description"],
+                        format_trend_number(
+                            selected.get(key)
+                            if selected is not None else None
+                        ),
+                        format_trend_number(current.get(key)),
+                        item["unit"],
+                        item["upper"],
+                        item["lower"],
+                    ),
+                )
+
 
         def draw_chart(canvas, title, series_keys):
             canvas.delete("all")
-            width = max(canvas.winfo_width(), 320)
-            height = max(canvas.winfo_height(), 150)
-            left, right, top, bottom = 58, 18, 38, 30
+            width = max(canvas.winfo_width(), 420)
+            height = max(canvas.winfo_height(), 190)
+            left, right, top, bottom = 64, 20, 48, 34
             plot_width = max(1, width - left - right)
             plot_height = max(1, height - top - bottom)
             canvas.create_text(
-                15, 14, text=title, fill="#ffffff",
-                font=("Segoe UI", 10, "bold"), anchor="nw",
+                14,
+                12,
+                text=title,
+                fill=palette["text"],
+                font=("Segoe UI", 10, "bold"),
+                anchor="nw",
             )
-
-            values = [
-                sample.get(key)
+            numeric_values = [
+                float(sample[key])
                 for sample in samples
                 for key in series_keys
                 if sample.get(key) is not None
             ]
-            if not values:
+            if not numeric_values:
+                quality = (
+                    samples[-1]["quality"] if samples else "NO DATA"
+                )
+                message = (
+                    "IEC-104 source is offline — history contains no valid values"
+                    if quality == "OFFLINE"
+                    else "No historian values in the selected time range"
+                )
                 canvas.create_text(
-                    width / 2, height / 2,
-                    text="Waiting for live IEC-104 values",
-                    fill="#8b949e", font=("Segoe UI", 11),
+                    width / 2,
+                    height / 2,
+                    text=message,
+                    fill=(
+                        palette["red"]
+                        if quality == "OFFLINE"
+                        else palette["muted"]
+                    ),
+                    font=("Segoe UI", 10, "bold"),
                 )
                 return
 
-            minimum = min(values)
-            maximum = max(values)
+            minimum = min(numeric_values)
+            maximum = max(numeric_values)
             if math.isclose(minimum, maximum):
                 padding = max(1.0, abs(maximum) * 0.1)
+                minimum -= padding
+                maximum += padding
+            else:
+                padding = (maximum - minimum) * 0.08
                 minimum -= padding
                 maximum += padding
 
             for grid_index in range(5):
                 ratio = grid_index / 4.0
                 y = top + ratio * plot_height
-                grid_value = maximum - ratio * (maximum - minimum)
+                value = maximum - ratio * (maximum - minimum)
                 canvas.create_line(
-                    left, y, width - right, y,
-                    fill="#243040", dash=(2, 4),
+                    left,
+                    y,
+                    width - right,
+                    y,
+                    fill=palette["grid"],
                 )
                 canvas.create_text(
-                    left - 6, y, text=f"{grid_value:.2f}",
-                    fill="#8b949e", font=("Segoe UI", 8), anchor="e",
+                    left - 7,
+                    y,
+                    text=f"{value:.2f}",
+                    fill=palette["muted"],
+                    font=("Segoe UI", 8),
+                    anchor="e",
+                )
+
+            start_epoch = current_range["start"]
+            end_epoch = current_range["end"]
+            span = max(1, end_epoch - start_epoch)
+            for index in range(6):
+                ratio = index / 5.0
+                x = left + ratio * plot_width
+                epoch = start_epoch + ratio * span
+                canvas.create_line(
+                    x,
+                    top,
+                    x,
+                    top + plot_height,
+                    fill=palette["grid"],
+                )
+                canvas.create_text(
+                    x,
+                    height - 9,
+                    text=format_axis_time(epoch, span),
+                    fill=palette["muted"],
+                    font=("Segoe UI", 8),
+                    anchor="s",
                 )
 
             legend_x = left
             for key in series_keys:
                 latest = next(
-                    (sample.get(key) for sample in reversed(samples)
-                     if sample.get(key) is not None),
+                    (
+                        sample.get(key)
+                        for sample in reversed(samples)
+                        if sample.get(key) is not None
+                    ),
                     None,
                 )
-                if latest is None:
-                    continue
                 color = plot_colors[key]
                 canvas.create_line(
-                    legend_x, 24, legend_x + 18, 24,
-                    fill=color, width=3,
+                    legend_x,
+                    31,
+                    legend_x + 18,
+                    31,
+                    fill=color,
+                    width=3,
                 )
                 canvas.create_text(
-                    legend_x + 22, 24,
-                    text=f"{key} {latest:.2f}",
-                    fill=color, font=("Segoe UI", 9, "bold"), anchor="w",
+                    legend_x + 23,
+                    31,
+                    text=(
+                        f"{key} {latest:.2f}"
+                        if latest is not None else f"{key} --"
+                    ),
+                    fill=color,
+                    font=("Segoe UI", 8, "bold"),
+                    anchor="w",
                 )
-                legend_x += 105
+                legend_x += 112
 
-                points = []
-                for index, sample in enumerate(samples):
+                segments = []
+                segment = []
+                for sample in samples:
                     value = sample.get(key)
                     if value is None:
+                        if segment:
+                            segments.append(segment)
+                            segment = []
                         continue
                     x = left + (
-                        index / max(1, len(samples) - 1)
+                        (sample["captured_at"] - start_epoch) / span
                     ) * plot_width
                     y = top + (
-                        (maximum - value) / (maximum - minimum)
+                        (maximum - float(value))
+                        / (maximum - minimum)
                     ) * plot_height
-                    points.extend((x, y))
-                if len(points) >= 4:
-                    canvas.create_line(
-                        *points, fill=color, width=2, smooth=False,
-                    )
-                elif len(points) == 2:
-                    x, y = points
-                    canvas.create_oval(
-                        x - 2, y - 2, x + 2, y + 2,
-                        fill=color, outline=color,
-                    )
+                    segment.append((x, y))
+                if segment:
+                    segments.append(segment)
+                for points in segments:
+                    flattened = [
+                        coordinate
+                        for point in points
+                        for coordinate in point
+                    ]
+                    if len(points) > 1:
+                        canvas.create_line(
+                            *flattened,
+                            fill=color,
+                            width=2,
+                            smooth=False,
+                        )
+                    elif points:
+                        x, y = points[0]
+                        canvas.create_oval(
+                            x - 2,
+                            y - 2,
+                            x + 2,
+                            y + 2,
+                            fill=color,
+                            outline=color,
+                        )
 
-            if samples:
-                canvas.create_text(
-                    left, height - 8,
-                    text=samples[0]["time"],
-                    fill="#8b949e", font=("Segoe UI", 8), anchor="sw",
-                )
-                canvas.create_text(
-                    width - right, height - 8,
-                    text=samples[-1]["time"],
-                    fill="#8b949e", font=("Segoe UI", 8), anchor="se",
-                )
-
-        def redraw_curves():
-            device_name = active_device["name"]
+        def redraw():
+            device = active_device["name"]
             draw_chart(
                 canvas_ui,
-                f"{device_name} — Voltage and Current",
+                f"{device}  |  Voltage and Current",
                 ("U", "I"),
             )
             draw_chart(
                 canvas_power,
-                f"{device_name} — Active/Reactive Power and Frequency",
+                f"{device}  |  Active / Reactive Power and Frequency",
                 ("P", "Q", "f"),
             )
 
         def refresh_table():
-            for item in sample_table.get_children():
-                sample_table.delete(item)
-            for sample in reversed(samples[-60:]):
-                values = []
-                for key in ("U", "I", "P", "Q", "f"):
-                    value = sample.get(key)
-                    values.append("" if value is None else f"{value:.2f}")
-                sample_table.insert(
-                    "", "end", values=(sample["time"], *values),
+            previous_timestamp = (
+                selected_sample["row"].get("captured_at")
+                if selected_sample["row"] is not None
+                else None
+            )
+            for item in table.get_children():
+                table.delete(item)
+            history_item_samples.clear()
+            latest_item = None
+            selected_item = None
+            for sample in reversed(samples[-300:]):
+                numeric = [
+                    (
+                        "--"
+                        if sample.get(key) is None
+                        else f"{float(sample[key]):.3f}"
+                    )
+                    for key in TREND_VALUE_KEYS
+                ]
+                timestamp = datetime.datetime.fromtimestamp(
+                    sample["captured_at"]
+                ).strftime("%Y-%m-%d %H:%M:%S")
+                quality = sample.get("quality", "NO DATA")
+                item_id = table.insert(
+                    "",
+                    "end",
+                    values=(
+                        timestamp,
+                        quality,
+                        sample.get("source_ip", "-"),
+                        *numeric,
+                    ),
+                    tags=(quality.lower().replace(" ", "_"),),
                 )
+                history_item_samples[item_id] = sample
+                if latest_item is None:
+                    latest_item = item_id
+                if sample["captured_at"] == previous_timestamp:
+                    selected_item = item_id
 
-        def sample_once():
-            if not curve_win.winfo_exists():
-                return
-            values = live_values(active_device["name"])
-            samples.append({
-                "time": datetime.datetime.now().strftime("%H:%M:%S"),
-                **values,
-            })
-            if len(samples) > 120:
-                del samples[:-120]
-            refresh_table()
-            redraw_curves()
+            target_item = selected_item or latest_item
+            if target_item is not None:
+                table.selection_set(target_item)
+                table.focus(target_item)
+                selected_sample["row"] = history_item_samples[target_item]
+            else:
+                selected_sample["row"] = None
+            refresh_curve_values()
 
-        def realtime_tick():
-            if not curve_win.winfo_exists():
+        def select_history_record(_event=None):
+            selection = table.selection()
+            if not selection:
                 return
-            sample_once()
-            curve_win.after(1000, realtime_tick)
+            sample = history_item_samples.get(selection[0])
+            if sample is None:
+                return
+            selected_sample["row"] = sample
+            refresh_curve_values()
+
+
+        def load_history(capture=False, show_error=False):
+            nonlocal samples
+            try:
+                if capture:
+                    _trend_history_log_once()
+                start, end = selected_time_range()
+                current_range["start"] = int(start.timestamp())
+                current_range["end"] = int(end.timestamp())
+                samples = _trend_history_query(
+                    active_device["name"],
+                    current_range["start"],
+                    current_range["end"],
+                    max_points=720,
+                )
+                latest = samples[-1] if samples else None
+                quality = (
+                    latest.get("quality", "NO DATA")
+                    if latest else "NO DATA"
+                )
+                quality_color = {
+                    "ONLINE": palette["green"],
+                    "OFFLINE": palette["red"],
+                    "NO DATA": palette["warning"],
+                }.get(quality, palette["muted"])
+                quality_label.configure(
+                    text=(
+                        f"{quality}  •  "
+                        f"{latest.get('source_ip', '-') if latest else '-'}"
+                    ),
+                    fg=quality_color,
+                )
+                range_label.configure(
+                    text=(
+                        f"{start:%Y-%m-%d %H:%M}  to  "
+                        f"{end:%Y-%m-%d %H:%M}"
+                    )
+                )
+                sample_count_label.configure(
+                    text=f"{len(samples)} plotted records",
+                )
+                refresh_table()
+                redraw()
+            except Exception as exc:
+                if show_error:
+                    messagebox.showerror(
+                        "Trend History",
+                        f"Unable to load trend history:\n{exc}",
+                        parent=curve_win,
+                    )
+
+        def export_excel():
+            start_epoch = current_range["start"]
+            end_epoch = current_range["end"]
+            rows = _trend_history_query(
+                active_device["name"],
+                start_epoch,
+                end_epoch,
+                max_points=0,
+            )
+            if not rows:
+                messagebox.showwarning(
+                    "Export Excel",
+                    "No historian records in the selected time range.",
+                    parent=curve_win,
+                )
+                return
+            safe_device = re.sub(
+                r"[^A-Za-z0-9#_-]+",
+                "_",
+                active_device["name"],
+            ).strip("_")
+            path = filedialog.asksaveasfilename(
+                parent=curve_win,
+                title="Export Process Trend to Excel",
+                defaultextension=".xlsx",
+                filetypes=[("Excel Workbook", "*.xlsx")],
+                initialfile=(
+                    f"Trend_{safe_device}_"
+                    f"{datetime.datetime.fromtimestamp(start_epoch):%Y%m%d_%H%M}"
+                    ".xlsx"
+                ),
+            )
+            if not path:
+                return
+            workbook_rows = []
+            for row in rows:
+                workbook_rows.append([
+                    datetime.datetime.fromtimestamp(
+                        row["captured_at"]
+                    ).strftime("%Y-%m-%d %H:%M:%S"),
+                    active_device["name"],
+                    row.get("source_ip", ""),
+                    row.get("quality", ""),
+                    row.get("U"),
+                    row.get("I"),
+                    row.get("P"),
+                    row.get("Q"),
+                    row.get("f"),
+                ])
+            try:
+                saved = _write_xlsx(
+                    path,
+                    "Process Trend",
+                    [
+                        "Timestamp",
+                        "Device",
+                        "Source IP",
+                        "Quality",
+                        "Voltage (kV)",
+                        "Current (A)",
+                        "Active Power (kW)",
+                        "Reactive Power (kVar)",
+                        "Frequency (Hz)",
+                    ],
+                    workbook_rows,
+                )
+                messagebox.showinfo(
+                    "Export Excel",
+                    f"Excel workbook created:\n{saved}",
+                    parent=curve_win,
+                )
+            except Exception as exc:
+                messagebox.showerror(
+                    "Export Excel",
+                    f"Unable to create workbook:\n{exc}",
+                    parent=curve_win,
+                )
 
         def select_device(_event=None):
             selected = tree_dev.selection()
             if not selected:
                 return
-            item_text = tree_dev.item(selected[0], "text")
-            device_name = (
-                item_text.split(". ", 1)[1]
-                if ". " in item_text else item_text
+            item = selected[0]
+            device_name = next(
+                (
+                    name for name, item_id in device_items.items()
+                    if item_id == item
+                ),
+                None,
             )
-            if device_name not in devices_list:
+            if not device_name:
                 return
             active_device["name"] = device_name
-            selected_label.config(text=f"Selected: {device_name}")
-            samples.clear()
-            sample_once()
+            selected_sample["row"] = None
+            selected_label.configure(text=device_name)
+            load_history(show_error=True)
 
+        def apply_period(_event=None):
+            load_history(show_error=True)
+
+        def auto_refresh():
+            if not curve_win.winfo_exists():
+                return
+            if range_var.get() != "Custom":
+                load_history(show_error=False)
+            curve_win.after(15000, auto_refresh)
+
+        apply_button.configure(command=apply_period)
+        refresh_button.configure(
+            command=lambda: load_history(
+                capture=True, show_error=True,
+            )
+        )
+        export_button.configure(command=export_excel)
+        range_combo.bind("<<ComboboxSelected>>", apply_period)
         tree_dev.bind("<<TreeviewSelect>>", select_device)
-        canvas_ui.bind("<Configure>", lambda _event: redraw_curves())
-        canvas_power.bind("<Configure>", lambda _event: redraw_curves())
-        tk.Button(
-            ctrl_frame,
-            text="Refresh Now",
-            font=("Segoe UI", 10, "bold"),
-            bg="#1f6feb",
-            fg="#ffffff",
-            bd=0,
-            padx=12,
-            pady=4,
-            cursor="hand2",
-            command=sample_once,
-        ).pack(side="left", padx=15, pady=8)
+        table.bind("<<TreeviewSelect>>", select_history_record)
+        canvas_ui.bind("<Configure>", lambda _event: redraw())
+        canvas_power.bind("<Configure>", lambda _event: redraw())
 
-        first_device = tree_dev.get_children(root_node)[0]
-        tree_dev.selection_set(first_device)
-        tree_dev.focus(first_device)
-        sample_once()
-        curve_win.after(1000, realtime_tick)
+        first_item = device_items[active_device["name"]]
+        tree_dev.selection_set(first_item)
+        tree_dev.focus(first_item)
+        load_history(show_error=True)
+        curve_win.after(15000, auto_refresh)
 
     def action_his_alarm(self):
-        """Plot and continuously refresh alarm-history counts and event rows."""
-        alarm_win = tk.Toplevel(self.root)
-        alarm_win.title("Historical Alarm Graph")
-        self._make_toplevel_responsive(
-            alarm_win, "Historical Alarm Graph", fullscreen=True,
-        )
-        alarm_win.configure(bg="#2b2b2b")
-        alarm_win.bind("<Escape>", lambda _event: alarm_win.destroy())
+        """Open the persistent alarm-history chart and event explorer."""
+        existing = getattr(self, "_historical_alarm_window", None)
+        if existing is not None and existing.winfo_exists():
+            existing.deiconify()
+            existing.lift()
+            existing.focus_force()
+            return
 
-        header_frame = tk.Frame(alarm_win, bg="#1e1e1e", height=60)
-        header_frame.pack(fill="x", side="top")
+        palette = {
+            "navy": "#16324f",
+            "navy_dark": "#10263c",
+            "toolbar": "#e7ebf0",
+            "workspace": "#cfd5dc",
+            "panel": "#ffffff",
+            "border": "#9aa7b4",
+            "text": "#17212b",
+            "muted": "#5f6b76",
+            "grid": "#d7dee6",
+            "green": "#2c8b57",
+            "yellow": "#d5a400",
+            "orange": "#df7627",
+            "red": "#c43d3d",
+        }
+        alarm_win = tk.Toplevel(self.root)
+        self._historical_alarm_window = alarm_win
+        self._make_toplevel_responsive(
+            alarm_win, "Alarm History Explorer", fullscreen=False,
+        )
+        alarm_win.configure(bg=palette["workspace"])
+
+        def close_alarm_graph():
+            self._historical_alarm_window = None
+            alarm_win.destroy()
+
+        alarm_win.bind(
+            "<Escape>", lambda _event: close_alarm_graph()
+        )
+        alarm_win.protocol("WM_DELETE_WINDOW", close_alarm_graph)
+
+        title_bar = tk.Frame(
+            alarm_win, bg=palette["navy"], height=58,
+        )
+        title_bar.pack(fill="x")
+        title_group = tk.Frame(title_bar, bg=palette["navy"])
+        title_group.pack(side="left", padx=18, pady=8)
         tk.Label(
-            header_frame,
-            text="HISTORICAL ALARM GRAPH",
-            font=("Consolas", 18, "bold"),
-            fg="#6fffe9",
-            bg="#1e1e1e",
-        ).pack(side="left", padx=25, pady=15)
+            title_group,
+            text="ALARM HISTORY EXPLORER",
+            bg=palette["navy"],
+            fg="#ffffff",
+            font=("Segoe UI", 16, "bold"),
+            anchor="w",
+        ).pack(fill="x")
+        tk.Label(
+            title_group,
+            text=(
+                "Time-bucketed alarm analysis • persistent event history"
+            ),
+            bg=palette["navy"],
+            fg="#c8d7e6",
+            font=("Segoe UI", 9),
+            anchor="w",
+        ).pack(fill="x")
         tk.Button(
-            header_frame,
-            text="Close (ESC)",
-            font=("Consolas", 10, "bold"),
-            bg="#ff4d4d",
-            fg="white",
-            bd=0,
-            padx=15,
-            pady=8,
+            title_bar,
+            text="Close",
+            command=close_alarm_graph,
+            font=("Segoe UI", 10, "bold"),
+            bg="#f4f6f8",
+            fg=palette["text"],
+            relief="raised",
+            bd=1,
+            padx=18,
+            pady=5,
             cursor="hand2",
-            command=alarm_win.destroy,
-        ).pack(side="right", padx=20, pady=12)
+        ).pack(side="right", padx=18, pady=13)
 
         filter_frame = tk.Frame(
-            alarm_win, bg="#1e1e1e", bd=1, relief="solid",
+            alarm_win,
+            bg=palette["toolbar"],
+            bd=1,
+            relief="raised",
         )
-        filter_frame.pack(fill="x", padx=25, pady=(15, 0))
+        filter_frame.pack(fill="x", padx=10, pady=(8, 4))
+        range_var = tk.StringVar(value="Monthly")
         tk.Label(
             filter_frame,
-            text="Start Date:",
-            font=("Consolas", 10, "bold"),
-            fg="#ffffff",
-            bg="#1e1e1e",
-        ).pack(side="left", padx=(15, 5), pady=12)
+            text="Time Range",
+            bg=palette["toolbar"],
+            fg=palette["text"],
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="left", padx=(12, 5), pady=9)
+        range_combo = ttk.Combobox(
+            filter_frame,
+            textvariable=range_var,
+            values=tuple(TREND_RANGE_PRESETS) + ("Custom",),
+            state="readonly",
+            width=11,
+            font=("Segoe UI", 9),
+        )
+        range_combo.pack(side="left", padx=(0, 12), pady=9)
+        tk.Label(
+            filter_frame,
+            text="From",
+            bg=palette["toolbar"],
+            fg=palette["text"],
+            font=("Segoe UI", 9),
+        ).pack(side="left", padx=(0, 4))
         start_date = DateEntry(
             filter_frame,
-            width=12,
-            background="#0066cc",
-            foreground="white",
-            borderwidth=2,
+            width=11,
             date_pattern="yyyy-mm-dd",
-            font=("Consolas", 10),
+            font=("Segoe UI", 9),
         )
-        start_date.pack(side="left", padx=(0, 15), pady=12)
+        start_date.pack(side="left", padx=(0, 9), pady=9)
         tk.Label(
             filter_frame,
-            text="End Date:",
-            font=("Consolas", 10, "bold"),
-            fg="#ffffff",
-            bg="#1e1e1e",
-        ).pack(side="left", padx=(5, 5), pady=12)
+            text="To",
+            bg=palette["toolbar"],
+            fg=palette["text"],
+            font=("Segoe UI", 9),
+        ).pack(side="left", padx=(0, 4))
         end_date = DateEntry(
             filter_frame,
-            width=12,
-            background="#0066cc",
-            foreground="white",
-            borderwidth=2,
+            width=11,
             date_pattern="yyyy-mm-dd",
-            font=("Consolas", 10),
+            font=("Segoe UI", 9),
         )
-        end_date.pack(side="left", padx=(0, 15), pady=12)
-        try:
-            end_date.set_date(datetime.date.today())
-            start_date.set_date(
-                datetime.date.today() - datetime.timedelta(days=45),
-            )
-        except Exception:
-            pass
-
+        end_date.pack(side="left", padx=(0, 10), pady=9)
+        button_options = {
+            "font": ("Segoe UI", 9, "bold"),
+            "relief": "raised",
+            "bd": 1,
+            "padx": 12,
+            "pady": 4,
+            "cursor": "hand2",
+        }
+        apply_button = tk.Button(
+            filter_frame,
+            text="Apply",
+            bg="#f8f9fa",
+            fg=palette["text"],
+            **button_options,
+        )
+        apply_button.pack(side="left", padx=3, pady=7)
+        export_button = tk.Button(
+            filter_frame,
+            text="Export Excel",
+            bg="#dcefe3",
+            fg="#145d36",
+            **button_options,
+        )
+        export_button.pack(side="left", padx=3, pady=7)
         summary_label = tk.Label(
             filter_frame,
             text="0 events",
-            font=("Consolas", 10, "bold"),
-            fg="#6fffe9",
-            bg="#1e1e1e",
+            bg=palette["toolbar"],
+            fg=palette["navy"],
+            font=("Segoe UI", 9, "bold"),
         )
-        summary_label.pack(side="right", padx=15)
+        summary_label.pack(side="right", padx=14)
 
-        content_pane = ttk.PanedWindow(alarm_win, orient="vertical")
-        content_pane.pack(fill="both", expand=True, padx=25, pady=15)
+        status_bar = tk.Frame(
+            alarm_win, bg=palette["workspace"],
+        )
+        status_bar.pack(fill="x", padx=10, pady=3)
+        range_label = tk.Label(
+            status_bar,
+            text="",
+            bg=palette["workspace"],
+            fg=palette["muted"],
+            font=("Segoe UI", 9),
+        )
+        range_label.pack(side="left")
+        bucket_label = tk.Label(
+            status_bar,
+            text="",
+            bg=palette["workspace"],
+            fg=palette["muted"],
+            font=("Segoe UI", 9, "bold"),
+        )
+        bucket_label.pack(side="right")
+
+        content_pane = ttk.PanedWindow(
+            alarm_win, orient="vertical",
+        )
+        content_pane.pack(
+            fill="both", expand=True, padx=10, pady=(2, 10),
+        )
         chart_frame = tk.Frame(
-            content_pane, bg="#0d1117", bd=1, relief="solid",
+            content_pane,
+            bg=palette["panel"],
+            bd=1,
+            relief="sunken",
         )
         content_pane.add(chart_frame, weight=2)
         alarm_canvas = tk.Canvas(
             chart_frame,
-            bg="#0d1117",
+            bg=palette["panel"],
             highlightthickness=0,
         )
         alarm_canvas.pack(fill="both", expand=True)
 
         grid_frame = tk.Frame(
-            content_pane, bg="#2b2b2b", bd=2, relief="groove",
+            content_pane,
+            bg=palette["panel"],
+            bd=1,
+            relief="sunken",
         )
         content_pane.add(grid_frame, weight=3)
-        style = ttk.Style()
+        tk.Label(
+            grid_frame,
+            text="ALARM EVENT RECORDS",
+            bg=palette["navy_dark"],
+            fg="#ffffff",
+            font=("Segoe UI", 9, "bold"),
+            anchor="w",
+            padx=9,
+            pady=5,
+        ).pack(fill="x")
+
+        style = ttk.Style(alarm_win)
         style.configure(
-            "HisAlarmGrid.Treeview.Heading",
-            background="#1e1e1e",
-            foreground="#ffffff",
-            font=("Consolas", 11, "bold"),
-            rowheight=35,
+            "AlarmHistory.Treeview",
+            background="#ffffff",
+            foreground=palette["text"],
+            fieldbackground="#ffffff",
+            rowheight=25,
+            font=("Segoe UI", 9),
         )
         style.configure(
-            "HisAlarmGrid.Treeview",
-            background="#2b2b2b",
+            "AlarmHistory.Treeview.Heading",
+            background=palette["navy_dark"],
             foreground="#ffffff",
-            fieldbackground="#2b2b2b",
-            rowheight=30,
-            font=("Consolas", 10),
-            borderwidth=0,
+            font=("Segoe UI", 9, "bold"),
+            padding=(5, 6),
         )
         style.map(
-            "HisAlarmGrid.Treeview",
-            background=[("selected", "#444444")],
+            "AlarmHistory.Treeview",
+            background=[("selected", "#c6ddf2")],
+            foreground=[("selected", palette["text"])],
         )
-
-        columns = ("date", "time", "device", "description", "severity")
+        columns = (
+            "date",
+            "time",
+            "device",
+            "description",
+            "severity",
+        )
         tree = ttk.Treeview(
             grid_frame,
             columns=columns,
             show="headings",
-            style="HisAlarmGrid.Treeview",
+            style="AlarmHistory.Treeview",
         )
         headings = {
             "date": "DATE",
             "time": "TIME",
             "device": "DEVICE",
-            "description": "ALARM HISTORY DESCRIPTION",
+            "description": "ALARM DESCRIPTION",
             "severity": "STATUS",
         }
         for column in columns:
             tree.heading(column, text=headings[column])
-        tree.column("date", width=120, anchor="center")
-        tree.column("time", width=100, anchor="center")
-        tree.column("device", width=150, anchor="center")
-        tree.column("description", width=650, anchor="w")
-        tree.column("severity", width=140, anchor="center")
-        self._bind_mousewheel(tree)
         self._fit_tree_columns(
-            tree, columns, [85, 80, 110, 180, 90], [1, 1, 1.2, 5, 1],
+            tree,
+            columns,
+            [85, 75, 110, 260, 85],
+            [1, 1, 1.4, 5.5, 1],
         )
+        tree.column("date", anchor="center")
+        tree.column("time", anchor="center")
+        tree.column("device", anchor="w")
+        tree.column("description", anchor="w")
+        tree.column("severity", anchor="center")
+        tree.tag_configure(
+            "CRITICAL",
+            background="#f8dddd",
+            foreground="#8c1c1c",
+            font=("Segoe UI", 9, "bold"),
+        )
+        tree.tag_configure(
+            "URGENT",
+            background="#fbe7d5",
+            foreground="#93420b",
+            font=("Segoe UI", 9, "bold"),
+        )
+        tree.tag_configure(
+            "WARNING",
+            background="#fff4c7",
+            foreground="#755700",
+            font=("Segoe UI", 9, "bold"),
+        )
+        tree.tag_configure(
+            "NORMAL",
+            background="#e2f2e8",
+            foreground="#1d693e",
+        )
+        tree.tag_configure(
+            "EMPTY",
+            background="#f3f5f7",
+            foreground=palette["muted"],
+            font=("Segoe UI", 9, "italic"),
+        )
+        self._bind_mousewheel(tree)
         tree.pack(fill="both", expand=True)
-        tree.tag_configure(
-            "CRITICAL", background="#660000", foreground="#ff9999",
-            font=("Consolas", 10, "bold"),
-        )
-        tree.tag_configure(
-            "WARNING", background="#665200", foreground="#ffff99",
-            font=("Consolas", 10, "bold"),
-        )
-        tree.tag_configure(
-            "URGENT", background="#663300", foreground="#ffcc66",
-            font=("Consolas", 10, "bold"),
-        )
-        tree.tag_configure(
-            "NORMAL", background="#004d1a", foreground="#80ff80",
-            font=("Consolas", 10),
-        )
 
-        alarm_state = {"daily": {}, "rows": []}
-        severity_order = ("NORMAL", "WARNING", "URGENT", "CRITICAL")
-        severity_colors = {
-            "NORMAL": "#14d84a",
-            "WARNING": "#f4d03f",
-            "URGENT": "#ff8c42",
-            "CRITICAL": "#ff3b3b",
+        alarm_state = {
+            "rows": [],
+            "buckets": {},
+            "start": None,
+            "end": None,
+            "bucket_seconds": 86400,
         }
+        severity_order = (
+            "NORMAL", "WARNING", "URGENT", "CRITICAL",
+        )
+        severity_colors = {
+            "NORMAL": palette["green"],
+            "WARNING": palette["yellow"],
+            "URGENT": palette["orange"],
+            "CRITICAL": palette["red"],
+        }
+
+        def selected_time_range():
+            now = datetime.datetime.now()
+            preset = range_var.get()
+            if preset in TREND_RANGE_PRESETS:
+                start = now - TREND_RANGE_PRESETS[preset]
+                end = now
+                try:
+                    start_date.set_date(start.date())
+                    end_date.set_date(end.date())
+                except Exception:
+                    pass
+            else:
+                start = datetime.datetime.combine(
+                    start_date.get_date(), datetime.time.min,
+                )
+                end = datetime.datetime.combine(
+                    end_date.get_date(), datetime.time.max,
+                )
+                if start > end:
+                    start, end = end, start
+            return start, end
+
+        def bucket_configuration(start, end):
+            span = max(
+                1.0, (end - start).total_seconds(),
+            )
+            if span <= 3600:
+                return 300, "5 minute buckets"
+            if span <= 6 * 3600:
+                return 1800, "30 minute buckets"
+            if span <= 12 * 3600:
+                return 3600, "1 hour buckets"
+            if span <= 86400:
+                return 7200, "2 hour buckets"
+            if span <= 7 * 86400:
+                return 86400, "Daily buckets"
+            return 86400, "Daily buckets"
+
+        def bucket_text(epoch, span_seconds):
+            value = datetime.datetime.fromtimestamp(epoch)
+            if span_seconds <= 86400:
+                return value.strftime("%H:%M")
+            if span_seconds <= 7 * 86400:
+                return value.strftime("%a %d")
+            return value.strftime("%d %b")
 
         def draw_alarm_graph():
             alarm_canvas.delete("all")
-            width = max(alarm_canvas.winfo_width(), 420)
-            height = max(alarm_canvas.winfo_height(), 220)
-            left, right, top, bottom = 55, 20, 48, 38
+            width = max(alarm_canvas.winfo_width(), 500)
+            height = max(alarm_canvas.winfo_height(), 230)
+            left, right, top, bottom = 58, 20, 52, 38
             plot_width = max(1, width - left - right)
             plot_height = max(1, height - top - bottom)
             alarm_canvas.create_text(
-                16, 14,
-                text="Alarm events by date and severity",
-                fill="#ffffff",
-                font=("Consolas", 11, "bold"),
+                14,
+                12,
+                text="Alarm events by time and severity",
+                fill=palette["text"],
+                font=("Segoe UI", 10, "bold"),
                 anchor="nw",
             )
-
             legend_x = left
             for severity in severity_order:
                 color = severity_colors[severity]
                 alarm_canvas.create_rectangle(
-                    legend_x, 29, legend_x + 12, 41,
-                    fill=color, outline=color,
+                    legend_x,
+                    29,
+                    legend_x + 12,
+                    41,
+                    fill=color,
+                    outline=color,
                 )
                 alarm_canvas.create_text(
-                    legend_x + 17, 35,
+                    legend_x + 17,
+                    35,
                     text=severity,
                     fill=color,
-                    font=("Consolas", 8, "bold"),
+                    font=("Segoe UI", 8, "bold"),
                     anchor="w",
                 )
                 legend_x += 100
 
-            days = sorted(alarm_state["daily"])
-            if not days:
+            buckets = alarm_state["buckets"]
+            bucket_keys = sorted(buckets)
+            if not bucket_keys:
                 alarm_canvas.create_text(
-                    width / 2, height / 2,
-                    text="No alarm history in the selected date range",
-                    fill="#8b949e",
-                    font=("Consolas", 11),
+                    width / 2,
+                    height / 2,
+                    text="No alarm events in the selected time range",
+                    fill=palette["muted"],
+                    font=("Segoe UI", 10, "bold"),
                 )
                 return
-
             maximum_total = max(
-                sum(alarm_state["daily"][day].values()) for day in days
+                sum(buckets[key].values())
+                for key in bucket_keys
             )
             maximum_total = max(1, maximum_total)
             for grid_index in range(5):
                 ratio = grid_index / 4.0
                 y = top + ratio * plot_height
-                grid_value = int(round(maximum_total * (1.0 - ratio)))
+                count = int(
+                    round(maximum_total * (1.0 - ratio))
+                )
                 alarm_canvas.create_line(
-                    left, y, width - right, y,
-                    fill="#30363d", dash=(2, 4),
+                    left,
+                    y,
+                    width - right,
+                    y,
+                    fill=palette["grid"],
                 )
                 alarm_canvas.create_text(
-                    left - 7, y,
-                    text=str(grid_value),
-                    fill="#8b949e",
-                    font=("Consolas", 8),
+                    left - 7,
+                    y,
+                    text=str(count),
+                    fill=palette["muted"],
+                    font=("Segoe UI", 8),
                     anchor="e",
                 )
 
-            slot_width = plot_width / max(1, len(days))
-            bar_width = min(48.0, slot_width * 0.65)
-            for day_index, day in enumerate(days):
-                x0 = left + day_index * slot_width + (
-                    slot_width - bar_width
-                ) / 2.0
+            slot_width = plot_width / max(1, len(bucket_keys))
+            bar_width = min(44.0, max(3.0, slot_width * 0.65))
+            label_step = max(
+                1, int(math.ceil(len(bucket_keys) / 12.0)),
+            )
+            span_seconds = max(
+                1,
+                int(
+                    (
+                        alarm_state["end"]
+                        - alarm_state["start"]
+                    ).total_seconds()
+                ),
+            )
+            for index, bucket_epoch in enumerate(bucket_keys):
+                x0 = (
+                    left
+                    + index * slot_width
+                    + (slot_width - bar_width) / 2.0
+                )
                 x1 = x0 + bar_width
                 y_bottom = top + plot_height
-                counts = alarm_state["daily"][day]
+                total = sum(buckets[bucket_epoch].values())
                 for severity in severity_order:
-                    count = counts.get(severity, 0)
+                    count = buckets[bucket_epoch].get(severity, 0)
                     if count <= 0:
                         continue
-                    bar_height = count / maximum_total * plot_height
+                    bar_height = (
+                        count / maximum_total * plot_height
+                    )
                     y_top = y_bottom - bar_height
                     alarm_canvas.create_rectangle(
-                        x0, y_top, x1, y_bottom,
+                        x0,
+                        y_top,
+                        x1,
+                        y_bottom,
                         fill=severity_colors[severity],
-                        outline="#0d1117",
+                        outline="#ffffff",
                     )
-                    if bar_height >= 13:
-                        alarm_canvas.create_text(
-                            (x0 + x1) / 2.0,
-                            (y_top + y_bottom) / 2.0,
-                            text=str(count),
-                            fill="#000000",
-                            font=("Consolas", 8, "bold"),
-                        )
                     y_bottom = y_top
-                label_step = max(1, math.ceil(len(days) / 12))
-                if day_index % label_step == 0 or day_index == len(days) - 1:
+                if total and bar_width >= 16:
                     alarm_canvas.create_text(
                         (x0 + x1) / 2.0,
-                        height - bottom + 7,
-                        text=day[5:],
-                        fill="#c9d1d9",
-                        font=("Consolas", 8),
-                        anchor="n",
+                        max(top + 7, y_bottom - 8),
+                        text=str(total),
+                        fill=palette["text"],
+                        font=("Segoe UI", 8, "bold"),
+                    )
+                if (
+                    index % label_step == 0
+                    or index == len(bucket_keys) - 1
+                ):
+                    alarm_canvas.create_text(
+                        (x0 + x1) / 2.0,
+                        height - 9,
+                        text=bucket_text(
+                            bucket_epoch, span_seconds,
+                        ),
+                        fill=palette["muted"],
+                        font=("Segoe UI", 8),
+                        anchor="s",
                     )
 
         def load_filtered_data(show_error=False):
             for item in tree.get_children():
                 tree.delete(item)
-            try:
-                range_start = start_date.get_date()
-                range_end = end_date.get_date()
-            except Exception:
-                range_end = datetime.date.today()
-                range_start = range_end - datetime.timedelta(days=45)
-            if range_start > range_end:
-                range_start, range_end = range_end, range_start
-
+            start, end = selected_time_range()
+            bucket_seconds, bucket_description = (
+                bucket_configuration(start, end)
+            )
             self._ensure_alarm_files()
-            filtered_rows = []
+            filtered = []
             try:
                 with open(
                     self.alarm_history_file,
@@ -4919,234 +9393,497 @@ class SCADAMainUI:
                         if len(row) < 5:
                             continue
                         try:
-                            row_date = datetime.datetime.strptime(
-                                row[0].strip(), "%Y-%m-%d",
-                            ).date()
+                            timestamp = datetime.datetime.strptime(
+                                f"{row[0].strip()} {row[1].strip()}",
+                                "%Y-%m-%d %H:%M:%S",
+                            )
                         except ValueError:
                             continue
-                        if range_start <= row_date <= range_end:
-                            filtered_rows.append(row[:5])
+                        if start <= timestamp <= end:
+                            filtered.append((timestamp, row[:5]))
             except Exception as exc:
                 if show_error:
                     messagebox.showerror(
-                        "File Error",
-                        f"Error reading AlarmHistory.csv: {exc}",
+                        "Alarm History",
+                        f"Unable to read AlarmHistory.csv:\n{exc}",
                         parent=alarm_win,
                     )
 
-            daily = {}
-            for row in filtered_rows:
+            buckets = {}
+            for timestamp, row in filtered:
                 status = str(row[4]).strip().upper()
                 if status not in severity_order:
                     status = "NORMAL"
-                counts = daily.setdefault(
-                    row[0],
-                    {severity: 0 for severity in severity_order},
+                bucket_epoch = (
+                    int(timestamp.timestamp()) // bucket_seconds
+                ) * bucket_seconds
+                counts = buckets.setdefault(
+                    bucket_epoch,
+                    {
+                        severity: 0
+                        for severity in severity_order
+                    },
                 )
                 counts[status] += 1
 
-            alarm_state["rows"] = filtered_rows
-            alarm_state["daily"] = daily
-            for row in reversed(filtered_rows):
+            alarm_state.update({
+                "rows": [row for _timestamp, row in filtered],
+                "buckets": buckets,
+                "start": start,
+                "end": end,
+                "bucket_seconds": bucket_seconds,
+            })
+            for _timestamp, row in reversed(filtered):
                 status = str(row[4]).strip().upper()
-                tag = status if status in severity_order else "NORMAL"
-                tree.insert("", "end", values=tuple(row), tags=(tag,))
-            if not filtered_rows:
-                tree.insert(
-                    "", "end",
-                    values=(
-                        "-", "-", "SYSTEM",
-                        f"No data between {range_start} and {range_end}",
-                        "NORMAL",
-                    ),
-                    tags=("NORMAL",),
+                tag = (
+                    status if status in severity_order
+                    else "NORMAL"
                 )
-            summary_label.config(
-                text=f"{len(filtered_rows)} events • auto-refresh 2s",
+                tree.insert(
+                    "", "end", values=tuple(row), tags=(tag,),
+                )
+            if not filtered:
+                tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        "-",
+                        "-",
+                        "SYSTEM",
+                        (
+                            "No alarm events between "
+                            f"{start:%Y-%m-%d %H:%M} and "
+                            f"{end:%Y-%m-%d %H:%M}"
+                        ),
+                        "NO DATA",
+                    ),
+                    tags=("EMPTY",),
+                )
+            summary_label.configure(
+                text=(
+                    f"{len(filtered)} events  •  "
+                    "auto-refresh 15 seconds"
+                )
             )
+            range_label.configure(
+                text=(
+                    f"{start:%Y-%m-%d %H:%M}  to  "
+                    f"{end:%Y-%m-%d %H:%M}"
+                )
+            )
+            bucket_label.configure(text=bucket_description)
             draw_alarm_graph()
 
-        def export_to_csv():
-            if not alarm_state["rows"]:
+        def export_excel():
+            rows = alarm_state["rows"]
+            if not rows:
                 messagebox.showwarning(
-                    "Export Warning",
-                    "No alarm data in the selected range.",
+                    "Export Excel",
+                    "No alarm events in the selected time range.",
                     parent=alarm_win,
                 )
                 return
-            file_path = filedialog.asksaveasfilename(
-                defaultextension=".csv",
-                filetypes=[("CSV Files", "*.csv"), ("All Files", "*.*")],
-                title="Save Alarm History Data",
-                initialfile=(
-                    f"Export_AlarmHistory_{start_date.get_date()}_"
-                    f"to_{end_date.get_date()}.csv"
-                ),
+            start = alarm_state["start"]
+            end = alarm_state["end"]
+            path = filedialog.asksaveasfilename(
                 parent=alarm_win,
+                title="Export Alarm History to Excel",
+                defaultextension=".xlsx",
+                filetypes=[("Excel Workbook", "*.xlsx")],
+                initialfile=(
+                    f"Alarm_History_{start:%Y%m%d_%H%M}_"
+                    f"to_{end:%Y%m%d_%H%M}.xlsx"
+                ),
             )
-            if not file_path:
+            if not path:
                 return
             try:
-                with open(
-                    file_path, mode="w", newline="", encoding="utf-8",
-                ) as handle:
-                    writer = csv.writer(handle)
-                    writer.writerow([
-                        "DATE", "TIME", "DEVICE",
-                        "ALARM DESCRIPTION", "STATUS",
-                    ])
-                    writer.writerows(alarm_state["rows"])
+                saved = _write_xlsx(
+                    path,
+                    "Alarm History",
+                    [
+                        "Date",
+                        "Time",
+                        "Device",
+                        "Alarm Description",
+                        "Status",
+                    ],
+                    rows,
+                )
                 messagebox.showinfo(
-                    "Export Successful",
-                    f"Data exported successfully to:\n{file_path}",
+                    "Export Excel",
+                    f"Excel workbook created:\n{saved}",
                     parent=alarm_win,
                 )
             except Exception as exc:
                 messagebox.showerror(
-                    "Export Failed",
-                    f"Failed saving file: {exc}",
+                    "Export Excel",
+                    f"Unable to create workbook:\n{exc}",
                     parent=alarm_win,
                 )
 
-        tk.Button(
-            filter_frame,
-            text="Apply Filter",
-            font=("Consolas", 10, "bold"),
-            bg="#0066cc",
-            fg="white",
-            bd=0,
-            padx=15,
-            pady=5,
-            cursor="hand2",
-            command=lambda: load_filtered_data(True),
-        ).pack(side="left", padx=10, pady=12)
-        tk.Button(
-            filter_frame,
-            text="Export Data",
-            font=("Consolas", 10, "bold"),
-            bg="#00994d",
-            fg="white",
-            bd=0,
-            padx=15,
-            pady=5,
-            cursor="hand2",
-            command=export_to_csv,
-        ).pack(side="left", padx=5, pady=12)
+        def apply_period(_event=None):
+            load_filtered_data(True)
 
         def auto_refresh():
             if not alarm_win.winfo_exists():
                 return
-            load_filtered_data(False)
-            alarm_win.after(2000, auto_refresh)
+            if range_var.get() != "Custom":
+                load_filtered_data(False)
+            alarm_win.after(15000, auto_refresh)
 
+        apply_button.configure(command=apply_period)
+        export_button.configure(command=export_excel)
+        range_combo.bind("<<ComboboxSelected>>", apply_period)
         alarm_canvas.bind(
             "<Configure>", lambda _event: draw_alarm_graph(),
         )
         load_filtered_data(True)
-        alarm_win.after(2000, auto_refresh)
+        alarm_win.after(15000, auto_refresh)
 
     def action_alarm(self):
+        """Open the live alarm explorer with one-second refresh."""
+        existing = getattr(self, "_realtime_alarm_window", None)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.deiconify()
+                    existing.lift()
+                    existing.focus_force()
+                    return
+            except tk.TclError:
+                pass
+
+        palette = {
+            "navy": "#16324f",
+            "navy_dark": "#10263c",
+            "toolbar": "#e7ebf0",
+            "workspace": "#cfd5dc",
+            "panel": "#ffffff",
+            "border": "#9aa7b4",
+            "text": "#17212b",
+            "muted": "#5f6b76",
+            "green": "#20834e",
+            "red": "#b32929",
+            "orange": "#bf6516",
+            "yellow": "#8a6500",
+        }
         alarm_window = tk.Toplevel(self.root)
-        alarm_window.title("Alarm Management System")
-
-        self._make_toplevel_responsive(alarm_window, 'Real-Time Alarm', fullscreen=True)
-        alarm_window.configure(bg="#2b2b2b")
-
-        alarm_window.bind("<Escape>", lambda e: alarm_window.destroy())
-
-        header_frame = tk.Frame(alarm_window, bg="#1e1e1e", height=60)
-        header_frame.pack(fill="x", side="top", padx=0, pady=0)
-
-        title_label = tk.Label(
-            header_frame,
-            text="🚨 REAL-TIME ALARM REPORT",
-            font=("Consolas", 18, "bold"),
-            fg="#ff4d4d",
-            bg="#1e1e1e",
+        self._realtime_alarm_window = alarm_window
+        self._make_toplevel_responsive(
+            alarm_window,
+            "Real-Time Alarm Explorer",
+            fullscreen=False,
         )
-        title_label.pack(side="left", padx=25, pady=15)
+        alarm_window.configure(bg=palette["workspace"])
 
-        close_btn = tk.Button(
-            header_frame,
-            text=f"✕ {'Close (ESC)'}",
-            font=("Consolas", 10, "bold"),
-            bg="#ff4d4d",
-            fg="white",
-            bd=0,
-            padx=15,
-            pady=8,
+        def close_alarm():
+            self._realtime_alarm_window = None
+            alarm_window.destroy()
+
+        alarm_window.bind("<Escape>", lambda _event: close_alarm())
+        alarm_window.protocol("WM_DELETE_WINDOW", close_alarm)
+
+        title_bar = tk.Frame(
+            alarm_window,
+            bg=palette["navy"],
+            height=58,
+        )
+        title_bar.pack(fill="x")
+        title_group = tk.Frame(title_bar, bg=palette["navy"])
+        title_group.pack(side="left", padx=18, pady=8)
+        tk.Label(
+            title_group,
+            text="REAL-TIME ALARM EXPLORER",
+            bg=palette["navy"],
+            fg="#ffffff",
+            font=("Segoe UI", 16, "bold"),
+            anchor="w",
+        ).pack(fill="x")
+        tk.Label(
+            title_group,
+            text=(
+                "Current IEC-104 and engineering alarms • "
+                "live active-alarm state from Alarm.csv"
+            ),
+            bg=palette["navy"],
+            fg="#c8d7e6",
+            font=("Segoe UI", 9),
+            anchor="w",
+        ).pack(fill="x")
+        tk.Button(
+            title_bar,
+            text="Close",
+            command=close_alarm,
+            font=("Segoe UI", 10, "bold"),
+            bg="#f4f6f8",
+            fg=palette["text"],
+            activebackground="#ffffff",
+            relief="raised",
+            bd=1,
+            padx=18,
+            pady=5,
             cursor="hand2",
-            activebackground="#cc0000",
-            activeforeground="white",
-            command=alarm_window.destroy,
+        ).pack(side="right", padx=18, pady=13)
+
+        toolbar = tk.Frame(
+            alarm_window,
+            bg=palette["toolbar"],
+            bd=1,
+            relief="raised",
         )
-        close_btn.pack(side="right", padx=20, pady=12)
-
-        grid_frame = tk.Frame(alarm_window, bg="#2b2b2b", bd=2, relief="groove")
-        grid_frame.pack(fill="both", expand=True, padx=25, pady=20)
-
-        style = ttk.Style()
-        style.theme_use("default")
-
-        style.configure(
-            "AlarmGrid.Treeview.Heading",
-            background="#1e1e1e",
-            foreground="#ffffff",
-            font=("Consolas", 11, "bold"),
-            rowheight=35,
+        toolbar.pack(fill="x", padx=10, pady=(8, 4))
+        refresh_button = tk.Button(
+            toolbar,
+            text="Refresh Now",
+            bg="#f8f9fa",
+            fg=palette["text"],
+            font=("Segoe UI", 9, "bold"),
+            relief="raised",
+            bd=1,
+            padx=12,
+            pady=4,
+            cursor="hand2",
         )
-        style.map("AlarmGrid.Treeview.Heading", background=[("active", "#333333")])
+        refresh_button.pack(side="left", padx=(10, 4), pady=7)
+        summary_label = tk.Label(
+            toolbar,
+            text="Loading active alarms...",
+            bg=palette["toolbar"],
+            fg=palette["navy"],
+            font=("Segoe UI", 10, "bold"),
+        )
+        summary_label.pack(side="left", padx=12)
+        tk.Label(
+            toolbar,
+            text="LIVE REFRESH ACTIVE  •  1 second",
+            bg=palette["toolbar"],
+            fg=palette["green"],
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="right", padx=14)
 
+        severity_bar = tk.Frame(
+            alarm_window,
+            bg=palette["workspace"],
+        )
+        severity_bar.pack(fill="x", padx=10, pady=3)
+        tk.Label(
+            severity_bar,
+            text="Active severity",
+            bg=palette["workspace"],
+            fg=palette["muted"],
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="left", padx=(2, 8))
+        severity_styles = {
+            "CRITICAL": ("#f7d8d8", "#8f1f1f"),
+            "URGENT": ("#f9dfca", "#8e4408"),
+            "WARNING": ("#fff0b8", "#735300"),
+            "NORMAL": ("#dcefe3", "#145d36"),
+        }
+        severity_labels = {}
+        for severity in ("CRITICAL", "URGENT", "WARNING", "NORMAL"):
+            background, foreground = severity_styles[severity]
+            label = tk.Label(
+                severity_bar,
+                text=f"{severity}  0",
+                bg=background,
+                fg=foreground,
+                font=("Segoe UI", 9, "bold"),
+                relief="solid",
+                bd=1,
+                padx=9,
+                pady=3,
+            )
+            label.pack(side="left", padx=3)
+            severity_labels[severity] = label
+
+        table_panel = tk.Frame(
+            alarm_window,
+            bg=palette["panel"],
+            bd=1,
+            relief="solid",
+        )
+        table_panel.pack(
+            fill="both",
+            expand=True,
+            padx=10,
+            pady=(2, 4),
+        )
+        tk.Label(
+            table_panel,
+            text="ACTIVE ALARM LIST",
+            bg=palette["panel"],
+            fg=palette["navy"],
+            font=("Segoe UI", 11, "bold"),
+            anchor="w",
+            padx=10,
+            pady=8,
+        ).pack(fill="x")
+
+        grid_frame = tk.Frame(table_panel, bg=palette["panel"])
+        grid_frame.pack(fill="both", expand=True, padx=8, pady=(0, 8))
+        style = ttk.Style(alarm_window)
         style.configure(
-            "AlarmGrid.Treeview",
-            background="#2b2b2b",
+            "RealtimeAlarm.Treeview.Heading",
+            background=palette["navy_dark"],
             foreground="#ffffff",
-            fieldbackground="#2b2b2b",
-            rowheight=30,
-            font=("Consolas", 10),
+            font=("Segoe UI", 9, "bold"),
+            padding=(7, 7),
+            relief="raised",
+        )
+        style.map(
+            "RealtimeAlarm.Treeview.Heading",
+            background=[("active", palette["navy"])],
+        )
+        style.configure(
+            "RealtimeAlarm.Treeview",
+            background=palette["panel"],
+            foreground=palette["text"],
+            fieldbackground=palette["panel"],
+            rowheight=29,
+            font=("Segoe UI", 9),
             borderwidth=0,
         )
-        style.map("AlarmGrid.Treeview", background=[("selected", "#444444")])
+        style.map(
+            "RealtimeAlarm.Treeview",
+            background=[("selected", "#c8def1")],
+            foreground=[("selected", palette["text"])],
+        )
 
-        columns = ("tanggal", "jam", "device", "description", "severity")
+        columns = (
+            "tanggal",
+            "jam",
+            "device",
+            "description",
+            "severity",
+        )
         tree = ttk.Treeview(
             grid_frame,
             columns=columns,
             show="headings",
-            style="AlarmGrid.Treeview",
+            style="RealtimeAlarm.Treeview",
         )
+        vertical = ttk.Scrollbar(
+            grid_frame,
+            orient="vertical",
+            command=tree.yview,
+        )
+        tree.configure(yscrollcommand=vertical.set)
+        grid_frame.grid_rowconfigure(0, weight=1)
+        grid_frame.grid_columnconfigure(0, weight=1)
+        tree.grid(row=0, column=0, sticky="nsew")
+        vertical.grid(row=0, column=1, sticky="ns")
 
         tree.heading("tanggal", text="DATE")
         tree.heading("jam", text="TIME")
         tree.heading("device", text="DEVICE")
         tree.heading("description", text="ALARM DESCRIPTION")
         tree.heading("severity", text="STATUS")
-
-        tree.column("tanggal", width=120, anchor="center")
-        tree.column("jam", width=100, anchor="center")
-        tree.column("device", width=150, anchor="center")
-        tree.column("description", width=650, anchor="w")
-        tree.column("severity", width=140, anchor="center")
-
+        tree.column("tanggal", width=120, minwidth=90, anchor="center")
+        tree.column("jam", width=100, minwidth=80, anchor="center")
+        tree.column("device", width=150, minwidth=110, anchor="center")
+        tree.column("description", width=650, minwidth=260, anchor="w")
+        tree.column("severity", width=140, minwidth=100, anchor="center")
         self._bind_mousewheel(tree)
-        self._fit_tree_columns(tree, columns, [85, 80, 110, 180, 90], [1, 1, 1.2, 5, 1])
-        tree.pack(side="left", fill="both", expand=True)
+        self._fit_tree_columns(
+            tree,
+            columns,
+            [90, 80, 110, 260, 100],
+            [1, 1, 1.3, 5, 1.2],
+        )
+        tree.tag_configure(
+            "CRITICAL",
+            background="#f7d8d8",
+            foreground="#8f1f1f",
+            font=("Segoe UI", 9, "bold"),
+        )
+        tree.tag_configure(
+            "URGENT",
+            background="#f9dfca",
+            foreground="#8e4408",
+            font=("Segoe UI", 9, "bold"),
+        )
+        tree.tag_configure(
+            "WARNING",
+            background="#fff0b8",
+            foreground="#735300",
+            font=("Segoe UI", 9, "bold"),
+        )
+        tree.tag_configure(
+            "NORMAL",
+            background="#dcefe3",
+            foreground="#145d36",
+            font=("Segoe UI", 9),
+        )
 
-        tree.tag_configure("CRITICAL", background="#660000", foreground="#ff9999", font=("Consolas", 10, "bold"))
-        tree.tag_configure("WARNING", background="#665200", foreground="#ffff99", font=("Consolas", 10, "bold"))
-        tree.tag_configure("URGENT", background="#663300", foreground="#ffcc66", font=("Consolas", 10, "bold"))
-        tree.tag_configure("NORMAL", background="#004d1a", foreground="#80ff80", font=("Consolas", 10))
+        status_frame = tk.Frame(
+            alarm_window,
+            bg=palette["toolbar"],
+            bd=1,
+            relief="sunken",
+        )
+        status_frame.pack(fill="x", padx=10, pady=(0, 8))
+        source_label = tk.Label(
+            status_frame,
+            text="Source: Alarm.csv",
+            bg=palette["toolbar"],
+            fg=palette["muted"],
+            font=("Segoe UI", 9),
+        )
+        source_label.pack(side="left", padx=10, pady=4)
+        refreshed_label = tk.Label(
+            status_frame,
+            text="Waiting for refresh",
+            bg=palette["toolbar"],
+            fg=palette["muted"],
+            font=("Segoe UI", 9),
+        )
+        refreshed_label.pack(side="right", padx=10, pady=4)
 
-        csv_filename = "Alarm.csv"
         self._ensure_alarm_files()
 
-        def refresh_tree():
+        def refresh_tree(schedule=True):
             self.refresh_real_time_alarm_tree(tree)
-            if alarm_window.winfo_exists():
-                alarm_window.after(1000, refresh_tree)
+            counts = {
+                "CRITICAL": 0,
+                "URGENT": 0,
+                "WARNING": 0,
+                "NORMAL": 0,
+            }
+            active_count = 0
+            for item in tree.get_children():
+                values = tree.item(item, "values")
+                if len(values) < 5:
+                    continue
+                description = str(values[3]).strip()
+                status = str(values[4]).strip().upper()
+                if description == "No active alarms":
+                    continue
+                if status not in counts:
+                    status = "NORMAL"
+                counts[status] += 1
+                active_count += 1
+            for severity, label in severity_labels.items():
+                label.configure(text=f"{severity}  {counts[severity]}")
+            summary_label.configure(
+                text=(
+                    f"{active_count:,} active alarm"
+                    f"{'' if active_count == 1 else 's'}"
+                ),
+                fg=palette["red"] if active_count else palette["green"],
+            )
+            refreshed_label.configure(
+                text=f"Last refresh: {datetime.datetime.now():%H:%M:%S}"
+            )
+            if schedule:
+                try:
+                    if alarm_window.winfo_exists():
+                        alarm_window.after(1000, refresh_tree)
+                except tk.TclError:
+                    pass
 
-        # Initial load and continuous real-time refresh.
-        self.refresh_real_time_alarm_tree(tree)
+        refresh_button.configure(command=lambda: refresh_tree(False))
+        refresh_tree(False)
         alarm_window.after(1000, refresh_tree)
 
     def action_prev_tab(self):
@@ -5158,25 +9895,371 @@ class SCADAMainUI:
         self.switch_tab(self.tab_keys[self.current_tab_index])
 
     def action_edit(self):
-        messagebox.showinfo("Edit Mode", "UI Edit Mode unlocked. Double click components to modify properties.")
+        if not self.require_permission(
+            "crud",
+            "edit SCADA component bindings",
+            parent=self.root,
+        ):
+            return
+        self.open_settings_window()
 
     def action_zoom(self):
-        is_zoomed = self.root.attributes("-zoomed")
-        self.root.attributes("-zoomed", not is_zoomed)
+        def restore_readable_window():
+            screen_width = self.root.winfo_screenwidth()
+            screen_height = self.root.winfo_screenheight()
+            width = min(
+                max(1120, int(screen_width * 0.82)),
+                max(screen_width - 40, 900),
+            )
+            height = min(
+                max(650, int(screen_height * 0.82)),
+                max(screen_height - 80, 600),
+            )
+            x = max((screen_width - width) // 2, 0)
+            y = max((screen_height - height) // 2, 0)
+            self.root.geometry(f"{width}x{height}+{x}+{y}")
+
+        try:
+            is_zoomed = bool(self.root.attributes("-zoomed"))
+            self.root.attributes("-zoomed", not is_zoomed)
+            if is_zoomed:
+                self.root.after(120, restore_readable_window)
+        except tk.TclError:
+            try:
+                is_zoomed = self.root.state() == "zoomed"
+                self.root.state("normal" if is_zoomed else "zoomed")
+                if is_zoomed:
+                    self.root.after(120, restore_readable_window)
+            except tk.TclError as exc:
+                messagebox.showerror(
+                    "Zoom",
+                    f"Window zoom is not supported by this desktop:\n{exc}",
+                    parent=self.root,
+                )
+
+    def _capture_current_view(self):
+        """Capture exactly the visible SCADA main window for preview/printing."""
+        self.root.update_idletasks()
+        left = self.root.winfo_rootx()
+        top = self.root.winfo_rooty()
+        width = self.root.winfo_width()
+        height = self.root.winfo_height()
+        if width < 2 or height < 2:
+            raise RuntimeError("The SCADA window has no visible capture area.")
+        return ImageGrab.grab(
+            bbox=(left, top, left + width, top + height),
+            all_screens=True,
+        ).convert("RGB")
+
+    @staticmethod
+    def _save_view_pdf(image, path):
+        image.convert("RGB").save(path, "PDF", resolution=150.0)
+
+    def _offer_print_pdf_save(self, image, detail, parent=None):
+        save_copy = messagebox.askyesno(
+            "Printer Unavailable",
+            (
+                f"The system printer did not accept the job.\n\n{detail}\n\n"
+                "Save a print-ready PDF instead?"
+            ),
+            parent=parent or self.root,
+        )
+        if not save_copy:
+            return
+        path = filedialog.asksaveasfilename(
+            parent=parent or self.root,
+            title="Save Print-Ready PDF",
+            defaultextension=".pdf",
+            filetypes=[("PDF Document", "*.pdf")],
+            initialfile=f"SCADA_View_{datetime.datetime.now():%Y%m%d_%H%M%S}.pdf",
+        )
+        if not path:
+            return
+        try:
+            self._save_view_pdf(image, path)
+            messagebox.showinfo(
+                "PDF Saved",
+                f"Print-ready PDF saved to:\n{path}",
+                parent=parent or self.root,
+            )
+        except Exception as exc:
+            messagebox.showerror(
+                "PDF Export Failed",
+                str(exc),
+                parent=parent or self.root,
+            )
+
+    def _print_captured_view(self, image, parent=None):
+        temporary = tempfile.NamedTemporaryFile(
+            prefix="SCADA_BONT_Print_",
+            suffix=".pdf",
+            delete=False,
+        )
+        pdf_path = temporary.name
+        temporary.close()
+        try:
+            self._save_view_pdf(image, pdf_path)
+        except Exception as exc:
+            try:
+                os.unlink(pdf_path)
+            except OSError:
+                pass
+            messagebox.showerror(
+                "Print Failed",
+                f"Could not prepare the SCADA view:\n{exc}",
+                parent=parent or self.root,
+            )
+            return
+
+        error_detail = ""
+        if sys.platform.startswith("win") and hasattr(os, "startfile"):
+            try:
+                os.startfile(pdf_path, "print")
+                self.root.after(
+                    120000,
+                    lambda path=pdf_path: (
+                        os.unlink(path) if os.path.exists(path) else None
+                    ),
+                )
+                messagebox.showinfo(
+                    "Print Submitted",
+                    "The current SCADA view was submitted to the default printer.",
+                    parent=parent or self.root,
+                )
+                return
+            except Exception as exc:
+                error_detail = str(exc)
+        else:
+            print_command = shutil.which("lp")
+            if print_command:
+                try:
+                    result = subprocess.run(
+                        [print_command, pdf_path],
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                    )
+                    if result.returncode == 0:
+                        messagebox.showinfo(
+                            "Print Submitted",
+                            (result.stdout or "The current SCADA view was submitted.").strip(),
+                            parent=parent or self.root,
+                        )
+                        try:
+                            os.unlink(pdf_path)
+                        except OSError:
+                            pass
+                        return
+                    error_detail = (
+                        result.stderr or result.stdout or
+                        f"Print command exited with status {result.returncode}."
+                    ).strip()
+                except Exception as exc:
+                    error_detail = str(exc)
+            else:
+                error_detail = "No supported system print command was found."
+
+        try:
+            os.unlink(pdf_path)
+        except OSError:
+            pass
+        self._offer_print_pdf_save(image, error_detail, parent=parent)
 
     def action_print(self):
-        messagebox.showinfo("Print Command", "Sending current active SCADA view to local system printer...")
+        try:
+            image = self._capture_current_view()
+        except Exception as exc:
+            messagebox.showerror(
+                "Print Failed",
+                f"Could not capture the current SCADA view:\n{exc}",
+                parent=self.root,
+            )
+            return
+        self._print_captured_view(image, parent=self.root)
 
     def action_preview(self):
-        messagebox.showinfo("Print Preview", "Opening Print Preview window...")
+        existing = getattr(self, "_print_preview_window", None)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.deiconify()
+                    existing.lift()
+                    existing.focus_force()
+                    return
+            except tk.TclError:
+                pass
+
+        try:
+            captured = self._capture_current_view()
+        except Exception as exc:
+            messagebox.showerror(
+                "Print Preview",
+                f"Could not capture the current SCADA view:\n{exc}",
+                parent=self.root,
+            )
+            return
+
+        preview = tk.Toplevel(self.root)
+        self._print_preview_window = preview
+        self._make_toplevel_responsive(
+            preview,
+            "SCADA BONT — Print Preview",
+            fullscreen=False,
+        )
+        preview.configure(bg="#d4d0c8")
+        preview.minsize(760, 520)
+
+        state = {"source": captured, "photo": None, "resize_job": None}
+        toolbar = tk.Frame(preview, bg="#ece9d8", bd=1, relief="raised")
+        toolbar.pack(fill="x", side="top")
+        tk.Label(
+            toolbar,
+            text="Print Preview — Current SCADA View",
+            bg="#ece9d8",
+            fg="#000080",
+            font=("Segoe UI", 11, "bold"),
+        ).pack(side="left", padx=12, pady=8)
+
+        canvas = tk.Canvas(
+            preview,
+            bg="#666666",
+            highlightbackground="#7f7f7f",
+            highlightthickness=1,
+        )
+        canvas.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        image_item = canvas.create_image(0, 0, anchor="nw")
+
+        status_var = tk.StringVar()
+        tk.Label(
+            toolbar,
+            textvariable=status_var,
+            bg="#ece9d8",
+            fg="#444444",
+            font=("Segoe UI", 9),
+        ).pack(side="left", padx=10)
+
+        def render_preview():
+            state["resize_job"] = None
+            canvas.update_idletasks()
+            available_width = max(canvas.winfo_width() - 28, 320)
+            available_height = max(canvas.winfo_height() - 28, 240)
+            image = state["source"].copy()
+            image.thumbnail(
+                (available_width, available_height),
+                getattr(Image, "Resampling", Image).LANCZOS,
+            )
+            state["photo"] = ImageTk.PhotoImage(image)
+            canvas.itemconfigure(image_item, image=state["photo"])
+            canvas.coords(
+                image_item,
+                max((canvas.winfo_width() - image.width) // 2, 0),
+                max((canvas.winfo_height() - image.height) // 2, 0),
+            )
+            status_var.set(
+                f"{state['source'].width} × {state['source'].height} px"
+            )
+
+        def schedule_render(_event=None):
+            if state["resize_job"] is not None:
+                try:
+                    preview.after_cancel(state["resize_job"])
+                except tk.TclError:
+                    pass
+            state["resize_job"] = preview.after(80, render_preview)
+
+        def refresh_capture():
+            try:
+                preview.withdraw()
+                self.root.update()
+                state["source"] = self._capture_current_view()
+            except Exception as exc:
+                messagebox.showerror(
+                    "Print Preview",
+                    f"Could not refresh the current SCADA view:\n{exc}",
+                    parent=self.root,
+                )
+            finally:
+                preview.deiconify()
+                preview.lift()
+            schedule_render()
+
+        def export_pdf():
+            path = filedialog.asksaveasfilename(
+                parent=preview,
+                title="Export Current View",
+                defaultextension=".pdf",
+                filetypes=[("PDF Document", "*.pdf")],
+                initialfile=f"SCADA_View_{datetime.datetime.now():%Y%m%d_%H%M%S}.pdf",
+            )
+            if not path:
+                return
+            try:
+                self._save_view_pdf(state["source"], path)
+                messagebox.showinfo(
+                    "PDF Saved",
+                    f"Print-ready PDF saved to:\n{path}",
+                    parent=preview,
+                )
+            except Exception as exc:
+                messagebox.showerror(
+                    "PDF Export Failed",
+                    str(exc),
+                    parent=preview,
+                )
+
+        def close_preview():
+            self._print_preview_window = None
+            preview.destroy()
+
+        for text, command in (
+            ("Refresh", refresh_capture),
+            ("Export PDF", export_pdf),
+            ("Print", lambda: self._print_captured_view(
+                state["source"],
+                parent=preview,
+            )),
+            ("Close", close_preview),
+        ):
+            tk.Button(
+                toolbar,
+                text=text,
+                command=command,
+                bg="#ece9d8",
+                fg="#000000",
+                font=("Segoe UI", 9, "bold"),
+                relief="raised",
+                bd=1,
+                padx=10,
+                pady=4,
+            ).pack(side="right", padx=(0, 6), pady=5)
+
+        canvas.bind("<Configure>", schedule_render, add="+")
+        preview.bind("<Escape>", lambda _event: close_preview())
+        preview.protocol("WM_DELETE_WINDOW", close_preview)
+        preview.after(100, render_preview)
 
     def action_flash(self):
-        def blink():
-            for _ in range(6):
-                self.alarm_label.config(bg="#ffff00" if _ % 2 == 0 else "#cc0000")
-                time.sleep(0.2)
-            self.update_alarm_ui()
-        threading.Thread(target=blink, daemon=True).start()
+        if getattr(self, "_flash_after_id", None) is not None:
+            return
+
+        def blink(step=0):
+            if step >= 6:
+                self._flash_after_id = None
+                self.update_alarm_ui()
+                return
+            try:
+                self.alarm_label.config(
+                    bg="#ffff00" if step % 2 == 0 else "#cc0000"
+                )
+            except tk.TclError:
+                self._flash_after_id = None
+                return
+            self._flash_after_id = self.root.after(
+                200,
+                lambda: blink(step + 1),
+            )
+
+        blink()
 
 
 # ==============================================================================
@@ -5948,24 +11031,9 @@ class SCADAMainUI:
         image_holder.pack(fill="both", expand=True, padx=5, pady=5)
 
         try:
-            img_path = f"G{gen_num}MONITOR.jpg.png"
-
-            if not os.path.exists(img_path):
-                img_path = os.path.join(
-                    APP_DIR, f"G{gen_num}MONITOR.jpg.png"
-                )
-
-            if not os.path.exists(img_path):
-                fallback = (
-                    "G1MONITOR.jpg.png"
-                    if gen_num == 1
-                    else "G1MONITOR.jpg.png"
-                )
-                img_path = (
-                    fallback
-                    if os.path.exists(fallback)
-                    else os.path.join(APP_DIR, fallback)
-                )
+            img_path = os.path.join(
+                APP_DIR, f"G{gen_num}MONITOR.jpg.png"
+            )
 
             if os.path.exists(img_path):
                 pil_img = Image.open(img_path)
@@ -6233,7 +11301,7 @@ class SCADAMainUI:
             "Complex voltage OC",
             "Over voltage",
             "Stator earthing",
-            "Lose magnetism",
+            "Loss of magnetism",
             "Rotor earthing",
         ]
 
@@ -6292,13 +11360,14 @@ class SCADAMainUI:
 
             outer = lamp.create_oval(
                 5, 5, 29, 29,
-                outline=RED,
+                outline=MUTED,
                 width=2
             )
 
             inner = lamp.create_oval(
                 10, 10, 24, 24,
-                outline="#4a1b20",
+                outline="#273532",
+                fill="#273532",
                 width=1
             )
 
@@ -6764,24 +11833,32 @@ class SCADAMainUI:
                                     lambda _event, bk=binding_key: self._open_binding_dialog(bk, "variables"))
             canvas.tag_raise("system_config_variable")
 
-            feeder_breakers = [180, 247, 315, 386, 455, 525, 595,
-                               870, 940, 1012, 1085, 1162, 1240, 1317]
+            # Exact centres of the fourteen feeder breaker bodies in
+            # SYSTEMCONFIG_DARK.png (native 1536x1024 coordinates). Keep this
+            # order identical to CARD_POINT_MAP / the Run Monitor feeder order.
+            feeder_breakers = [
+                245.0, 315.0, 385.0, 455.0, 525.0, 593.0, 663.0,
+                872.0, 943.0, 1013.0, 1085.0, 1162.0, 1239.0, 1316.0,
+            ]
+            assert len(feeder_breakers) == 14
             for card_no, bx in enumerate(feeder_breakers, 1):
                 item = canvas.create_rectangle(
-                    (bx - 7) * sx, 349 * sy, (bx + 7) * sx, 371 * sy,
-                    fill="#ff2020", outline="#ffffff", width=1,
+                    (bx - 9.0) * sx, 337.5 * sy,
+                    (bx + 9.0) * sx, 365.5 * sy,
+                    fill="#808080", outline="#ffffff", width=1,
                     tags="system_config_status"
                 )
                 value_item = canvas.create_text(
-                    bx * sx, 360 * sy, text="0", fill="#ffffff",
+                    bx * sx, 351.5 * sy, text="?", fill="#ffffff",
                     font=("Arial", max(8, int(round(12 * min(sx, sy)))), "bold"),
                     tags="system_config_status"
                 )
                 binding_key = f"system:breaker:{card_no}"
                 self._register_ui_binding("statuses", binding_key, {
-                    "page": "System Configuration", "element": f"Breaker {card_no}",
-                    "mode": "card_status", "source_type": "card",
-                    "source_id": card_no, "field": "Q"
+                    "page": "System Configuration",
+                    "element": f"{CARD_BAY_BY_INDEX.get(card_no, f'Breaker {card_no}')} breaker",
+                    "mode": "card_status", "source_type": "status",
+                    "source_id": card_no, "field": "breaker position"
                 })
                 canvas.tag_bind(item, "<Double-Button-1>",
                                 lambda _event, bk=binding_key: self._open_binding_dialog(bk, "statuses"))
@@ -6850,24 +11927,20 @@ class SCADAMainUI:
                     canvas.itemconfig(item, text=display, fill=color)
 
             for item, card_no, value_item in getattr(self, "system_config_status_items", []):
-                value = cards.get(card_no, {}).get("Q", 0.0)
                 binding_key = f"system:breaker:{card_no}"
                 binding = self.ui_bindings.get("statuses", {}).get(binding_key, {})
-                valid = True
-                if binding.get("Source_Kind") == "rectangle_status_csv":
-                    value = self._resolve_raw_ui_binding(binding_key)
-                    valid = value is not None
+                if binding.get("Source_Kind") != "rectangle_status_csv":
+                    # A breaker without an authoritative StatusSetting row is
+                    # unknown. Never infer a switch position from analog Q/Ia.
+                    color, label = "#808080", "?"
                 else:
-                    override = self._resolve_ui_binding("statuses", binding_key)
-                    if override is not None:
-                        value = override
-                try:
-                    active = abs(float(value)) > 0.000001
-                except (TypeError, ValueError):
-                    active = False
-                active, color, label = self._status_rectangle_style(
-                    binding_key, value, active, valid=valid,
-                )
+                    value = self._resolve_raw_ui_binding(binding_key)
+                    _active, color, label = self._status_rectangle_style(
+                        binding_key,
+                        value,
+                        default_active=False,
+                        valid=value is not None,
+                    )
                 canvas.itemconfig(item, fill=color)
                 canvas.itemconfig(value_item, text=label)
 
@@ -7607,8 +12680,34 @@ class SCADAMainUI:
         self.time_label.config(text=now)
         self.root.after(1000, self.update_clock)
 
-    def trigger_reset_action(self):
-        messagebox.showinfo("Reset Action", "Communication counters and alarm flags reset.")
+    def trigger_reset_action(self, parent=None):
+        """Reset measured communication counters after an authorized confirmation."""
+        owner = parent or self.root
+        if not self.has_permission("configure"):
+            messagebox.showwarning(
+                "Access Denied",
+                "Only Admin or Developer may reset communication counters.",
+                parent=owner,
+            )
+            return False
+        if not messagebox.askyesno(
+            "Reset Communication Counters",
+            (
+                "Reset attempts, sessions, errors, received frames, "
+                "bytes, and relay update counters?\n\n"
+                "Current connection states and process data are not changed."
+            ),
+            icon="warning",
+            parent=owner,
+        ):
+            return False
+        reset_count = _reset_communication_diagnostics()
+        messagebox.showinfo(
+            "Communication Counters",
+            f"Communication counters reset for {reset_count} RTUs.",
+            parent=owner,
+        )
+        return True
 
     # ------------------------------------------------------------------
     # Unified persistent binding editor (Run/Auxiliary/System Config)
@@ -7735,6 +12834,17 @@ class SCADAMainUI:
                 if binding.get(column) != value:
                     binding[column] = value
                     changed = True
+            # Status bindings are discrete YX points. Remove stale analog
+            # engineering metadata left by older Q/Ia-backed rectangles so
+            # the persisted configuration names only its real source.
+            for column in (
+                "Type", "Min_Save_Mode", "Coefficient", "CTPT", "Tolerance",
+                "Alarm_Class", "UUp_Limit", "Up_Limit", "Down_Limit",
+                "DDown_Limit", "Formula", "Add_Offset", "Unit", "Decimals",
+            ):
+                if column in binding:
+                    binding.pop(column, None)
+                    changed = True
         self._ui_binding_setting_signature = combined_signature
         if changed:
             self._save_ui_bindings()
@@ -7772,31 +12882,401 @@ class SCADAMainUI:
             bucket[binding_key].update(prepared)
             self._save_ui_bindings()
 
-    def _default_run_binding(self, key):
-        """Describe the exact engineering point currently feeding a Run card."""
-        match = re.fullmatch(r"p(\d+)_(uab|ia|p|q)", str(key), re.I)
-        if not match:
+    def _run_monitor_point_request(self, key):
+        """Return the configured bay and physical point used by one Run widget."""
+        key = str(key or "").strip().lower()
+        match = re.fullmatch(r"p(\d+)_(uab|ia|p|q)", key, re.I)
+        if match:
+            card_no = int(match.group(1))
+            physical = {
+                "uab": "Uab", "ia": "Ia", "p": "P", "q": "Q",
+            }[match.group(2).lower()]
+            for idx, bay, ip, points in CARD_POINT_MAP:
+                if idx == card_no and physical in points:
+                    asdu, ioa = points[physical]
+                    return {
+                        "Device_Addr": ip,
+                        "Bay_Name": bay,
+                        "Physical_Name": physical,
+                        "ASDU": asdu,
+                        "IOA": ioa,
+                    }
             return {}
-        card_no = int(match.group(1))
-        field = {"uab": "Uab", "ia": "Ia", "p": "P", "q": "Q"}[match.group(2).lower()]
-        for idx, bay, ip, points in CARD_POINT_MAP:
-            if idx != card_no or field not in points:
-                continue
-            asdu, ioa = points[field]
-            with SETTING_LOCK:
-                rows = list(SETTING_REGISTRY)
-            for row in rows:
-                try:
-                    if (str(row.get("Device_Addr", "")).strip() == str(ip).strip() and
-                            int(row.get("ASDU", -1)) == int(asdu) and
-                            int(row.get("IOA", -1)) == int(ioa)):
-                        return {name: row.get(name, "") for name in
-                                ("Device_Addr", "Bay_Name", "Physical_Name", "Info_Name", "Info_Index", "ASDU", "IOA", "Unit")}
-                except Exception:
-                    continue
-            return {"Device_Addr": ip, "Bay_Name": bay, "Physical_Name": field,
-                    "ASDU": asdu, "IOA": ioa}
+
+        match = re.fullmatch(r"kv_(i|ii)_(uab|ubc|uca)", key, re.I)
+        if match:
+            wire_no = 1 if match.group(1).lower() == "i" else 2
+            phase = match.group(2).capitalize()
+            return {
+                "Device_Addr": "10.100.163.1",
+                "Bay_Name": f"Connection Wire {'I' if wire_no == 1 else 'II'}",
+                "Physical_Name": f"W{wire_no}_{phase}",
+            }
+
+        match = re.fullmatch(r"wire([12])_(uab|ia|p|q)", key, re.I)
+        if match:
+            wire_no = int(match.group(1))
+            physical = {
+                "uab": "Uab", "ia": "Ia", "p": "P", "q": "Q",
+            }[match.group(2).lower()]
+            return {
+                "Device_Addr": "10.100.163.1",
+                "Bay_Name": f"Connection Wire {'I' if wire_no == 1 else 'II'}",
+                "Physical_Name": f"W{wire_no}_{physical}",
+            }
+
+        match = re.fullmatch(
+            r"g([12])_(uab|ubc|uca|ia|ib|ic|p|q|f|cos|ue|ie)",
+            key,
+            re.I,
+        )
+        if match:
+            generator_no = int(match.group(1))
+            physical = {
+                "uab": "Uab", "ubc": "Ubc", "uca": "Uca",
+                "ia": "Ia", "ib": "Ib", "ic": "Ic",
+                "p": "P", "q": "Q", "f": "f", "cos": "cos",
+                "ue": "UE", "ie": "IE",
+            }[match.group(2).lower()]
+            return {
+                "Device_Addr": (
+                    self.GEN_1_IP if generator_no == 1 else self.GEN_2_IP
+                ),
+                "Bay_Name": (
+                    f"{generator_no}# Generator"
+                    if physical == "cos"
+                    else f"{generator_no}# Measure Control Box"
+                ),
+                "Physical_Name": physical,
+            }
         return {}
+
+    def _setting_for_run_binding(self, binding, registry=None):
+        """Resolve one Run binding to its exact active ListSetting row."""
+        if not binding:
+            return None
+        if registry is None:
+            with SETTING_LOCK:
+                registry = list(SETTING_REGISTRY)
+
+        ip = _norm_text(binding.get("Device_Addr"))
+        bay = _norm_text(binding.get("Bay_Name"))
+        physical = _norm_text(binding.get("Physical_Name"))
+        asdu_text = _norm_text(binding.get("ASDU"))
+        ioa_text = _norm_text(binding.get("IOA"))
+        try:
+            asdu = int(float(asdu_text)) if asdu_text else None
+        except (TypeError, ValueError):
+            asdu = None
+        try:
+            ioa = int(float(ioa_text)) if ioa_text else None
+        except (TypeError, ValueError):
+            ioa = None
+
+        for row in registry:
+            if ip and _norm_text(row.get("Device_Addr")) != ip:
+                continue
+            if bay and _norm_text(row.get("Bay_Name")) != bay:
+                continue
+            if physical and _norm_text(row.get("Physical_Name")) != physical:
+                continue
+            if asdu is not None and row.get("ASDU_INT") != asdu:
+                continue
+            if ioa is not None and row.get("IOA_INT") != ioa:
+                continue
+            return row
+        return None
+
+    def _complete_run_binding(self, request, registry=None):
+        """Attach all engineering fields from ListSetting to a Run point request."""
+        result = dict(request or {})
+        setting = self._setting_for_run_binding(result, registry)
+        if setting is None:
+            return result
+        fields = (
+            "Device_Addr", "Bay_Name", "Physical_Name", "Info_Name",
+            "Info_Index", "Type", "ASDU", "IOA", "Coefficient", "CTPT",
+            "Tolerance", "Add_Offset", "Formula", "Unit",
+        )
+        for name in fields:
+            result[name] = setting.get(name, result.get(name, ""))
+        return result
+
+    def _default_run_binding(self, key):
+        """Describe the exact ListSetting point currently feeding any Run value."""
+        return self._complete_run_binding(
+            self._run_monitor_point_request(key),
+        )
+
+    def _run_monitor_mapping_specs(self):
+        """Describe every displayed Run value and breaker without duplicating routing."""
+        specs = []
+
+        def add(group, name, symbol, key, value_key=None, kind="analog"):
+            specs.append({
+                "group": group,
+                "name": name,
+                "symbol": symbol,
+                "key": key,
+                "value_key": value_key or key,
+                "kind": kind,
+            })
+
+        for wire_no, roman in ((1, "I"), (2, "II")):
+            group = f"Connection Wire {roman}"
+            for suffix, symbol in (
+                ("uab", "UAB"), ("ubc", "UBC"), ("uca", "UCA"),
+            ):
+                add(group, f"KV {roman} / {symbol}", symbol,
+                    f"kv_{roman.lower()}_{suffix}")
+            for suffix, symbol in (
+                ("uab", "UAB"), ("ia", "IA"), ("p", "P"), ("q", "Q"),
+            ):
+                add(group, f"WIRE {roman} / {symbol}", symbol,
+                    f"wire{wire_no}_{suffix}")
+
+        for generator_no in (1, 2):
+            group = f"Generator {generator_no}"
+            for suffix, symbol in (
+                ("uab", "UAB"), ("ubc", "UBC"), ("uca", "UCA"),
+                ("ia", "IA"), ("ib", "IB"), ("ic", "IC"),
+                ("p", "P"), ("q", "Q"), ("f", "f"), ("cos", "COS"),
+                ("ue", "UE"), ("ie", "IE"),
+            ):
+                add(
+                    group,
+                    f"Generator {generator_no} / {symbol}",
+                    symbol,
+                    f"g{generator_no}_{suffix}",
+                )
+
+        for card_no, bay, _ip, _points in CARD_POINT_MAP:
+            for suffix, symbol in (
+                ("uab", "UAB"), ("ia", "IA"), ("p", "P"), ("q", "Q"),
+            ):
+                add(
+                    bay, f"{bay} / {symbol}", symbol,
+                    f"p{card_no}_{suffix}",
+                )
+
+        breaker_sources = [
+            ("brk_g1", "Breaker Generator 1", "g1_ia"),
+            ("brk_wire1", "Breaker Connection Wire I", "wire1_ia"),
+            ("brk_wire2", "Breaker Connection Wire II", "wire2_ia"),
+            ("brk_g2", "Breaker Generator 2", "g2_ia"),
+        ]
+        breaker_sources.extend(
+            (f"brk_d{card_no}", f"Breaker {bay}", f"p{card_no}_ia")
+            for card_no, bay, _ip, _points in CARD_POINT_MAP
+        )
+        for key, name, value_key in breaker_sources:
+            add(
+                "Breaker Indicators", name, "BRK", key,
+                value_key=value_key, kind="breaker",
+            )
+        return specs
+
+    def _run_monitor_mapping_value(self, key, binding, setting):
+        """Read the same engineered value used by the corresponding Run widget."""
+        override = self._resolve_ui_binding("variables", f"run:{key}")
+        if override is not None:
+            return override
+
+        ip = _norm_text(binding.get("Device_Addr"))
+        bay = _norm_text(binding.get("Bay_Name"))
+        physical = _norm_text(binding.get("Physical_Name"))
+        runtime_physical = (
+            _runtime_physical_name(setting) if setting is not None else physical
+        )
+        with DATA_LOCK:
+            bay_values = BAY_VALUE_STORE.get(bay, {})
+            if runtime_physical in bay_values:
+                return bay_values[runtime_physical]
+            if physical in bay_values:
+                return bay_values[physical]
+            data = DATA_STORE.get(ip, {})
+            if runtime_physical in data:
+                return data[runtime_physical]
+            if physical in data:
+                return data[physical]
+        return 0.0
+
+    def _run_monitor_raw_value(self, binding, setting):
+        """Read the raw value behind one exact Run ListSetting row."""
+        ip = _norm_text(binding.get("Device_Addr"))
+        bay = _norm_text(binding.get("Bay_Name"))
+        physical = _norm_text(binding.get("Physical_Name"))
+        runtime_physical = (
+            _runtime_physical_name(setting) if setting is not None else physical
+        )
+        with DATA_LOCK:
+            bay_values = RAW_BAY_VALUE_STORE.get(bay, {})
+            if runtime_physical in bay_values:
+                return bay_values[runtime_physical]
+            if physical in bay_values:
+                return bay_values[physical]
+            raw_values = RAW_STORE.get(ip, {})
+            if runtime_physical in raw_values:
+                return raw_values[runtime_physical]
+            if physical in raw_values:
+                return raw_values[physical]
+        return None
+
+    @staticmethod
+    def _run_monitor_number(value):
+        if value is None or value == "":
+            return "-"
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return str(value)
+        if not math.isfinite(number):
+            return "-"
+        return f"{number:.10g}"
+
+    def _run_monitor_formula_text(self, binding):
+        """Expand a configured formula into a readable engineering expression."""
+        formula = _norm_formula(binding.get("Formula"))
+        coefficient = self._run_monitor_number(binding.get("Coefficient", 1))
+        ctpt = self._run_monitor_number(binding.get("CTPT", 1))
+        offset = self._run_monitor_number(binding.get("Add_Offset", 0))
+        if formula in ("", "DIRECT", "RAW"):
+            return "RAW"
+        if formula in ("MULTIPLY", "RAW*COEFFICIENT", "COS"):
+            return f"RAW × {coefficient}"
+        if formula in (
+            "MULTIPLY_CTPT", "RAW*COEFFICIENT*CTPT", "WIRE_VOLTAGE",
+            "WIRE_CURRENT", "WIRE_POWER", "LINE_VOLTAGE", "PHASE_VOLTAGE",
+            "CURRENT_CT", "POWER", "P_TOTAL", "ROTOR_UE", "ROTOR_IE",
+        ):
+            return f"RAW × {coefficient} × {ctpt}"
+        if formula in (
+            "MULTIPLY_ADD", "RAW*COEFFICIENT+ADD_OFFSET",
+            "FREQUENCY_OFFSET",
+        ):
+            return f"RAW × {coefficient} + {offset}"
+        if formula in (
+            "MULTIPLY_CTPT_ADD", "RAW*COEFFICIENT*CTPT+ADD_OFFSET",
+        ):
+            return f"RAW × {coefficient} × {ctpt} + {offset}"
+        if formula == "ADD":
+            return f"RAW + {offset}"
+        if formula == "SUBTRACT":
+            return f"RAW - {offset}"
+        if formula.startswith("DERIVED_"):
+            return formula
+        return str(binding.get("Formula", "")).strip() or "RAW"
+
+    def _run_monitor_mapping_snapshot(self):
+        """Build live rows for the Mapping Run Monitoring maintenance window."""
+        with SETTING_LOCK:
+            registry = list(SETTING_REGISTRY)
+        with DATA_LOCK:
+            online_status = dict(VINCI_STATUS)
+
+        rows = []
+        source_cache = {}
+        for spec in self._run_monitor_mapping_specs():
+            value_key = spec["value_key"]
+            if value_key not in source_cache:
+                request = self._run_monitor_point_request(value_key)
+                default_binding = self._complete_run_binding(request, registry)
+                saved = self.ui_bindings.get("variables", {}).get(
+                    f"run:{value_key}", {}
+                )
+                selected = isinstance(saved, dict) and saved.get("mode") == "selected"
+                active_binding = dict(saved) if selected else dict(default_binding)
+                setting = self._setting_for_run_binding(active_binding, registry)
+                if setting is not None:
+                    active_binding = self._complete_run_binding(
+                        active_binding, registry,
+                    )
+                source_cache[value_key] = (
+                    active_binding, setting, "selected" if selected else "default",
+                )
+
+            binding, setting, mode = source_cache[value_key]
+            actual_value = self._run_monitor_mapping_value(
+                value_key, binding, setting,
+            )
+            raw_value = self._run_monitor_raw_value(binding, setting)
+            ip = _norm_text(binding.get("Device_Addr"))
+            bay = _norm_text(binding.get("Bay_Name"))
+            physical = _norm_text(binding.get("Physical_Name"))
+            unit = _norm_text(binding.get("Unit"))
+            if not unit:
+                lower_physical = physical.casefold()
+                if lower_physical in ("cos",):
+                    unit = "-"
+                elif lower_physical == "f":
+                    unit = "Hz"
+                elif lower_physical in ("ue",):
+                    unit = "V"
+                elif lower_physical.endswith(("ia", "ib", "ic")) or lower_physical == "ie":
+                    unit = "A"
+                elif lower_physical.endswith(("uab", "ubc", "uca")):
+                    unit = "kV"
+                elif lower_physical.endswith("_p") or lower_physical == "p":
+                    unit = "kW"
+                elif lower_physical.endswith("_q") or lower_physical == "q":
+                    unit = "kVar"
+                else:
+                    unit = "-"
+
+            quality = "OFFLINE"
+            if ip and online_status.get(ip, False):
+                quality = "ONLINE" if raw_value is not None else "NO DATA"
+            elif not ip:
+                quality = "NO DATA"
+
+            formula_name = _norm_text(binding.get("Formula")) or "RAW"
+            calculation = self._run_monitor_formula_text(binding)
+            if raw_value is None:
+                actual_text = "--"
+            elif spec["kind"] == "breaker":
+                _current, active, _color, state_label = _feeder_breaker_visual(
+                    actual_value
+                )
+                actual_text = (
+                    f"{state_label} / {'MERAH' if active else 'HIJAU'}"
+                )
+                formula_name = "IA_THRESHOLD"
+                calculation = (
+                    f"round(Ia, 2) > 0; Ia = {calculation}"
+                )
+                unit = "status"
+            else:
+                try:
+                    actual_text = f"{float(actual_value):.2f}"
+                except (TypeError, ValueError):
+                    actual_text = "--"
+
+            source = (
+                f"ListSetting {bay}.csv ({mode})"
+                if bay else "Mapping tidak ditemukan"
+            )
+            rows.append({
+                "key": spec["key"],
+                "group": spec["group"],
+                "name": spec["name"],
+                "symbol": spec["symbol"],
+                "unit": unit,
+                "actual": actual_text,
+                "raw": self._run_monitor_number(raw_value),
+                "source": source,
+                "ip": ip or "-",
+                "asdu": self._run_monitor_number(binding.get("ASDU")),
+                "ioa": self._run_monitor_number(binding.get("IOA")),
+                "coefficient": self._run_monitor_number(
+                    binding.get("Coefficient")
+                ),
+                "ctpt": self._run_monitor_number(binding.get("CTPT")),
+                "offset": self._run_monitor_number(binding.get("Add_Offset")),
+                "formula": formula_name,
+                "calculation": calculation,
+                "quality": quality,
+            })
+        return rows
 
     def _default_status_binding(self, binding_key):
         """Return the StatusSetting breaker-position point for a rectangle."""
@@ -7808,7 +13288,7 @@ class SCADAMainUI:
             if idx == card_no:
                 result = _status_binding_for_bay(bay, ("breaker position",))
                 if result:
-                    result.update({"source_type": "card", "source_id": card_no})
+                    result.update({"source_type": "status", "source_id": card_no})
                 return result
         return {}
 
@@ -7884,15 +13364,12 @@ class SCADAMainUI:
             return None
 
     def _open_binding_dialog(self, binding_key, kind="variables"):
-        """Open the same elegant address editor for a value or status shape."""
-        password = simpledialog.askstring(
-            "Protected Configuration", "Masukkan password untuk mengubah konfigurasi:",
-            show="*", parent=self.root
-        )
-        if password is None:
-            return
-        if password != "admin":
-            messagebox.showerror("Akses ditolak", "Password salah. Konfigurasi tidak dibuka.", parent=self.root)
+        """Open the address editor only for authenticated CRUD roles."""
+        if not self.require_permission(
+            "crud",
+            "edit realtime bindings",
+            parent=self.root,
+        ):
             return
         title = "Realtime Variable Configuration" if kind == "variables" else "Rectangle Status Configuration"
         current = dict(self.ui_bindings.get(kind, {}).get(binding_key,
@@ -8410,8 +13887,10 @@ class SCADAMainUI:
             # ---------------------------
             # Generator 1 / Generator 2
             # ---------------------------
-            self._update_generator_widgets(1, rtu2)
-            self._update_generator_widgets(2, rtu3)
+            self.g1_status = bool(statuses.get(self.GEN_1_IP, False))
+            self.g2_status = bool(statuses.get(self.GEN_2_IP, False))
+            self._update_generator_widgets(1, rtu2, self.g1_status)
+            self._update_generator_widgets(2, rtu3, self.g2_status)
 
             # ---------------------------
             # Bottom parameter panels: canonical 14-card order.
@@ -8436,14 +13915,10 @@ class SCADAMainUI:
 
             # Status indicators
             # ---------------------------
-            self.g1_status = bool(statuses.get(self.GEN_1_IP, False))
-            self.g2_status = bool(statuses.get(self.GEN_2_IP, False))
-            # Some layouts do not create a dedicated generator-monitor status
-            # handler. Do not abort the complete realtime UI cycle in that case.
-            status_setter = getattr(self, "_set_generator_monitor_status", None)
-            if callable(status_setter):
-                status_setter(1, self.g1_status)
-                status_setter(2, self.g2_status)
+            # Keep page banners and protection lamps synchronized with the
+            # same connection state used for generator value visibility.
+            self._set_generator_monitor_status(1, self.g1_status)
+            self._set_generator_monitor_status(2, self.g2_status)
             if hasattr(self, "status_indicators") and hasattr(self, "run_canvas"):
                 for panel_idx, _bay_name, _ip, _points in CARD_POINT_MAP:
                     self._set_breaker_current(
@@ -8576,7 +14051,82 @@ class SCADAMainUI:
             except Exception:
                 pass
 
-    def _update_generator_widgets(self, gen_num, data):
+    def _set_generator_monitor_status(self, gen_num, online):
+        """Update one generator's IEC-104 banner and protection lamps."""
+        color = "#00ee78" if online else "#ff4352"
+        state = "ONLINE" if online else "OFFLINE"
+        dot = getattr(self, f"g{gen_num}_monitor_status_dot", None)
+        text = getattr(self, f"g{gen_num}_monitor_status_text", None)
+        if dot is not None:
+            dot.config(fg=color)
+        if text is not None:
+            text.config(text=state, fg=color)
+        self._update_generator_protection_indicators(gen_num, online)
+
+    def _update_generator_protection_indicators(self, gen_num, online):
+        """Colour protection lamps from the generator's StatusSetting rows."""
+        indicators = getattr(
+            self, f"g{gen_num}_protection_indicators", None
+        )
+        if not indicators:
+            return
+
+        source_ip = self.GEN_1_IP if gen_num == 1 else self.GEN_2_IP
+        with STATUS_LOCK:
+            status_rows = [
+                dict(row)
+                for row in STATUS_REGISTRY
+                if _norm_text(row.get("Device_Addr")) == source_ip
+            ]
+        with DATA_LOCK:
+            status_values = dict(STATUS_VALUE_STORE)
+
+        for label, aliases in self.GENERATOR_PROTECTION_SOURCES.items():
+            lamp_parts = indicators.get(label)
+            if lamp_parts is None:
+                continue
+
+            normalized_aliases = {
+                _norm_text(alias).casefold() for alias in aliases
+            }
+            samples = []
+            for row in status_rows:
+                physical = _norm_text(
+                    row.get("Physical_Name") or row.get("PhysicalName")
+                )
+                if physical.casefold() not in normalized_aliases:
+                    continue
+                info_name = _norm_text(
+                    row.get("Info_Name") or row.get("InfoName")
+                )
+                key = (source_ip, "info", info_name)
+                if not info_name or key not in status_values:
+                    continue
+                try:
+                    active = bool(int(float(status_values[key])))
+                    reverse = bool(int(float(row.get("Reverse", 0) or 0)))
+                except (TypeError, ValueError):
+                    continue
+                samples.append(not active if reverse else active)
+
+            if not online:
+                outer_color, inner_color = "#5f6d68", "#273532"
+            elif not samples:
+                outer_color, inner_color = "#d59b2b", "#5c4314"
+            elif any(samples):
+                outer_color = inner_color = "#ff4352"
+            else:
+                outer_color = inner_color = "#00ee78"
+
+            canvas, outer, inner = lamp_parts
+            canvas.itemconfig(outer, outline=outer_color)
+            canvas.itemconfig(
+                inner,
+                outline=inner_color,
+                fill=inner_color,
+            )
+
+    def _update_generator_widgets(self, gen_num, data, online):
         prefix = "g1" if gen_num == 1 else "g2"
         values = {
             "Uab": data.get("Uab", data.get("Uab_L", 0.0)),
@@ -8595,12 +14145,20 @@ class SCADAMainUI:
         target_dict = self.g1_param_labels if gen_num == 1 else self.g2_param_labels
         for param, value in values.items():
             lbl = target_dict.get(param)
+            decimals = 0 if param in ("Urotor", "Irotor") else 2
             if lbl is not None:
-                try:
-                    lbl.config(text=f"{float(value):.2f}")
-                except Exception:
-                    lbl.config(text="0.00")
-            self._set_realtime(f"{prefix}_{param.lower().replace(' ', '')}", value, 2)
+                if not online:
+                    lbl.config(text="--")
+                else:
+                    try:
+                        lbl.config(text=f"{float(value):.{decimals}f}")
+                    except Exception:
+                        lbl.config(text="--")
+            self._set_realtime(
+                f"{prefix}_{param.lower().replace(' ', '')}",
+                value,
+                decimals,
+            )
 
         # Explicit keys used by the RUN MONITOR overlay.
         for suffix, value in [
@@ -8609,7 +14167,11 @@ class SCADAMainUI:
             ("p", values["P"]), ("q", values["Q"]), ("f", values["f"]),
             ("cos", values["COS"]), ("ue", values["Urotor"]), ("ie", values["Irotor"])
         ]:
-            self._set_realtime(f"{prefix}_{suffix}", value, 2)
+            self._set_realtime(
+                f"{prefix}_{suffix}",
+                value,
+                0 if suffix in ("ue", "ie") else 2,
+            )
 
     def start_background_polling(self):
         # Start direct IEC104 clients only in explicit MASTER mode. In
@@ -10142,9 +15704,15 @@ if __name__ == "__main__":
     else:
         root = tk.Tk()
         scada_app_instance = SCADAMainUI(root)
-
-        # Start the merged MonitorTv web server AFTER the original SCADA UI is ready.
-        # This does not change the existing IEC-104 communication startup.
+        startup_lock = tk.Frame(root, bg="#020b13")
+        startup_lock.place(x=0, y=0, relwidth=1, relheight=1)
+        startup_lock.lift()
+        root.update_idletasks()
+        if not scada_app_instance.action_switch_user(required=True):
+            root.destroy()
+            raise SystemExit(0)
+        startup_lock.destroy()
+        # Runtime publishing starts only after an authenticated session exists.
         try:
             start_monitor_tv_json_writer()
         except Exception as _monitor_tv_start_error:
