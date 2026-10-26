@@ -222,13 +222,19 @@ def _reset_communication_diagnostics():
 # They are NOT used for IEC-104 routing; CSV (IP, ASDU, IOA) is authoritative.
 IOA_MAP_RTU1 = {
     (257, 16385): "W1_Ia",
-    (257, 16389): "W1_Uab",
+    (257, 16388): "W1_Uab",
+    (257, 16389): "W1_Ubc",
+    (257, 16390): "W1_Uca",
     (257, 16391): "W1_P",
     (257, 16392): "W1_Q",
-    (257, 16386): "W2_Ia",
-    (257, 16390): "W2_Uab",
-    (257, 16393): "W2_P",
-    (258, 16397): "W2_Q",
+    (257, 16393): "W1_f",
+    (513, 16385): "W2_Ia",
+    (513, 16388): "W2_Uab",
+    (513, 16389): "W2_Ubc",
+    (513, 16390): "W2_Uca",
+    (513, 16391): "W2_P",
+    (513, 16392): "W2_Q",
+    (513, 16393): "W2_f",
 }
 
 IOA_MAP_STANDARD = {
@@ -1093,30 +1099,88 @@ STATUS_VALUE_STORE = {}
 STATUS_BAY_JIAN_IDS = {
     "Connection Wire I": "1",
     "Connection Wire II": "2",
-    "1# Auxiliary Transformer": "1",
-    "2# Auxiliary Transformer": "1",
+    "1# Auxiliary Transformer": "3",
+    "2# Auxiliary Transformer": "4",
     "1# Generator": "5",
-    "2# Generator": "5",
     "1# Measure Control Box": "6",
-    "2# Measure Control Box": "6",
+    "2# Generator": "7",
+    "2# Measure Control Box": "8",
     "Watt Hour Meter": "9",
     "11# Circulating Water Pump": "10",
     "12# Circulating Water Pump": "11",
     "13# Circulating Water Pump": "12",
     "1# Feed Water Pump": "13",
-    "2# Feed Water Pump": "13",
     "1# Primary Air Fan": "14",
-    "2# Primary Air Fan": "14",
     "1# Forced draft Fan": "15",
-    "2# Forced draft Fan": "15",
     "1# Induced draft Fan": "16",
-    "2# Induced draft Fan": "16",
-    "21# Circulating Water Pump": "10",
-    "22# Circulating Water Pump": "11",
-    "23# Circulating Water Pump": "12",
+    "2# Induced draft Fan": "17",
+    "2# Forced draft Fan": "18",
+    "2# Primary Air Fan": "19",
+    "2# Feed Water Pump": "20",
+    "21# Circulating Water Pump": "21",
+    "22# Circulating Water Pump": "22",
+    "23# Circulating Water Pump": "23",
+    "3# Feed water pump": "24",
     "Voltage Monitoring": "25",
 }
 STATUS_BAYS = tuple(STATUS_BAY_JIAN_IDS)
+
+# Every red breaker body in SYSTEMCONFIG_DARK.png / AUXILIARY_MATCHED.png.
+# Coordinates are native 1536x1024 pixels. Sources follow the CBZ8000
+# StatusSetting YX rows documented in Documents/SCADA TIFICO.
+SLD_BREAKER_SPECS = (
+    ("wire_1", "Connection Wire I breaker", "Connection Wire I",
+     ("breaker position",), 657.0, 256.0),
+    ("wire_2", "Connection Wire II breaker", "Connection Wire II",
+     ("breaker position",), 884.0, 256.0),
+    ("generator_1", "Generator 1 breaker", "1# Measure Control Box",
+     ("1# G circuit breaker close position", "G circuit breaker close position"), 58.5, 351.5),
+    ("aux_1_hv", "Auxiliary Transformer 1 HV breaker", "1# Auxiliary Transformer",
+     ("hv breaker close",), 176.5, 351.5),
+    ("feeder_01", "11# Circulating Water Pump breaker", "11# Circulating Water Pump",
+     ("breaker position",), 245.5, 351.5),
+    ("feeder_02", "12# Circulating Water Pump breaker", "12# Circulating Water Pump",
+     ("breaker position",), 315.5, 351.5),
+    ("feeder_03", "13# Circulating Water Pump breaker", "13# Circulating Water Pump",
+     ("breaker position",), 385.5, 351.5),
+    ("feeder_04", "1# Feed Water Pump breaker", "1# Feed Water Pump",
+     ("breaker position",), 454.5, 351.5),
+    ("feeder_05", "1# Primary Air Fan breaker", "1# Primary Air Fan",
+     ("breaker position",), 525.5, 351.5),
+    ("feeder_06", "1# Forced draft Fan breaker", "1# Forced draft Fan",
+     ("breaker position",), 592.5, 351.5),
+    ("feeder_07", "1# Induced draft Fan breaker", "1# Induced draft Fan",
+     ("breaker position",), 663.0, 351.5),
+    ("feed_water_3", "3# Feed water pump breaker", "3# Feed water pump",
+     ("breaker position",), 767.0, 437.5),
+    ("feeder_08", "2# Induced draft Fan breaker", "2# Induced draft Fan",
+     ("breaker position",), 871.5, 351.5),
+    ("feeder_09", "2# Forced draft Fan breaker", "2# Forced draft Fan",
+     ("breaker position",), 942.5, 351.5),
+    ("feeder_10", "2# Primary Air Fan breaker", "2# Primary Air Fan",
+     ("breaker position",), 1013.0, 351.5),
+    ("feeder_11", "2# Feed Water Pump breaker", "2# Feed Water Pump",
+     ("breaker position",), 1084.5, 351.5),
+    ("feeder_12", "21# Circulating Water Pump breaker", "21# Circulating Water Pump",
+     ("breaker position",), 1160.5, 351.5),
+    ("feeder_13", "22# Circulating Water Pump breaker", "22# Circulating Water Pump",
+     ("breaker position",), 1238.5, 351.5),
+    ("feeder_14", "23# Circulating Water Pump breaker", "23# Circulating Water Pump",
+     ("breaker position",), 1315.5, 351.5),
+    ("aux_2_hv", "Auxiliary Transformer 2 HV breaker", "2# Auxiliary Transformer",
+     ("hv breaker close",), 1396.0, 351.5),
+    ("generator_2", "Generator 2 breaker", "2# Measure Control Box",
+     ("2# G circuit breaker close position", "1# G circuit breaker close position",
+      "G circuit breaker close position"), 1478.5, 351.5),
+    ("aux_1_lv", "Auxiliary Transformer 1 LV breaker", "1# Auxiliary Transformer",
+     ("UV breaker close",), 176.0, 664.5),
+    ("aux_2_lv", "Auxiliary Transformer 2 LV breaker", "2# Auxiliary Transformer",
+     ("UV breaker close",), 1395.0, 664.5),
+)
+SLD_BREAKER_SOURCE_BY_KEY = {
+    key: (bay, physical_names)
+    for key, _element, bay, physical_names, _x, _y in SLD_BREAKER_SPECS
+}
 
 FORMULA_PRESETS = {
     "DIRECT": "Raw",
@@ -1171,6 +1235,7 @@ SETTING_BAY_IP = {
     "22# Circulating Water Pump": "10.100.163.6",
     "23# Circulating Water Pump": "10.100.163.6",
     "Voltage Monitoring": "10.100.163.7",
+    "3# Feed water pump": "10.100.163.7",
 }
 
 TREND_DEVICES = tuple(SETTING_BAY_IP)
@@ -1711,17 +1776,19 @@ def _default_setting_rows():
         })
     wire_specs = [
         ("W1_Ia", 257, 16385, "Current", "MULTIPLY_CTPT", "A", 0.000183, 500, 0.0),
-        ("W1_Uab", 257, 16389, "Voltage", "MULTIPLY_CTPT", "kV", 0.0036662, 0.06, 0.0),
-        ("W1_Ubc", 257, None, "Voltage", "MULTIPLY_CTPT", "kV", 0.0036662, 0.06, 0.0),
-        ("W1_Uca", 257, None, "Voltage", "MULTIPLY_CTPT", "kV", 0.0036662, 0.06, 0.0),
-        ("W1_P", 257, 16391, "Power", "MULTIPLY_CTPT", "kW", 0.03171366718, 30, 0.0),
-        ("W1_Q", 257, 16392, "Power", "MULTIPLY_CTPT", "kVar", 0.03171366718, 30, 0.0),
-        ("W2_Ia", 257, 16386, "Current", "MULTIPLY_CTPT", "A", 0.000183, 500, 0.0),
-        ("W2_Uab", 257, 16390, "Voltage", "MULTIPLY_CTPT", "kV", 0.0036662, 0.06, 0.0),
-        ("W2_Ubc", 258, None, "Voltage", "MULTIPLY_CTPT", "kV", 0.0036662, 0.06, 0.0),
-        ("W2_Uca", 258, None, "Voltage", "MULTIPLY_CTPT", "kV", 0.0036662, 0.06, 0.0),
-        ("W2_P", 257, 16393, "Power", "MULTIPLY_CTPT", "kW", 0.03171366718, 30, 0.0),
-        ("W2_Q", 258, 16397, "Power", "MULTIPLY_CTPT", "kVar", 0.03171366718, 30, 0.0),
+        ("W1_Uab", 257, 16388, "Voltage", "MULTIPLY_CTPT", "kV", 0.00211438185, 0.10392, 0.0),
+        ("W1_Ubc", 257, 16389, "Voltage", "MULTIPLY_CTPT", "kV", 0.00211438185, 0.10392, 0.0),
+        ("W1_Uca", 257, 16390, "Voltage", "MULTIPLY_CTPT", "kV", 0.00211438185, 0.10392, 0.0),
+        ("W1_P", 257, 16391, "Power", "MULTIPLY_CTPT", "kW", 0.03171386718, 30, 0.0),
+        ("W1_Q", 257, 16392, "Power", "MULTIPLY_CTPT", "kVar", 0.03171386718, 30, 0.0),
+        ("W1_f", 257, 16393, "Frequency", "FREQUENCY_OFFSET", "Hz", 0.000073242187497, 1, 50.0),
+        ("W2_Ia", 513, 16385, "Current", "MULTIPLY_CTPT", "A", 0.000183, 500, 0.0),
+        ("W2_Uab", 513, 16388, "Voltage", "MULTIPLY_CTPT", "kV", 0.00211438185, 0.10392, 0.0),
+        ("W2_Ubc", 513, 16389, "Voltage", "MULTIPLY_CTPT", "kV", 0.00211438185, 0.10392, 0.0),
+        ("W2_Uca", 513, 16390, "Voltage", "MULTIPLY_CTPT", "kV", 0.00211438185, 0.10392, 0.0),
+        ("W2_P", 513, 16391, "Power", "MULTIPLY_CTPT", "kW", 0.03171386718, 30, 0.0),
+        ("W2_Q", 513, 16392, "Power", "MULTIPLY_CTPT", "kVar", 0.03171386718, 30, 0.0),
+        ("W2_f", 513, 16393, "Frequency", "FREQUENCY_OFFSET", "Hz", 0.000073242187497, 1, 50.0),
     ]
     for idx, spec in enumerate(wire_specs, 1):
         add("Connection Wire I" if spec[0].startswith("W1_") else "Connection Wire II",
@@ -11743,7 +11810,7 @@ class SCADAMainUI:
             aux_stage_buttons.append(button)
 
         try:
-            clean_image_path = "SYSTEMCONFIG_DARK.png"
+            clean_image_path = os.path.join(APP_DIR, "SYSTEMCONFIG_DARK.png")
             if os.path.exists(clean_image_path):
                 self._system_config_source_image = Image.open(clean_image_path).convert("RGB")
             else:
@@ -11833,36 +11900,30 @@ class SCADAMainUI:
                                     lambda _event, bk=binding_key: self._open_binding_dialog(bk, "variables"))
             canvas.tag_raise("system_config_variable")
 
-            # Exact centres of the fourteen feeder breaker bodies in
-            # SYSTEMCONFIG_DARK.png (native 1536x1024 coordinates). Keep this
-            # order identical to CARD_POINT_MAP / the Run Monitor feeder order.
-            feeder_breakers = [
-                245.0, 315.0, 385.0, 455.0, 525.0, 593.0, 663.0,
-                872.0, 943.0, 1013.0, 1085.0, 1162.0, 1239.0, 1316.0,
-            ]
-            assert len(feeder_breakers) == 14
-            for card_no, bx in enumerate(feeder_breakers, 1):
+            # Cover every breaker body in the plant SLD, not only the fourteen
+            # Run Monitor feeder breakers.
+            assert len(SLD_BREAKER_SPECS) == 23
+            for breaker_key, element, _bay, physical_names, bx, by in SLD_BREAKER_SPECS:
                 item = canvas.create_rectangle(
-                    (bx - 9.0) * sx, 337.5 * sy,
-                    (bx + 9.0) * sx, 365.5 * sy,
+                    (bx - 8.0) * sx, (by - 14.0) * sy,
+                    (bx + 8.0) * sx, (by + 14.0) * sy,
                     fill="#808080", outline="#ffffff", width=1,
                     tags="system_config_status"
                 )
                 value_item = canvas.create_text(
-                    bx * sx, 351.5 * sy, text="?", fill="#ffffff",
+                    bx * sx, by * sy, text="?", fill="#ffffff",
                     font=("Arial", max(8, int(round(12 * min(sx, sy)))), "bold"),
                     tags="system_config_status"
                 )
-                binding_key = f"system:breaker:{card_no}"
+                binding_key = f"system:breaker:{breaker_key}"
                 self._register_ui_binding("statuses", binding_key, {
-                    "page": "System Configuration",
-                    "element": f"{CARD_BAY_BY_INDEX.get(card_no, f'Breaker {card_no}')} breaker",
-                    "mode": "card_status", "source_type": "status",
-                    "source_id": card_no, "field": "breaker position"
+                    "page": "System Configuration", "element": element,
+                    "mode": "default", "source_type": "status",
+                    "field": physical_names[0],
                 })
                 canvas.tag_bind(item, "<Double-Button-1>",
                                 lambda _event, bk=binding_key: self._open_binding_dialog(bk, "statuses"))
-                self.system_config_status_items.append((item, card_no, value_item))
+                self.system_config_status_items.append((item, binding_key, value_item))
             canvas.tag_raise("system_config_status")
 
         canvas.bind("<Configure>", resize_system_config, add="+")
@@ -11926,23 +11987,10 @@ class SCADAMainUI:
                         display = f"{label}: 0.00"
                     canvas.itemconfig(item, text=display, fill=color)
 
-            for item, card_no, value_item in getattr(self, "system_config_status_items", []):
-                binding_key = f"system:breaker:{card_no}"
-                binding = self.ui_bindings.get("statuses", {}).get(binding_key, {})
-                if binding.get("Source_Kind") != "rectangle_status_csv":
-                    # A breaker without an authoritative StatusSetting row is
-                    # unknown. Never infer a switch position from analog Q/Ia.
-                    color, label = "#808080", "?"
-                else:
-                    value = self._resolve_raw_ui_binding(binding_key)
-                    _active, color, label = self._status_rectangle_style(
-                        binding_key,
-                        value,
-                        default_active=False,
-                        valid=value is not None,
-                    )
-                canvas.itemconfig(item, fill=color)
-                canvas.itemconfig(value_item, text=label)
+            self._update_sld_status_items(
+                canvas,
+                getattr(self, "system_config_status_items", []),
+            )
 
             connected = sum(bool(statuses.get(f"10.100.163.{i}", False)) for i in range(1, 9))
             hosts_up = sum(bool(hosts.get(f"10.100.163.{i}", False)) for i in range(1, 9))
@@ -12462,9 +12510,10 @@ class SCADAMainUI:
 
         # Use the clean diagram as the background. All measurement tables are
         # canvas objects so their values remain live instead of being baked in.
-        for img_path in ("AUXILIARY_MATCHED.png", "AUXILIARY_DARK_CLEAN.png",
-                         "AUXILIARY_EXISTING_STYLE.png", "AUXILIARY_CLEAN.png",
-                         "SYSTEMCONFIG_DARK.png", "AUXILIARY.png"):
+        for image_name in ("AUXILIARY_MATCHED.png", "AUXILIARY_DARK_CLEAN.png",
+                           "AUXILIARY_EXISTING_STYLE.png", "AUXILIARY_CLEAN.png",
+                           "SYSTEMCONFIG_DARK.png", "AUXILIARY.png"):
+            img_path = os.path.join(APP_DIR, image_name)
             if os.path.exists(img_path):
                 try:
                     self.aux_source_image = Image.open(img_path).convert("RGB")
@@ -12520,14 +12569,14 @@ class SCADAMainUI:
         ]))
 
         panel_specs.extend([
-            (732, 759, 72, [(label, "store", "10.100.163.7", field)
+            (732, 759, 72, [(label, "bay", "3# Feed water pump", field)
                             for label, field in feeder_rows]),
             (112, 798, 124, [("Uab", "bay", "1# Auxiliary Transformer", "Uab"),
-                             ("Ubc", "bay", "1# Auxiliary Transformer", "Uab"),
-                             ("Uca", "bay", "1# Auxiliary Transformer", "Uab")]),
+                             ("Ubc", "bay", "1# Auxiliary Transformer", "Ubc"),
+                             ("Uca", "bay", "1# Auxiliary Transformer", "Uca")]),
             (1300, 798, 124, [("Uab", "bay", "2# Auxiliary Transformer", "Uab"),
-                              ("Ubc", "bay", "2# Auxiliary Transformer", "Uab"),
-                              ("Uca", "bay", "2# Auxiliary Transformer", "Uab")]),
+                              ("Ubc", "bay", "2# Auxiliary Transformer", "Ubc"),
+                              ("Uca", "bay", "2# Auxiliary Transformer", "Uca")]),
         ])
 
         def _resize_aux(event=None):
@@ -12579,23 +12628,31 @@ class SCADAMainUI:
                                     lambda _event, bk=binding_key: self._open_binding_dialog(bk, "variables"))
                     self.aux_value_items.append((value_item, source_type, source_id, field, binding_key))
 
-            # Cover the static breaker blocks with live red/green blocks.
-            # Their colour is fixed to each feeder's displayed IA value.
-            breaker_x = [245, 316, 386, 456, 526, 594, 663,
-                         872, 943, 1013, 1084, 1162, 1238, 1315]
-            for card_no, bx in enumerate(breaker_x, 1):
+            # Cover every breaker body with its authoritative StatusSetting YX
+            # point. Unknown/offline quality stays grey instead of being guessed
+            # from the feeder current.
+            assert len(SLD_BREAKER_SPECS) == 23
+            for breaker_key, element, _bay, physical_names, bx, by in SLD_BREAKER_SPECS:
                 item = canvas.create_rectangle(
-                    (bx - 7) * sx, 339 * sy, (bx + 7) * sx, 362 * sy,
-                    fill=FEEDER_BREAKER_OFF_COLOR, outline="#ffffff", width=1,
+                    (bx - 8.0) * sx, (by - 14.0) * sy,
+                    (bx + 8.0) * sx, (by + 14.0) * sy,
+                    fill="#808080", outline="#ffffff", width=1,
                     tags="aux_live"
                 )
                 value_item = canvas.create_text(
-                    bx * sx, 350 * sy, text="0", fill="#ffffff",
+                    bx * sx, by * sy, text="?", fill="#ffffff",
                     font=("Arial", max(8, int(round(12 * min(sx, sy)))), "bold"),
                     tags="aux_live"
                 )
-                self.aux_status_items.append((item, card_no, value_item))
-            canvas.tag_raise("aux_live")
+                binding_key = f"aux:breaker:{breaker_key}"
+                self._register_ui_binding("statuses", binding_key, {
+                    "page": "Auxiliary System", "element": element,
+                    "mode": "default", "source_type": "status",
+                    "field": physical_names[0],
+                })
+                canvas.tag_bind(item, "<Double-Button-1>",
+                                lambda _event, bk=binding_key: self._open_binding_dialog(bk, "statuses"))
+                self.aux_status_items.append((item, binding_key, value_item))
             self._update_auxiliary_realtime()
 
         canvas.bind("<Configure>", _resize_aux, add="+")
@@ -12618,6 +12675,23 @@ class SCADAMainUI:
                     pass
 
         canvas.after(250, _aux_realtime_tick)
+
+    def _update_sld_status_items(self, canvas, status_items):
+        """Render plant SLD breakers exclusively from authoritative YX points."""
+        for item, binding_key, value_item in status_items:
+            binding = self.ui_bindings.get("statuses", {}).get(binding_key, {})
+            if binding.get("Source_Kind") != "rectangle_status_csv":
+                color, label = "#808080", "?"
+            else:
+                value = self._resolve_raw_ui_binding(binding_key)
+                _active, color, label = self._status_rectangle_style(
+                    binding_key,
+                    value,
+                    default_active=False,
+                    valid=value is not None,
+                )
+            canvas.itemconfig(item, fill=color)
+            canvas.itemconfig(value_item, text=label)
 
     def _update_auxiliary_realtime(self):
         canvas = getattr(self, "aux_canvas", None)
@@ -12645,29 +12719,10 @@ class SCADAMainUI:
                 value_font = max(8, 14 - max(0, len(text) - 7) // 2)
                 canvas.itemconfig(item, text=text, fill="#00ff36",
                                   font=("Arial Narrow", value_font, "bold"))
-            for item, card_no, value_item in getattr(self, "aux_status_items", []):
-                bay_name = CARD_BAY_BY_INDEX.get(card_no, "")
-                value = bays.get(
-                    bay_name,
-                    cards.get(card_no, {}),
-                ).get("Ia", 0.0)
-                current, active, color, label = _feeder_breaker_visual(value)
-                self._record_rectangle_transition(
-                    f"aux:breaker:{card_no}",
-                    {
-                        "page": "Auxiliary System",
-                        "element": f"Breaker {card_no}",
-                        "label": f"Breaker {card_no}",
-                        "Physical_Name": "Ia",
-                        "Unit": "A",
-                        "operator": ">",
-                        "threshold": 0.0,
-                    },
-                    current,
-                    active,
-                )
-                canvas.itemconfig(item, fill=color)
-                canvas.itemconfig(value_item, text=label)
+            self._update_sld_status_items(
+                canvas,
+                getattr(self, "aux_status_items", []),
+            )
         except Exception:
             pass
 
@@ -12719,7 +12774,17 @@ class SCADAMainUI:
                 data = json.load(handle)
             if isinstance(data, dict):
                 data.setdefault("variables", {})
-                data.setdefault("statuses", {})
+                statuses = data.setdefault("statuses", {})
+                # Migrate the former fourteen numeric screen keys to stable
+                # feeder names; the other nine SLD breakers are registered
+                # below on first draw.
+                for page in ("system", "aux"):
+                    for card_no in range(1, 15):
+                        old_key = f"{page}:breaker:{card_no}"
+                        new_key = f"{page}:breaker:feeder_{card_no:02d}"
+                        if old_key in statuses:
+                            statuses.setdefault(new_key, statuses[old_key])
+                            statuses.pop(old_key, None)
                 return data
         except Exception:
             pass
@@ -13279,8 +13344,17 @@ class SCADAMainUI:
         return rows
 
     def _default_status_binding(self, binding_key):
-        """Return the StatusSetting breaker-position point for a rectangle."""
-        match = re.search(r"(?:brk_d|breaker:)(\d+)$", str(binding_key), re.I)
+        """Return the authoritative StatusSetting point for one rectangle."""
+        source_key = str(binding_key).rsplit(":", 1)[-1]
+        source = SLD_BREAKER_SOURCE_BY_KEY.get(source_key)
+        if source is not None:
+            bay, physical_names = source
+            result = _status_binding_for_bay(bay, physical_names)
+            if result:
+                result.update({"source_type": "status", "source_id": source_key})
+            return result
+
+        match = re.search(r"brk_d(\d+)$", str(binding_key), re.I)
         if not match:
             return {}
         card_no = int(match.group(1))
@@ -13972,7 +14046,7 @@ class SCADAMainUI:
                 "on_color": "#ff2020", "off_color": "#14d84a",
             })
             color = "#ff2020" if active else "#14d84a"
-            label = "C" if active else "O"
+            label = "1" if active else "0"
         else:
             active = bool(default_active)
             if config.get("mode") == "selected":
@@ -15314,26 +15388,28 @@ except Exception as _monitor_tv_import_error:
 # ENGINEERING QC SELF-TEST
 # ==============================================================================
 def run_engineering_qc():
-    """Deterministic offline QC for RTU1 routing and engineering scaling."""
+    """Deterministic offline QC for authoritative RTU1 routing and scaling."""
     failures = []
     tests = [
         (("W1_Ia", 143), 13.0845),
         (("W2_Ia", 160), 14.64),
-        (("W1_Uab", 27689), 6.090804708),
-        (("W2_Uab", 27638), 6.079586136),
-        (("W1_P", -122), -116.0720218788),
-        (("W1_Q", -89), -84.6754913706),
-        (("W2_P", 244), 232.1440437576),
-        (("W2_Q", -26), -24.7366604004),
+        (("W1_Uab", 27689), 6.084008771120027),
+        (("W2_Uab", 27638), 6.072802716465576),
+        (("W1_P", -122), -116.0727538788),
+        (("W1_Q", -89), -84.6760253706),
+        (("W2_P", 244), 232.1455077576),
+        (("W2_Q", -26), -24.7368164004),
     ]
     with SETTING_LOCK:
         rows = {r.get("Physical_Name"): r for r in SETTING_REGISTRY
                 if r.get("Device_Addr") == "10.100.163.1"}
     expected_keys = {
-        "W1_Ia": (257, 16385), "W2_Ia": (257, 16386),
-        "W1_Uab": (257, 16389), "W2_Uab": (257, 16390),
-        "W1_P": (257, 16391), "W1_Q": (257, 16392),
-        "W2_P": (257, 16393), "W2_Q": (258, 16397),
+        "W1_Ia": (257, 16385), "W1_Uab": (257, 16388),
+        "W1_Ubc": (257, 16389), "W1_Uca": (257, 16390),
+        "W1_P": (257, 16391), "W1_Q": (257, 16392), "W1_f": (257, 16393),
+        "W2_Ia": (513, 16385), "W2_Uab": (513, 16388),
+        "W2_Ubc": (513, 16389), "W2_Uca": (513, 16390),
+        "W2_P": (513, 16391), "W2_Q": (513, 16392), "W2_f": (513, 16393),
     }
     for tag, key in expected_keys.items():
         row = rows.get(tag)
