@@ -248,7 +248,7 @@ IOA_MAP_STANDARD = {
     16417: "IE",    16418: "UE",    16419: "f",
 }
 
-APP_VERSION = "2.5.0"
+APP_VERSION = "2.5.1"
 APP_DIR = (
     os.path.dirname(os.path.abspath(sys.executable))
     if getattr(sys, "frozen", False)
@@ -9018,6 +9018,87 @@ class SCADAMainUI:
             ),
         )
 
+        chapter_illustrations = {
+            "5. Run Monitor": (
+                (
+                    "RUNMONITORING FINAL.png",
+                    "Gambar 5-1 — Diagram satu garis utama pada Run Monitor.",
+                    (
+                        "Keterangan gambar:\n"
+                        "• Busbar 6KV I berada di sisi kiri dan 6KV II di sisi kanan.\n"
+                        "• Connection Wire One dan Connection Wire Two berada di atas "
+                        "busbar; feeder motor dan plant transformer berada di bawahnya.\n"
+                        "• 001G, 002G, dan feeder No.3 Feed Water Pump berada di bagian "
+                        "tengah sebagai orientasi posisi peralatan.\n"
+                        "• Nilai dan warna yang muncul saat aplikasi berjalan adalah "
+                        "data aktual. Gambar ini hanya panduan lokasi, bukan bukti "
+                        "kondisi operasi terkini."
+                    ),
+                ),
+            ),
+            "6. System Configuration": (
+                (
+                    "SYSTEMCONFIG_DARK.png",
+                    "Gambar 6-1 — Ikhtisar konfigurasi sistem dan posisi breaker.",
+                    (
+                        "Keterangan gambar:\n"
+                        "• Garis horizontal biru menunjukkan dua seksi bus 6 kV.\n"
+                        "• Cabang vertikal menunjukkan incoming, plant transformer, "
+                        "feeder motor, dan No.3 Feed Water Pump.\n"
+                        "• Gunakan nama peralatan di bawah setiap cabang untuk "
+                        "mencocokkan indikator dengan StatusSetting yang benar.\n"
+                        "• Warna breaker pada layar aplikasi mengikuti data YX; jangan "
+                        "menentukan kondisi breaker hanya dari gambar latar."
+                    ),
+                ),
+            ),
+            "8. Auxiliary System": (
+                (
+                    "AUXILIARY_MATCHED.png",
+                    "Gambar 8-1 — Susunan Auxiliary System 6KV I dan 6KV II.",
+                    (
+                        "Keterangan gambar:\n"
+                        "• Sisi kiri memuat feeder unit 1 dan sisi kanan memuat feeder "
+                        "unit 2; No.3 Feed Water Pump berada di tengah.\n"
+                        "• Setiap cabang turun mewakili satu bay. Nama dan daya motor "
+                        "tercetak di bawah simbol breaker.\n"
+                        "• Connection Wire One/Two dan plant transformer berada di "
+                        "bagian luar diagram sebagai referensi aliran sistem bantu.\n"
+                        "• Tabel nilai pada aplikasi harus dibaca bersama status "
+                        "komunikasi dan kualitas data."
+                    ),
+                ),
+            ),
+            "9. Generator Monitor": (
+                (
+                    "G1MONITOR.jpg.png",
+                    "Gambar 9-1 — Diagram proteksi dan monitor Generator 1.",
+                    (
+                        "Keterangan gambar:\n"
+                        "• Konduktor masuk dan perangkat switching berada di bagian "
+                        "atas; rangkaian proteksi generator berada di bagian bawah.\n"
+                        "• Simbol lingkaran bergelombang menandai generator, sedangkan "
+                        "cabang di sekitarnya menunjukkan jalur pengukuran/proteksi.\n"
+                        "• Cocokkan lampu proteksi dan breaker pada layar dengan "
+                        "StatusSetting Generator 1 sebelum mengambil keputusan."
+                    ),
+                ),
+                (
+                    "G2MONITOR.jpg.png",
+                    "Gambar 9-2 — Diagram proteksi dan monitor Generator 2.",
+                    (
+                        "Keterangan gambar:\n"
+                        "• Susunan dibaca dari incoming di atas menuju rangkaian "
+                        "generator dan proteksi di bawah.\n"
+                        "• Simbol switching hijau menunjukkan lokasi elemen status; "
+                        "kondisi sebenarnya tetap mengikuti data digital YX.\n"
+                        "• Gunakan nilai analog, lampu proteksi, timestamp, dan status "
+                        "komunikasi Generator 2 secara bersamaan."
+                    ),
+                ),
+            ),
+        }
+
         palette = {
             "navy": "#14324b",
             "navy_dark": "#10263c",
@@ -9169,6 +9250,78 @@ class SCADAMainUI:
             lmargin2=4,
             spacing2=3,
         )
+        manual_text.tag_configure(
+            "image",
+            justify="center",
+            spacing1=14,
+            spacing3=5,
+        )
+        manual_text.tag_configure(
+            "caption",
+            font=("Segoe UI", 10, "bold"),
+            foreground=palette["navy"],
+            justify="center",
+            spacing1=5,
+            spacing3=8,
+        )
+        manual_text.tag_configure(
+            "image_description",
+            font=("Segoe UI", 10),
+            foreground=palette["muted"],
+            lmargin1=18,
+            lmargin2=18,
+            rmargin=18,
+            spacing2=2,
+            spacing3=14,
+        )
+        manual_text.tag_configure(
+            "image_missing",
+            font=("Segoe UI", 10, "italic"),
+            foreground="#9b2c2c",
+            justify="center",
+            spacing1=12,
+            spacing3=8,
+        )
+        manual_images = {}
+        win._manual_images = manual_images
+
+        def insert_manual_illustration(filename, caption, description):
+            photo = manual_images.get(filename)
+            if photo is None:
+                path = os.path.join(APP_DIR, filename)
+                try:
+                    with Image.open(path) as source:
+                        rendered = ImageOps.contain(
+                            source.convert("RGB"),
+                            (900, 540),
+                            Image.Resampling.LANCZOS,
+                        )
+                    photo = ImageTk.PhotoImage(rendered)
+                    manual_images[filename] = photo
+                except (OSError, ValueError):
+                    manual_text.insert(
+                        "end",
+                        f"\n[Gambar tidak tersedia: {filename}]\n",
+                        "image_missing",
+                    )
+                    manual_text.insert("end", caption + "\n", "caption")
+                    manual_text.insert(
+                        "end",
+                        description + "\n",
+                        "image_description",
+                    )
+                    return
+
+            manual_text.insert("end", "\n")
+            image_index = manual_text.index("end-1c")
+            manual_text.image_create(image_index, image=photo)
+            manual_text.tag_add("image", image_index, f"{image_index}+1c")
+            manual_text.insert("end", "\n" + caption + "\n", "caption")
+            manual_text.insert(
+                "end",
+                description + "\n",
+                "image_description",
+            )
         self._bind_mousewheel(manual_text)
 
         visible_chapters = {"items": list(chapters)}
@@ -9182,18 +9335,26 @@ class SCADAMainUI:
             manual_text.delete("1.0", "end")
             manual_text.insert("end", title + "\n", "title")
             manual_text.insert("end", content, "body")
+            for illustration in chapter_illustrations.get(title, ()):
+                insert_manual_illustration(*illustration)
             manual_text.configure(state="disabled")
             manual_text.yview_moveto(0)
 
         def filter_chapters(*_args):
             query = search_var.get().strip().lower()
-            items = [
-                item
-                for item in chapters
-                if not query
-                or query in item[0].lower()
-                or query in item[1].lower()
-            ]
+
+            def matches(item):
+                if not query:
+                    return True
+                title, content = item
+                if query in title.lower() or query in content.lower():
+                    return True
+                return any(
+                    query in " ".join(illustration).lower()
+                    for illustration in chapter_illustrations.get(title, ())
+                )
+
+            items = [item for item in chapters if matches(item)]
             visible_chapters["items"] = items
             chapter_list.delete(0, "end")
             for title, _content in items:
