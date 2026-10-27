@@ -4159,18 +4159,21 @@ const TV_DEFAULTS={
 };
 const TV_RECTANGLES=["j-main","j-generator","j-transformer","j-transformer-bottom"];
 const TV_EDITOR_IDS=[
-    "tv-setting-option","tv-source","tv-key","tv-device","tv-bay",
-    "tv-physical","tv-info","tv-asdu","tv-ioa","tv-coefficient","tv-ctpt",
-    "tv-formula","tv-offset","tv-unit","tv-decimal","tv-rectangle-label",
-    "tv-threshold","tv-operator","tv-true-color","tv-false-color",
-    "tv-flow","tv-save"
+    "tv-setting-option","tv-device","tv-asdu","tv-ioa",
+    "tv-coefficient","tv-ctpt","tv-formula","tv-offset",
+    "tv-unit","tv-decimal","tv-rectangle-label",
+    "tv-true-color","tv-false-color","tv-flow","tv-save"
 ];
 const TV_PREVIEW_INPUT_IDS=[
-    "tv-device","tv-bay","tv-physical","tv-asdu","tv-ioa",
-    "tv-coefficient","tv-ctpt","tv-formula","tv-offset","tv-unit",
-    "tv-decimal"
+    "tv-device","tv-asdu","tv-ioa","tv-coefficient","tv-ctpt",
+    "tv-formula","tv-offset","tv-unit","tv-decimal"
 ];
-let tvConfig=null,tvEditTarget=null;
+const TV_ANALOG_ONLY_KEYS=[
+    "Coefficient","CTPT","Formula","Add_Offset","Unit","Decimals",
+    "Type","Min_Save_Mode","Tolerance","Alarm_Class",
+    "UUp_Limit","Up_Limit","Down_Limit","DDown_Limit"
+];
+let tvConfig=null,tvEditTarget=null,tvBindingDraft={};
 let tvSettingOptions=[],tvActiveOptions=[];
 let tvPreviewTimer=null,tvPreviewRequest=0;
 
@@ -4179,50 +4182,50 @@ function ensureEditor(){
     const wrap=document.createElement("div");
     wrap.id="tv-editor";
     wrap.innerHTML=`
-      <div class="tv-editor-card">
-        <h2>MONITOR TV CONFIGURATION</h2>
-        <div class="tv-editor-target" id="tv-editor-target"></div>
-        <label>
-          Pilih Setting
-          <select id="tv-setting-option">
-            <option value="">-- Pilih alamat / parameter --</option>
-          </select>
-        </label>
-        <label id="tv-source-row">
-          Source
-          <select id="tv-source">
-            <option>status</option><option>generator</option>
-            <option>wire1</option><option>wire2</option>
-            <option>voltage</option><option>auxiliary1</option>
-            <option>auxiliary2</option><option>measure_control1</option>
-            <option>measure_control2</option>
-          </select>
-        </label>
-        <label>
-          Variable / Field
-          <input id="tv-key" list="tv-fields">
-        </label>
-        <datalist id="tv-fields">
-          <option value="ct1"><option value="ct2"><option value="ct3">
-          <option value="ct4"><option value="ct5"><option value="ll1">
-          <option value="ll2"><option value="ll3"><option value="ll4">
-          <option value="rr1"><option value="rr2"><option value="rr3">
-        </datalist>
-        <div class="tv-address-grid">
-          <label>Device IP<input id="tv-device"></label>
-          <label>Bay Name<input id="tv-bay"></label>
-          <label>Physical Name<input id="tv-physical"></label>
-          <label>Info Name<input id="tv-info"></label>
-          <label>ASDU<input id="tv-asdu" type="number"></label>
-          <label>IOA<input id="tv-ioa" type="number"></label>
-          <label>Coefficient<input id="tv-coefficient" type="number" step="any"></label>
-          <label>CT/PT<input id="tv-ctpt" type="number" step="any"></label>
-          <label>Formula<input id="tv-formula"></label>
-          <label>Add Offset<input id="tv-offset" type="number" step="any"></label>
-          <label>Unit<input id="tv-unit"></label>
-          <label>Decimal<input id="tv-decimal" type="number" min="0" max="6" value="2"></label>
+      <div class="tv-editor-card" role="dialog" aria-modal="true" aria-labelledby="tv-editor-heading">
+        <div class="tv-editor-header">
+          <div>
+            <div class="tv-editor-kicker">SCADA BONT</div>
+            <h2 id="tv-editor-heading">MAPPING MONITOR TV</h2>
+          </div>
+          <div class="tv-editor-target" id="tv-editor-target"></div>
         </div>
-        <div class="tv-variable-only tv-preview-card" id="tv-value-preview">
+
+        <section class="tv-editor-section">
+          <label class="tv-setting-row">
+            <span id="tv-setting-label">Sumber data</span>
+            <select id="tv-setting-option">
+              <option value="">-- Pilih sumber IEC-104 --</option>
+            </select>
+          </label>
+          <div class="tv-source-summary">
+            <div>
+              <span>POINT TERPILIH</span>
+              <strong id="tv-source-name">Belum ada sumber dipilih</strong>
+            </div>
+            <small id="tv-source-address">Pilih sumber untuk melihat alamat IEC-104.</small>
+          </div>
+        </section>
+
+        <section class="tv-variable-only tv-editor-section">
+          <div class="tv-section-title">Alamat nilai aktual</div>
+          <div class="tv-input-grid tv-source-inputs">
+            <label><span>Device IP</span><input id="tv-device" autocomplete="off"></label>
+            <label><span>ASDU</span><input id="tv-asdu" type="number"></label>
+            <label><span>IOA</span><input id="tv-ioa" type="number"></label>
+          </div>
+          <div class="tv-section-title tv-calculation-title">Rumus dan tampilan nilai</div>
+          <div class="tv-input-grid tv-calculation-grid">
+            <label><span>Formula</span><input id="tv-formula" autocomplete="off"></label>
+            <label><span>Coefficient</span><input id="tv-coefficient" type="number" step="any"></label>
+            <label><span>CT/PT</span><input id="tv-ctpt" type="number" step="any"></label>
+            <label><span>Add Offset</span><input id="tv-offset" type="number" step="any"></label>
+            <label><span>Unit</span><input id="tv-unit" autocomplete="off"></label>
+            <label><span>Decimal</span><input id="tv-decimal" type="number" min="0" max="6" value="2"></label>
+          </div>
+        </section>
+
+        <section class="tv-variable-only tv-preview-card" id="tv-value-preview">
           <div class="tv-preview-title">PREVIEW NILAI AKTUAL SEBELUM SAVE</div>
           <div class="tv-preview-grid">
             <div><span>Nilai RAW</span><strong id="tv-preview-raw">—</strong></div>
@@ -4234,49 +4237,47 @@ function ensureEditor(){
           </div>
           <div class="tv-preview-address" id="tv-preview-address"></div>
           <div class="tv-preview-message" id="tv-preview-message"></div>
+        </section>
+
+        <section class="tv-rect-only tv-editor-section">
+          <div class="tv-section-title">Tampilan breaker</div>
+          <div class="tv-input-grid tv-breaker-grid">
+            <label>
+              <span>Nama indikator</span>
+              <input id="tv-rectangle-label" autocomplete="off">
+            </label>
+            <label>
+              <span>Closed / On</span>
+              <input id="tv-true-color" type="color" value="#ff2020">
+            </label>
+            <label>
+              <span>Open / Off</span>
+              <input id="tv-false-color" type="color" value="#14d84a">
+            </label>
+            <label>
+              <span>Efek status</span>
+              <select id="tv-flow">
+                <option value="none">Diam</option>
+                <option value="blink">Blink</option>
+                <option value="flow">Flow / Pulse</option>
+              </select>
+            </label>
+          </div>
+          <div class="tv-breaker-rule" id="tv-breaker-rule">
+            Status efektif = nilai YX IEC-104 XOR Reverse.
+          </div>
+        </section>
+
+        <div class="tv-editor-actions">
+          <div id="tv-editor-message"></div>
+          <div class="tv-editor-buttons">
+            <button id="tv-save">Save</button>
+            <button id="tv-close">Close</button>
+          </div>
         </div>
-        <label class="tv-rect-only">
-          Nilai pembanding<input id="tv-threshold" type="number" step="any">
-        </label>
-        <label class="tv-rect-only">
-          Operator
-          <select id="tv-operator">
-            <option value=">">Lebih besar (&gt;)</option>
-            <option value=">=">Lebih besar/sama (&gt;=)</option>
-            <option value="<">Lebih kecil (&lt;)</option>
-            <option value="<=">Lebih kecil/sama (&lt;=)</option>
-            <option value="==">Sama dengan (=)</option>
-            <option value="!=">Tidak sama (≠)</option>
-          </select>
-        </label>
-        <label class="tv-rect-only">
-          Jika BENAR<input id="tv-true-color" type="color" value="#ff2020">
-        </label>
-        <label class="tv-rect-only">
-          Jika SALAH<input id="tv-false-color" type="color" value="#14d84a">
-        </label>
-        <label class="tv-rect-only">
-          Efek status
-          <select id="tv-flow">
-            <option value="none">Diam</option>
-            <option value="blink">Blink</option>
-            <option value="flow">Flow / Pulse</option>
-          </select>
-        </label>
-        <div class="tv-editor-buttons">
-          <button id="tv-edit">Edit</button>
-          <button id="tv-save">Save</button>
-          <button id="tv-close">Close</button>
-        </div>
-        <div id="tv-editor-message"></div>
       </div>`;
-    wrap.querySelector("#tv-editor-target").insertAdjacentHTML(
-        "afterend",
-        '<label class="tv-rect-only">Nama rectangle<input id="tv-rectangle-label" placeholder="Isi nama bebas"></label>'
-    );
     document.body.appendChild(wrap);
     document.getElementById("tv-close").onclick=()=>wrap.classList.remove("open");
-    document.getElementById("tv-edit").onclick=()=>setEditorDisabled(false);
     document.getElementById("tv-save").onclick=saveTvEditor;
     document.getElementById("tv-setting-option").onchange=applySelectedSetting;
     TV_PREVIEW_INPUT_IDS.forEach(id=>{
@@ -4287,29 +4288,87 @@ function ensureEditor(){
 }
 
 function setEditorDisabled(disabled){
-    TV_EDITOR_IDS.forEach(id=>document.getElementById(id).disabled=disabled);
+    TV_EDITOR_IDS.forEach(id=>{
+        const element=document.getElementById(id);
+        if(element)element.disabled=disabled;
+    });
 }
 
 function editorNumber(id,fallback){
-    const raw=document.getElementById(id).value.trim();
+    const input=document.getElementById(id);
+    const raw=input?input.value.trim():"";
     const value=Number(raw);
     return raw!==""&&Number.isFinite(value)?value:fallback;
 }
 
+function inferTvSource(binding){
+    if(binding.Source_Kind==="rectangle_status_csv")return "status";
+    const bay=String(binding.Bay_Name||"");
+    if(bay.includes("Connection Wire II"))return "wire2";
+    if(bay.includes("Connection Wire I"))return "wire1";
+    if(bay.includes("Voltage"))return "voltage";
+    if(bay.includes("1# Auxiliary"))return "auxiliary1";
+    if(bay.includes("2# Auxiliary"))return "auxiliary2";
+    if(bay.includes("1# Measure"))return "measure_control1";
+    if(bay.includes("2# Measure"))return "measure_control2";
+    return binding.source||"generator";
+}
+
+function inferTvKey(binding,source){
+    const physical=String(binding.Physical_Name||binding.key||"").trim();
+    if(source==="wire1"&&physical.startsWith("W1_"))return physical.slice(3);
+    if(source==="wire2"&&physical.startsWith("W2_"))return physical.slice(3);
+    return physical;
+}
+
+function updateTvSourceSummary(binding){
+    const bay=String(binding.Bay_Name||"").trim();
+    const point=String(
+        binding.Physical_Name||binding.Info_Name||binding.key||""
+    ).trim();
+    document.getElementById("tv-source-name").textContent=
+        [bay,point].filter(Boolean).join(" • ")||"Belum ada sumber dipilih";
+    const parts=[
+        binding.Device_Addr?`IP ${binding.Device_Addr}`:"",
+        binding.ASDU!==""&&binding.ASDU!=null?`ASDU ${binding.ASDU}`:"",
+        binding.IOA!==""&&binding.IOA!=null?`IOA ${binding.IOA}`:"",
+        binding.Info_Name?`Info ${binding.Info_Name}`:""
+    ].filter(Boolean);
+    document.getElementById("tv-source-address").textContent=
+        parts.join(" • ")||"Pilih sumber untuk melihat alamat IEC-104.";
+    const reverse=String(binding.Reverse||"0");
+    document.getElementById("tv-breaker-rule").textContent=
+        `Status efektif = YX IEC-104 XOR Reverse ${reverse} • `+
+        `Set ${binding.SetStr||"1"} • Reset ${binding.ResetStr||"0"}`;
+}
+
+function fillVariableInputs(binding){
+    const map={
+        "tv-device":"Device_Addr","tv-asdu":"ASDU","tv-ioa":"IOA",
+        "tv-coefficient":"Coefficient","tv-ctpt":"CTPT",
+        "tv-formula":"Formula","tv-offset":"Add_Offset",
+        "tv-unit":"Unit","tv-decimal":"Decimals"
+    };
+    Object.entries(map).forEach(([id,key])=>{
+        document.getElementById(id).value=
+            binding[key]??(key==="Decimals"?2:"");
+    });
+}
+
 function collectTvAddress(){
-    const chosen=tvActiveOptions[
-        Number(document.getElementById("tv-setting-option").value)
-    ]||{};
-    const source=document.getElementById("tv-source").value;
+    const binding={...tvBindingDraft};
+    const source=inferTvSource(binding);
+    binding.mode="selected";
+    binding.source=source;
+    binding.key=inferTvKey(binding,source);
+    if(tvEditTarget&&tvEditTarget.kind==="rectangle"){
+        binding.Source_Kind="rectangle_status_csv";
+        TV_ANALOG_ONLY_KEYS.forEach(key=>delete binding[key]);
+        return binding;
+    }
     return {
-        mode:"selected",
-        source,
-        key:document.getElementById("tv-key").value.trim(),
+        ...binding,
         Device_Addr:document.getElementById("tv-device").value.trim(),
-        Bay_Name:document.getElementById("tv-bay").value.trim(),
-        Physical_Name:document.getElementById("tv-physical").value.trim(),
-        Info_Name:document.getElementById("tv-info").value.trim(),
-        Info_Index:chosen.Info_Index??"",
         ASDU:editorNumber("tv-asdu",0),
         IOA:editorNumber("tv-ioa",0),
         Coefficient:editorNumber("tv-coefficient",1),
@@ -4317,8 +4376,7 @@ function collectTvAddress(){
         Formula:document.getElementById("tv-formula").value.trim(),
         Add_Offset:editorNumber("tv-offset",0),
         Unit:document.getElementById("tv-unit").value.trim(),
-        Decimals:editorNumber("tv-decimal",2),
-        Source_Kind:chosen.Source_Kind||(source==="status"?"rectangle_status_csv":"")
+        Decimals:editorNumber("tv-decimal",2)
     };
 }
 
@@ -4330,6 +4388,8 @@ function formatPreviewNumber(value){
 
 function scheduleTvPreview(){
     if(!tvEditTarget||tvEditTarget.kind!=="variable")return;
+    const binding=collectTvAddress();
+    updateTvSourceSummary(binding);
     clearTimeout(tvPreviewTimer);
     tvPreviewTimer=setTimeout(refreshTvPreview,180);
 }
@@ -4411,36 +4471,18 @@ async function refreshTvPreview(){
 }
 
 function applySelectedSetting(){
-    const row=tvActiveOptions[
-        Number(document.getElementById("tv-setting-option").value)
-    ];
+    const selectedValue=document.getElementById("tv-setting-option").value;
+    if(selectedValue==="")return;
+    const row=tvActiveOptions[Number(selectedValue)];
     if(!row)return;
-    const map={
-        "tv-device":"Device_Addr","tv-bay":"Bay_Name",
-        "tv-physical":"Physical_Name","tv-info":"Info_Name",
-        "tv-asdu":"ASDU","tv-ioa":"IOA","tv-coefficient":"Coefficient",
-        "tv-ctpt":"CTPT","tv-formula":"Formula","tv-offset":"Add_Offset",
-        "tv-unit":"Unit","tv-decimal":"Decimals"
-    };
-    Object.entries(map).forEach(
-        ([id,key])=>document.getElementById(id).value=row[key]??""
-    );
-    const isStatus=row.Source_Kind==="rectangle_status_csv";
-    document.getElementById("tv-key").value=isStatus
-        ?(row.Info_Name||row.Physical_Name||"")
-        :(row.Physical_Name||"");
-    const bay=String(row.Bay_Name||"");
-    const source=isStatus?"status"
-        :bay.includes("Connection Wire II")?"wire2"
-        :bay.includes("Connection Wire I")?"wire1"
-        :bay.includes("Voltage")?"voltage"
-        :bay.includes("1# Auxiliary")?"auxiliary1"
-        :bay.includes("2# Auxiliary")?"auxiliary2"
-        :bay.includes("1# Measure")?"measure_control1"
-        :bay.includes("2# Measure")?"measure_control2"
-        :"generator";
-    document.getElementById("tv-source").value=source;
-    scheduleTvPreview();
+    tvBindingDraft={...tvBindingDraft,...row};
+    tvBindingDraft.source=inferTvSource(tvBindingDraft);
+    tvBindingDraft.key=inferTvKey(tvBindingDraft,tvBindingDraft.source);
+    updateTvSourceSummary(tvBindingDraft);
+    if(tvEditTarget.kind==="variable"){
+        fillVariableInputs(tvBindingDraft);
+        scheduleTvPreview();
+    }
 }
 
 async function openTvEditor(kind,name){
@@ -4461,56 +4503,41 @@ async function openTvEditor(kind,name){
     }
     tvEditTarget={kind,name};
     const section=tvConfig[monitorId]||{variables:{},rectangles:{}};
-    let cfg;
-    if(kind==="variable"){
-        cfg=section.variables[name]||{
+    const cfg=kind==="variable"
+        ?section.variables[name]||{
             source:TV_DEFAULTS[name][0],
             key:TV_DEFAULTS[name][1]
+        }
+        :section.rectangles[name]||{
+            field:"",
+            label:name,
+            true_color:"#ff2020",
+            false_color:"#14d84a",
+            flow:"none",
+            Source_Kind:"rectangle_status_csv"
         };
-    }else{
-        const saved=section.rectangles[name]||{
-            field:"ct3",operator:">",threshold:0,
-            true_color:"#ff2020",false_color:"#14d84a",flow:"none"
-        };
-        const linked=(section.variables||{})[saved.field]||{};
-        cfg={
-            ...linked,...saved,
-            key:saved.field||linked.key||"ct3",
-            field:saved.field||linked.key||"ct3"
-        };
-    }
+    tvBindingDraft={...cfg};
     tvActiveOptions=tvSettingOptions.filter(
         row=>kind==="rectangle"
             ?row.Source_Kind==="rectangle_status_csv"
             :row.Source_Kind!=="rectangle_status_csv"
     );
     const option=document.getElementById("tv-setting-option");
-    option.innerHTML='<option value="">-- Pilih alamat --</option>'+
-        tvActiveOptions.map((row,index)=>
-            `<option value="${index}">${kind==="rectangle"?"[STATUS] ":""}${row.Bay_Name} | ${row.Physical_Name} | ${row.Device_Addr} | ASDU ${row.ASDU} | IOA ${row.IOA}</option>`
-        ).join("");
-    document.getElementById("tv-editor-target").textContent=monitorId+" // "+name;
-    document.getElementById("tv-source").value=cfg.source||"generator";
-    document.getElementById("tv-key").value=kind==="variable"
-        ?(cfg.key||cfg.Physical_Name||"")
-        :(cfg.field||"");
-    document.getElementById("tv-threshold").value=cfg.threshold??0;
-    document.getElementById("tv-operator").value=cfg.operator||">";
-    document.getElementById("tv-true-color").value=
-        cfg.true_color||cfg.active_color||"#ff2020";
-    document.getElementById("tv-false-color").value=
-        cfg.false_color||cfg.inactive_color||"#14d84a";
-    document.getElementById("tv-flow").value=cfg.flow||"none";
-    document.getElementById("tv-rectangle-label").value=cfg.label||name;
-    const fieldMap={
-        "tv-device":"Device_Addr","tv-bay":"Bay_Name",
-        "tv-physical":"Physical_Name","tv-info":"Info_Name",
-        "tv-asdu":"ASDU","tv-ioa":"IOA","tv-coefficient":"Coefficient",
-        "tv-ctpt":"CTPT","tv-formula":"Formula","tv-offset":"Add_Offset",
-        "tv-unit":"Unit","tv-decimal":"Decimals"
-    };
-    Object.entries(fieldMap).forEach(([id,key])=>{
-        document.getElementById(id).value=cfg[key]??(key==="Decimals"?2:"");
+    option.replaceChildren(new Option(
+        kind==="rectangle"
+            ?"— Pilih sumber status breaker —"
+            :"— Pilih sumber nilai aktual —",
+        ""
+    ));
+    tvActiveOptions.forEach((row,index)=>{
+        const label=[
+            row.Bay_Name,
+            row.Physical_Name||row.Info_Name,
+            row.Device_Addr,
+            `ASDU ${row.ASDU}`,
+            `IOA ${row.IOA}`
+        ].filter(Boolean).join(" • ");
+        option.add(new Option(label,String(index)));
     });
     const selectedIndex=tvActiveOptions.findIndex(row=>
         String(row.Device_Addr||"")===String(cfg.Device_Addr||"")&&
@@ -4519,25 +4546,37 @@ async function openTvEditor(kind,name){
         String(row.ASDU||"")===String(cfg.ASDU||"")&&
         String(row.IOA||"")===String(cfg.IOA||"")
     );
-    if(selectedIndex>=0)option.value=String(selectedIndex);
+    option.value=selectedIndex>=0?String(selectedIndex):"";
+
+    document.getElementById("tv-editor-heading").textContent=
+        kind==="rectangle"?"MAPPING BREAKER MONITOR TV":"MAPPING NILAI AKTUAL";
+    document.getElementById("tv-setting-label").textContent=
+        kind==="rectangle"?"Sumber breaker":"Sumber nilai";
+    document.getElementById("tv-editor-target").textContent=
+        monitorId+" // "+name;
+    document.getElementById("tv-true-color").value=
+        cfg.true_color||cfg.active_color||"#ff2020";
+    document.getElementById("tv-false-color").value=
+        cfg.false_color||cfg.inactive_color||"#14d84a";
+    document.getElementById("tv-flow").value=cfg.flow||"none";
+    document.getElementById("tv-rectangle-label").value=cfg.label||name;
+    if(kind==="variable")fillVariableInputs(cfg);
+    updateTvSourceSummary(cfg);
+
     document.querySelectorAll(".tv-rect-only").forEach(
-        element=>element.style.display=kind==="rectangle"?"grid":"none"
+        element=>element.style.display=kind==="rectangle"?"block":"none"
     );
     document.querySelectorAll(".tv-variable-only").forEach(
         element=>element.style.display=kind==="variable"?"block":"none"
     );
-    document.getElementById("tv-source-row").style.display="grid";
     document.getElementById("tv-editor-message").textContent=
         kind==="rectangle"
-            ?"Rectangle mengambil nilai RAW dari StatusSetting bay yang dipilih."
-            :"Edit langsung aktif sesuai login Admin/Developer pada aplikasi desktop.";
+            ?"Hanya sumber status dan tampilan breaker yang dapat diubah."
+            :"Alamat IEC-104 dan parameter yang memengaruhi hasil ditampilkan.";
     setEditorDisabled(false);
-    if(kind==="rectangle"){
-        document.getElementById("tv-threshold").disabled=true;
-        document.getElementById("tv-operator").disabled=true;
-    }
     document.getElementById("tv-editor").classList.add("open");
     if(kind==="variable")scheduleTvPreview();
+    option.focus();
 }
 
 async function saveTvEditor(){
@@ -4552,7 +4591,7 @@ async function saveTvEditor(){
         const falseColor=document.getElementById("tv-false-color").value;
         section.rectangles[tvEditTarget.name]={
             ...address,
-            field:address.key,
+            field:address.field||tvBindingDraft.field||"",
             label:document.getElementById("tv-rectangle-label").value.trim()||
                 tvEditTarget.name,
             operator:"=",
@@ -4605,63 +4644,252 @@ document.addEventListener("click",event=>{
 
 <style>
 #tv-editor{
-    display:none;position:fixed;inset:0;z-index:99999;
-    background:rgba(0,0,0,.72);align-items:center;justify-content:center;
-    font-family:Segoe UI,Arial;color:#fff
+    display:none;
+    position:fixed;
+    inset:0;
+    z-index:99999;
+    padding:clamp(10px,2.5vw,28px);
+    overflow:auto;
+    background:rgba(0,0,0,.76);
+    align-items:center;
+    justify-content:center;
+    font-family:Segoe UI,Arial,sans-serif;
+    color:#fff;
 }
 #tv-editor.open{display:flex}
 .tv-editor-card{
-    width:820px;max-width:94vw;max-height:90vh;overflow:auto;
-    background:#111827;border:1px solid #3b82f6;border-radius:14px;
-    padding:22px;box-shadow:0 24px 80px #000
+    width:min(760px,100%);
+    max-height:calc(100vh - 24px);
+    max-height:calc(100dvh - 24px);
+    overflow:auto;
+    overscroll-behavior:contain;
+    background:#111827;
+    border:1px solid #3b82f6;
+    border-radius:14px;
+    padding:clamp(14px,2.4vw,22px);
+    box-shadow:0 24px 80px #000;
 }
-.tv-editor-card h2{margin:0 0 14px;color:#60a5fa;font-size:20px}
+.tv-editor-header{
+    display:flex;
+    align-items:flex-start;
+    justify-content:space-between;
+    gap:16px;
+    margin-bottom:12px;
+}
+.tv-editor-kicker{
+    color:#7dd3fc;
+    font-size:10px;
+    font-weight:800;
+    letter-spacing:1.6px;
+}
+.tv-editor-card h2{
+    margin:3px 0 0;
+    color:#e0f2fe;
+    font-size:clamp(17px,2.5vw,21px);
+}
 .tv-editor-target{
-    padding:9px;background:#07101f;border-radius:7px;margin-bottom:12px;
-    color:#facc15;font-weight:700
+    flex:0 0 auto;
+    padding:8px 12px;
+    background:#07101f;
+    border:1px solid #1e3a52;
+    border-radius:7px;
+    color:#facc15;
+    font-weight:700;
 }
-.tv-editor-card label{
-    display:grid;grid-template-columns:145px 1fr;gap:10px;
-    align-items:center;margin:9px 0
+.tv-editor-section{
+    margin-top:12px;
+    padding:13px;
+    background:#0b1220;
+    border:1px solid #25354a;
+    border-radius:10px;
 }
-.tv-address-grid{display:grid;grid-template-columns:1fr 1fr;gap:0 14px}
-.tv-address-grid label{grid-template-columns:110px 1fr}
-.tv-editor-card input,.tv-editor-card select{
-    min-width:0;padding:8px;background:#05080e;color:#fff;
-    border:1px solid #64748b;border-radius:5px
+.tv-setting-row{
+    display:grid;
+    grid-template-columns:130px minmax(0,1fr);
+    gap:10px;
+    align-items:center;
+}
+.tv-setting-row>span,
+.tv-input-grid label>span{
+    color:#cbd5e1;
+    font-size:12px;
+    font-weight:700;
+}
+.tv-editor-card input,
+.tv-editor-card select{
+    width:100%;
+    min-width:0;
+    min-height:38px;
+    padding:8px 10px;
+    background:#05080e;
+    color:#fff;
+    border:1px solid #64748b;
+    border-radius:6px;
+    font:inherit;
+}
+.tv-editor-card input:focus,
+.tv-editor-card select:focus{
+    outline:2px solid #38bdf8;
+    outline-offset:1px;
+    border-color:#38bdf8;
+}
+.tv-source-summary{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:16px;
+    margin-top:10px;
+    padding:10px 12px;
+    background:#071521;
+    border-left:3px solid #0ea5e9;
+    border-radius:6px;
+}
+.tv-source-summary span{
+    display:block;
+    color:#7dd3fc;
+    font-size:10px;
+    font-weight:800;
+    letter-spacing:.7px;
+}
+.tv-source-summary strong{
+    display:block;
+    margin-top:3px;
+    color:#f8fafc;
+    font-size:13px;
+}
+.tv-source-summary small{
+    max-width:48%;
+    color:#94a3b8;
+    font-size:11px;
+    text-align:right;
+}
+.tv-section-title{
+    margin-bottom:9px;
+    color:#7dd3fc;
+    font-size:11px;
+    font-weight:800;
+    letter-spacing:.6px;
+    text-transform:uppercase;
+}
+.tv-calculation-title{margin-top:13px}
+.tv-input-grid{
+    display:grid;
+    grid-template-columns:repeat(3,minmax(0,1fr));
+    gap:10px;
+}
+.tv-input-grid label{
+    display:flex;
+    min-width:0;
+    flex-direction:column;
+    gap:5px;
+}
+.tv-calculation-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
+.tv-breaker-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
+.tv-breaker-grid input[type="color"]{
+    padding:4px;
+    cursor:pointer;
+}
+.tv-breaker-rule{
+    margin-top:10px;
+    padding:9px 10px;
+    color:#bae6fd;
+    background:#071521;
+    border-radius:6px;
+    font:12px Consolas,monospace;
 }
 .tv-preview-card{
-    margin-top:16px;padding:14px;border:1px solid #0ea5e9;
-    border-radius:9px;background:#071521
+    margin-top:12px;
+    padding:13px;
+    border:1px solid #0ea5e9;
+    border-radius:9px;
+    background:#071521;
 }
 .tv-preview-title{
-    color:#7dd3fc;font-size:12px;font-weight:800;letter-spacing:.5px;
-    margin-bottom:10px
+    color:#7dd3fc;
+    font-size:11px;
+    font-weight:800;
+    letter-spacing:.5px;
+    margin-bottom:9px;
 }
-.tv-preview-grid{display:grid;grid-template-columns:1fr 1.35fr 1fr;gap:10px}
+.tv-preview-grid{
+    display:grid;
+    grid-template-columns:1fr 1.35fr 1fr;
+    gap:9px;
+}
 .tv-preview-grid div{
-    padding:10px;border-radius:7px;background:#0b2236;border:1px solid #1e3a52
+    padding:9px;
+    border-radius:7px;
+    background:#0b2236;
+    border:1px solid #1e3a52;
 }
 .tv-preview-grid span{
-    display:block;color:#94a3b8;font-size:11px;margin-bottom:5px
+    display:block;
+    color:#94a3b8;
+    font-size:10px;
+    margin-bottom:4px;
 }
-.tv-preview-grid strong{display:block;color:#86efac;font-size:18px}
+.tv-preview-grid strong{display:block;color:#86efac;font-size:17px}
 .tv-preview-card.offline .tv-preview-grid strong{color:#facc15}
 .tv-preview-card.missing .tv-preview-grid strong{color:#fca5a5}
 .tv-preview-formula{
-    margin-top:10px;padding:9px 10px;border-radius:6px;background:#05080e;
-    color:#e2e8f0;font-family:Consolas,monospace;font-size:12px
+    margin-top:9px;
+    padding:8px 9px;
+    border-radius:6px;
+    background:#05080e;
+    color:#e2e8f0;
+    font:11px Consolas,monospace;
 }
-.tv-preview-address{margin-top:8px;color:#7dd3fc;font-size:12px}
-.tv-preview-message{margin-top:5px;color:#cbd5e1;font-size:12px}
-.tv-editor-buttons{display:flex;gap:9px;justify-content:flex-end;margin-top:18px}
+.tv-preview-address{margin-top:7px;color:#7dd3fc;font-size:11px}
+.tv-preview-message{margin-top:4px;color:#cbd5e1;font-size:11px}
+.tv-editor-actions{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:12px;
+    margin-top:12px;
+    padding-top:10px;
+}
+.tv-editor-buttons{display:flex;gap:8px;justify-content:flex-end}
 .tv-editor-buttons button{
-    padding:8px 18px;border:0;border-radius:6px;font-weight:700;cursor:pointer
+    min-width:92px;
+    min-height:38px;
+    padding:8px 18px;
+    border:0;
+    border-radius:6px;
+    font-weight:700;
+    cursor:pointer;
 }
-.tv-editor-buttons button:nth-child(2){background:#16a34a;color:#fff}
-.tv-editor-buttons button:nth-child(3){background:#dc2626;color:#fff}
-#tv-editor-message{margin-top:12px;color:#86efac}
+.tv-editor-buttons button:first-child{background:#16a34a;color:#fff}
+.tv-editor-buttons button:last-child{background:#dc2626;color:#fff}
+#tv-editor-message{color:#86efac;font-size:12px}
 .junction,[id$='-parameter'],.seg-wrap{cursor:pointer}
+@media(max-width:680px){
+    #tv-editor{align-items:flex-start;padding:8px}
+    .tv-editor-card{
+        width:100%;
+        max-height:calc(100dvh - 16px);
+        border-radius:10px;
+    }
+    .tv-editor-header,
+    .tv-source-summary,
+    .tv-editor-actions{
+        align-items:stretch;
+        flex-direction:column;
+    }
+    .tv-editor-target{align-self:flex-start}
+    .tv-setting-row{grid-template-columns:1fr}
+    .tv-source-summary small{max-width:none;text-align:left}
+    .tv-input-grid,
+    .tv-calculation-grid,
+    .tv-breaker-grid,
+    .tv-preview-grid{grid-template-columns:1fr}
+    .tv-editor-buttons{width:100%}
+    .tv-editor-buttons button{flex:1}
+}
+@media(max-height:700px) and (min-width:681px){
+    #tv-editor{align-items:flex-start}
+    .tv-editor-card{max-height:calc(100dvh - 16px)}
+}
 </style>
 
 

@@ -29,6 +29,97 @@ from tkinter import ttk, messagebox, filedialog, font as tkfont
 from PIL import Image, ImageTk, ImageOps, ImageGrab
 import cbz8000_device_data as cbz_device_data
 
+
+def _set_macos_application_menu_title(name):
+    """Rename Tk's native Cocoa application menu without requiring PyObjC."""
+    if sys.platform != "darwin":
+        return
+    try:
+        import ctypes
+        import ctypes.util
+
+        objc = ctypes.CDLL(ctypes.util.find_library("objc"))
+        pointer = ctypes.c_void_p
+        objc.objc_getClass.argtypes = [ctypes.c_char_p]
+        objc.objc_getClass.restype = pointer
+        objc.sel_registerName.argtypes = [ctypes.c_char_p]
+        objc.sel_registerName.restype = pointer
+        send_id = ctypes.CFUNCTYPE(
+            pointer, pointer, pointer,
+        )(("objc_msgSend", objc))
+        send_id_int = ctypes.CFUNCTYPE(
+            pointer, pointer, pointer, ctypes.c_long,
+        )(("objc_msgSend", objc))
+        send_id_text = ctypes.CFUNCTYPE(
+            pointer, pointer, pointer, ctypes.c_char_p,
+        )(("objc_msgSend", objc))
+        send_void_id = ctypes.CFUNCTYPE(
+            None, pointer, pointer, pointer,
+        )(("objc_msgSend", objc))
+        send_long = ctypes.CFUNCTYPE(
+            ctypes.c_long, pointer, pointer,
+        )(("objc_msgSend", objc))
+        send_utf8 = ctypes.CFUNCTYPE(
+            ctypes.c_char_p, pointer, pointer,
+        )(("objc_msgSend", objc))
+
+        def selector(value):
+            return objc.sel_registerName(value.encode("ascii"))
+
+        application_class = objc.objc_getClass(b"NSApplication")
+        process_info_class = objc.objc_getClass(b"NSProcessInfo")
+        string_class = objc.objc_getClass(b"NSString")
+        application = send_id(
+            application_class, selector("sharedApplication"),
+        )
+        main_menu = send_id(application, selector("mainMenu"))
+        application_item = send_id_int(
+            main_menu, selector("itemAtIndex:"), 0,
+        )
+        native_title = send_id_text(
+            string_class,
+            selector("stringWithUTF8String:"),
+            str(name).encode("utf-8"),
+        )
+        process_info = send_id(
+            process_info_class, selector("processInfo"),
+        )
+        send_void_id(
+            process_info, selector("setProcessName:"), native_title,
+        )
+        send_void_id(application_item, selector("setTitle:"), native_title)
+        submenu = send_id(application_item, selector("submenu"))
+        if submenu:
+            empty_title = send_id_text(
+                string_class, selector("stringWithUTF8String:"), b"",
+            )
+            send_void_id(submenu, selector("setTitle:"), empty_title)
+            send_void_id(submenu, selector("setTitle:"), native_title)
+            item_count = send_long(submenu, selector("numberOfItems"))
+            for index in range(item_count):
+                item = send_id_int(submenu, selector("itemAtIndex:"), index)
+                item_title = send_id(item, selector("title"))
+                title_bytes = (
+                    send_utf8(item_title, selector("UTF8String"))
+                    if item_title else None
+                )
+                if not title_bytes:
+                    continue
+                title_text = title_bytes.decode("utf-8", errors="replace")
+                if "Python" not in title_text:
+                    continue
+                replacement = send_id_text(
+                    string_class,
+                    selector("stringWithUTF8String:"),
+                    title_text.replace("Python", str(name)).encode("utf-8"),
+                )
+                send_void_id(item, selector("setTitle:"), replacement)
+    except Exception:
+        pass
+
+
+
+
 def _cbz_breaker_state(raw_value, reverse=0):
     """Normalize one YX bit like CBZ8000: 1=closed/red, 0=open/green."""
     try:
@@ -248,7 +339,7 @@ IOA_MAP_STANDARD = {
     16417: "IE",    16418: "UE",    16419: "f",
 }
 
-APP_VERSION = "2.5.2"
+APP_VERSION = "2.5.3"
 APP_DIR = (
     os.path.dirname(os.path.abspath(sys.executable))
     if getattr(sys, "frozen", False)
@@ -4451,6 +4542,22 @@ class SCADAMainUI:
 # ==============================================================================
     def build_top_menu(self):
         menubar = tk.Menu(self.root)
+        if sys.platform == "darwin":
+            application_menu = tk.Menu(
+                menubar, name="apple", tearoff=0,
+            )
+            application_menu.add_command(
+                label="About SCADA BONT",
+                command=lambda: messagebox.showinfo(
+                    "About SCADA BONT",
+                    f"SCADA BONT\nVersion {APP_VERSION}",
+                    parent=self.root,
+                ),
+            )
+            menubar.add_cascade(
+                label="SCADA BONT", menu=application_menu,
+            )
+
 
         # Management Menu
         manage_menu = tk.Menu(menubar, tearoff=0)
@@ -4501,6 +4608,11 @@ class SCADAMainUI:
         maintain_menu.add_command(
             label="Mapping Run Monitoring",
             command=self.open_run_monitor_mapping,
+            state=maintenance_state,
+        )
+        maintain_menu.add_command(
+            label="Mapping G1 dan G2",
+            command=self.open_monitor_tv_mapping,
             state=maintenance_state,
         )
         menubar.add_cascade(label='Maintenance', menu=maintain_menu)
@@ -4564,6 +4676,19 @@ class SCADAMainUI:
         menubar.add_cascade(label="Help", menu=help_menu)
 
         self.root.config(menu=menubar)
+        if sys.platform == "darwin":
+            self.root.after_idle(
+                lambda: _set_macos_application_menu_title("SCADA BONT")
+            )
+            self.root.after(
+                250,
+                lambda: _set_macos_application_menu_title("SCADA BONT"),
+            )
+            self.root.after(
+                1500,
+                lambda: _set_macos_application_menu_title("SCADA BONT"),
+            )
+
 
     def open_communication_settings(self):
         """Open the local IEC-104/relay configuration editor."""
@@ -5392,6 +5517,249 @@ class SCADAMainUI:
         reload_and_render()
         schedule_refresh()
         search_entry.focus_set()
+
+    def open_monitor_tv_mapping(self):
+        """Show the live value, formula, and breaker mapping used by G1/G2 TV."""
+        existing = getattr(self, "_monitor_tv_mapping_window", None)
+        if existing is not None and existing.winfo_exists():
+            existing.deiconify()
+            existing.lift()
+            existing.focus_force()
+            return
+
+        win = tk.Toplevel(self.root)
+        self._monitor_tv_mapping_window = win
+        self._make_toplevel_responsive(
+            win, "Mapping Monitor TV G1 dan G2", fullscreen=False,
+        )
+        win.configure(bg="#d4d0c8")
+
+        header = tk.Frame(win, bg="#000080", padx=16, pady=12)
+        header.pack(fill="x")
+        tk.Label(
+            header,
+            text="MAPPING MONITOR TV G1 / G2",
+            bg="#000080",
+            fg="#ffffff",
+            font=("Segoe UI", 16, "bold"),
+            anchor="w",
+        ).pack(fill="x")
+        tk.Label(
+            header,
+            text=(
+                "Sumber IEC-104, rumus, nilai aktual, dan breaker mengikuti "
+                "MonitorTVConfig. Perubahan dari modal G1/G2 tampil otomatis."
+            ),
+            bg="#000080",
+            fg="#e8e8ff",
+            font=("Segoe UI", 10),
+            anchor="w",
+        ).pack(fill="x", pady=(4, 0))
+
+        filter_bar = tk.Frame(win, bg="#d4d0c8", padx=12, pady=9)
+        filter_bar.pack(fill="x")
+        tk.Label(
+            filter_bar, text="Monitor:", bg="#d4d0c8",
+            font=("Segoe UI", 10, "bold"),
+        ).pack(side="left")
+        monitor_var = tk.StringVar(value="Semua")
+        monitor_combo = ttk.Combobox(
+            filter_bar,
+            textvariable=monitor_var,
+            values=("Semua", "G1", "G2"),
+            state="readonly",
+            width=10,
+        )
+        monitor_combo.pack(side="left", padx=(6, 14))
+
+        tk.Label(
+            filter_bar, text="Jenis:", bg="#d4d0c8",
+            font=("Segoe UI", 10, "bold"),
+        ).pack(side="left")
+        kind_var = tk.StringVar(value="Semua")
+        kind_combo = ttk.Combobox(
+            filter_bar,
+            textvariable=kind_var,
+            values=("Semua", "Nilai Aktual", "Breaker"),
+            state="readonly",
+            width=14,
+        )
+        kind_combo.pack(side="left", padx=(6, 14))
+
+        tk.Label(
+            filter_bar, text="Cari:", bg="#d4d0c8",
+            font=("Segoe UI", 10, "bold"),
+        ).pack(side="left")
+        search_var = tk.StringVar()
+        search_entry = ttk.Entry(filter_bar, textvariable=search_var, width=30)
+        search_entry.pack(side="left", padx=(6, 12))
+        status_var = tk.StringVar(value="Menyiapkan mapping G1/G2...")
+        tk.Label(
+            filter_bar,
+            textvariable=status_var,
+            bg="#d4d0c8",
+            fg="#333333",
+            font=("Segoe UI", 9),
+            anchor="e",
+        ).pack(side="right", fill="x", expand=True)
+
+        table_host = tk.Frame(win, bg="#7f7f7f", bd=1, relief="sunken")
+        table_host.pack(fill="both", expand=True, padx=12, pady=(0, 8))
+        columns = (
+            "monitor", "kind", "element", "point", "actual", "raw", "quality",
+            "source", "ip", "asdu", "ioa", "formula", "coefficient", "ctpt",
+            "offset", "unit", "rule",
+        )
+        headings = {
+            "monitor": ("Monitor", 70, "center"),
+            "kind": ("Jenis", 95, "center"),
+            "element": ("Elemen", 105, "center"),
+            "point": ("Nama Point", 220, "w"),
+            "actual": ("Nilai Aktual", 110, "e"),
+            "raw": ("RAW / YX", 90, "e"),
+            "quality": ("Kualitas", 105, "center"),
+            "source": ("Sumber Konfigurasi", 245, "w"),
+            "ip": ("IP RTU", 125, "center"),
+            "asdu": ("ASDU", 75, "e"),
+            "ioa": ("IOA", 85, "e"),
+            "formula": ("Formula / Logika", 165, "w"),
+            "coefficient": ("Coefficient", 105, "e"),
+            "ctpt": ("CT/PT", 90, "e"),
+            "offset": ("Offset", 85, "e"),
+            "unit": ("Unit", 75, "center"),
+            "rule": ("Perhitungan / Status", 310, "w"),
+        }
+        ybar = ttk.Scrollbar(table_host, orient="vertical")
+        xbar = ttk.Scrollbar(table_host, orient="horizontal")
+        tree = ttk.Treeview(
+            table_host,
+            columns=columns,
+            show="headings",
+            selectmode="browse",
+            yscrollcommand=ybar.set,
+            xscrollcommand=xbar.set,
+        )
+        ybar.config(command=tree.yview)
+        xbar.config(command=tree.xview)
+        ybar.pack(side="right", fill="y")
+        xbar.pack(side="bottom", fill="x")
+        tree.pack(side="left", fill="both", expand=True)
+        self._bind_mousewheel(tree)
+        for column in columns:
+            title, width, anchor = headings[column]
+            tree.heading(column, text=title)
+            tree.column(
+                column, width=width, minwidth=55, anchor=anchor, stretch=False,
+            )
+        tree.tag_configure("online", background="#e7f4e4")
+        tree.tag_configure("offline", background="#f4e2e2")
+        tree.tag_configure("no_data", background="#fff4cc")
+        tree.tag_configure("config", background="#e6e6e6")
+
+        footer = tk.Frame(win, bg="#d4d0c8", padx=12)
+        footer.pack(fill="x", pady=(0, 10))
+        tk.Label(
+            footer,
+            text=(
+                "Nilai aktual sama dengan tampilan G1/G2. Breaker memakai "
+                "Effective YX = Raw YX XOR Reverse."
+            ),
+            bg="#d4d0c8",
+            fg="#555555",
+            font=("Segoe UI", 9),
+            anchor="w",
+        ).pack(side="left", fill="x", expand=True)
+
+        state = {"after": None}
+
+        def render_rows():
+            if not win.winfo_exists():
+                return
+            try:
+                rows = self._monitor_tv_mapping_snapshot()
+                wanted_monitor = monitor_var.get()
+                wanted_kind = kind_var.get()
+                needle = search_var.get().strip().casefold()
+                visible = []
+                for row in rows:
+                    if wanted_monitor != "Semua" and row["monitor"] != wanted_monitor:
+                        continue
+                    if wanted_kind != "Semua" and row["kind"] != wanted_kind:
+                        continue
+                    if needle and needle not in " ".join(
+                        str(row.get(column, "")) for column in columns
+                    ).casefold():
+                        continue
+                    visible.append(row)
+
+                existing_items = set(tree.get_children())
+                wanted_items = set()
+                for index, row in enumerate(visible):
+                    item_id = row["key"]
+                    wanted_items.add(item_id)
+                    quality = row["quality"]
+                    tag = (
+                        "online" if quality == "ONLINE"
+                        else "offline" if quality == "OFFLINE"
+                        else "config" if quality == "CONFIG"
+                        else "no_data"
+                    )
+                    values = tuple(row.get(column, "") for column in columns)
+                    if item_id in existing_items:
+                        tree.item(item_id, values=values, tags=(tag,))
+                        tree.move(item_id, "", index)
+                    else:
+                        tree.insert(
+                            "", "end", iid=item_id, values=values, tags=(tag,),
+                        )
+                for item_id in existing_items - wanted_items:
+                    tree.delete(item_id)
+                status_var.set(
+                    f"{len(visible)} dari {len(rows)} mapping | "
+                    f"Refresh {datetime.datetime.now():%H:%M:%S}"
+                )
+            except Exception as exc:
+                status_var.set(f"Mapping tidak dapat diperbarui: {exc}")
+
+        def schedule_refresh():
+            if not win.winfo_exists():
+                return
+            render_rows()
+            state["after"] = win.after(VINCI_UI_REFRESH_MS, schedule_refresh)
+
+        def close_window():
+            if state.get("after") is not None:
+                try:
+                    win.after_cancel(state["after"])
+                except Exception:
+                    pass
+            self._monitor_tv_mapping_window = None
+            win.destroy()
+
+        self._responsive_button(
+            footer,
+            text="Muat Ulang",
+            command=render_rows,
+            bg="#000080",
+            fg="#ffffff",
+            activebackground="#000066",
+            activeforeground="#ffffff",
+        ).pack(side="right", padx=(8, 0))
+        self._responsive_button(
+            footer,
+            text="Tutup",
+            command=close_window,
+            bg="#d4d0c8",
+            fg="#111111",
+        ).pack(side="right")
+        monitor_combo.bind("<<ComboboxSelected>>", lambda _event: render_rows())
+        kind_combo.bind("<<ComboboxSelected>>", lambda _event: render_rows())
+        search_var.trace_add("write", lambda *_args: render_rows())
+        win.protocol("WM_DELETE_WINDOW", close_window)
+        render_rows()
+        schedule_refresh()
+        search_entry.focus_set()
+
 
     def open_settings_window(self):
         """Open Device Manager with CRUD controls governed by the active role."""
@@ -8900,8 +9268,12 @@ class SCADAMainUI:
                     "Membuka Device Manager untuk melihat atau mengubah database "
                     "peralatan dan point. Operator bersifat read-only.\n\n"
                     "Mapping Run Monitoring\n"
-                    "Memilih ListSetting atau StatusSetting yang menjadi sumber objek "
-                    "pada Run Monitor."
+                    "Menampilkan sumber ListSetting, nilai RAW, rumus, dan nilai aktual "
+                    "setiap objek pada Run Monitor.\n\n"
+                    "Mapping G1 dan G2\n"
+                    "Menampilkan sumber IEC-104, rumus, nilai aktual, serta logika "
+                    "breaker yang dipakai Monitor TV G1/G2. Tabel diperbarui otomatis "
+                    "ketika konfigurasi disimpan dari modal Monitor TV."
                 ),
             ),
             (
@@ -9004,9 +9376,13 @@ class SCADAMainUI:
                     "StatusSetting.\n\n"
                     "Editor konfigurasi hanya tersedia ketika aplikasi desktop sedang "
                     "login sebagai Admin atau Developer; password kedua tidak diperlukan. "
-                    "Modal menampilkan nilai RAW, hasil rumus, unit, dan status RTU sebelum "
-                    "Save. Perubahan ASDU, IOA, coefficient, CT/PT, formula, atau offset "
-                    "langsung memperbarui preview nilai yang akan tampil pada G1/G2.\n\n"
+                    "Modal nilai hanya menampilkan sumber IEC-104, Device IP, ASDU, IOA, "
+                    "formula, coefficient, CT/PT, offset, unit, decimal, dan preview "
+                    "hasil aktual. Perubahan input langsung memperbarui preview sebelum "
+                    "Save.\n\n"
+                    "Modal breaker hanya menampilkan sumber StatusSetting, nama indikator, "
+                    "warna Closed/Open, efek status, dan aturan YX XOR Reverse. Kedua modal "
+                    "menyesuaikan ukuran layar desktop, tablet, dan ponsel.\n\n"
                     "Perubahan editor Monitor TV tetap dibatasi oleh daftar alamat IP yang "
                     "diizinkan pada Communication Settings."
                 ),
@@ -15670,6 +16046,163 @@ class SCADAMainUI:
             })
         return rows
 
+    def _monitor_tv_mapping_snapshot(self):
+        """Build live G1/G2 analog and breaker rows from MonitorTVConfig."""
+        if not globals().get("MONITOR_TV_AVAILABLE", False):
+            return []
+
+        config = _monitor_tv_config()
+        payload = _monitor_tv_payload()
+        breaker_payload = _breaker_status_payload()
+        breaker_rows = {
+            str(item.get("id", "")): item
+            for item in breaker_payload.get("monitor_tv", [])
+        }
+        default_field_order = list(dict.fromkeys(
+            list(globals().get("MONITOR_TV_FIELD_MAP_G1", {}).keys())
+            + list(globals().get("MONITOR_TV_FIELD_MAP_G2", {}).keys())
+        ))
+        rows = []
+
+        for monitor_id, panel_key in (("G1", "p1"), ("G2", "p2")):
+            section = config.get(monitor_id, {})
+            variables = section.get("variables", {})
+            panel = payload.get(panel_key, {})
+            field_order = default_field_order + sorted(
+                key for key in variables if key not in default_field_order
+            )
+            for field_id in field_order:
+                binding = variables.get(field_id)
+                if not isinstance(binding, dict):
+                    continue
+                ip = _norm_text(binding.get("Device_Addr"))
+                bay = _norm_text(binding.get("Bay_Name"))
+                physical = _norm_text(binding.get("Physical_Name"))
+                info_name = _norm_text(binding.get("Info_Name"))
+                mode = (
+                    "selected"
+                    if binding.get("mode") == "selected"
+                    else "default"
+                )
+                try:
+                    preview = _monitor_tv_preview(binding)
+                    raw_value = preview.get("raw")
+                    if not ip:
+                        quality = "CONFIG"
+                    elif preview.get("online"):
+                        quality = (
+                            "ONLINE" if preview.get("available") else "NO DATA"
+                        )
+                    else:
+                        quality = "OFFLINE"
+                except Exception:
+                    preview = {}
+                    raw_value = None
+                    quality = "CONFIG"
+
+                try:
+                    decimals = int(float(binding.get("Decimals", 2)))
+                except (TypeError, ValueError, OverflowError):
+                    decimals = 2
+                decimals = max(0, min(6, decimals))
+                try:
+                    actual_value = float(panel.get(field_id, 0.0))
+                    actual_text = f"{actual_value:.{decimals}f}"
+                except (TypeError, ValueError, OverflowError):
+                    actual_text = "--"
+
+                formula = _norm_text(binding.get("Formula")) or "RAW"
+                source = (
+                    f"ListSetting {bay}.csv ({mode})"
+                    if bay else "Mapping tidak ditemukan"
+                )
+                rows.append({
+                    "key": f"{monitor_id}:value:{field_id}",
+                    "monitor": monitor_id,
+                    "kind": "Nilai Aktual",
+                    "element": field_id,
+                    "point": physical or info_name or _norm_text(binding.get("key")) or "-",
+                    "actual": actual_text,
+                    "raw": self._run_monitor_number(raw_value),
+                    "quality": quality,
+                    "source": source,
+                    "ip": ip or "-",
+                    "asdu": self._run_monitor_number(binding.get("ASDU")),
+                    "ioa": self._run_monitor_number(binding.get("IOA")),
+                    "formula": formula,
+                    "coefficient": self._run_monitor_number(
+                        binding.get("Coefficient")
+                    ),
+                    "ctpt": self._run_monitor_number(binding.get("CTPT")),
+                    "offset": self._run_monitor_number(
+                        binding.get("Add_Offset")
+                    ),
+                    "unit": _norm_text(binding.get("Unit")) or "-",
+                    "rule": self._run_monitor_formula_text(binding),
+                })
+
+            rectangles = section.get("rectangles", {})
+            for rectangle_id, binding in sorted(rectangles.items()):
+                if not isinstance(binding, dict):
+                    continue
+                status = breaker_rows.get(
+                    f"{monitor_id}:{rectangle_id}", {}
+                )
+                status_quality = status.get("quality", "")
+                quality = (
+                    "ONLINE" if status_quality == "GOOD"
+                    else "OFFLINE" if status_quality == "RTU OFFLINE"
+                    else "CONFIG" if status_quality == "CONFIG INVALID"
+                    else "NO DATA"
+                )
+                raw_yx = status.get("raw_yx")
+                effective_yx = status.get("effective_yx")
+                bay = _norm_text(binding.get("Bay_Name"))
+                physical = _norm_text(binding.get("Physical_Name"))
+                info_name = _norm_text(binding.get("Info_Name"))
+                reverse_value = status.get(
+                    "reverse", binding.get("Reverse", 0)
+                )
+                condition = status.get("condition", "Unknown")
+                color_name = status.get("color_name", "Abu-abu")
+                rule = (
+                    f"Raw {raw_yx if raw_yx is not None else '-'} XOR "
+                    f"Reverse {reverse_value} = "
+                    f"{effective_yx if effective_yx is not None else '-'}; "
+                    f"{condition} / {color_name}; flow "
+                    f"{binding.get('flow', 'none')}"
+                )
+                rows.append({
+                    "key": f"{monitor_id}:breaker:{rectangle_id}",
+                    "monitor": monitor_id,
+                    "kind": "Breaker",
+                    "element": rectangle_id,
+                    "point": physical or info_name or _norm_text(
+                        binding.get("label")
+                    ) or "-",
+                    "actual": condition,
+                    "raw": (
+                        str(raw_yx) if raw_yx is not None else "-"
+                    ),
+                    "quality": quality,
+                    "source": (
+                        f"StatusSetting {bay}.csv"
+                        if bay else "Mapping tidak ditemukan"
+                    ),
+                    "ip": _norm_text(binding.get("Device_Addr")) or "-",
+                    "asdu": self._run_monitor_number(binding.get("ASDU")),
+                    "ioa": self._run_monitor_number(binding.get("IOA")),
+                    "formula": "YX XOR REVERSE",
+                    "coefficient": "-",
+                    "ctpt": "-",
+                    "offset": "-",
+                    "unit": "status",
+                    "rule": rule,
+                })
+
+        return rows
+
+
     def _default_status_binding(self, binding_key):
         """Return the authoritative StatusSetting point for one rectangle."""
         source_key = str(binding_key).rsplit(":", 1)[-1]
@@ -18246,6 +18779,10 @@ if __name__ == "__main__":
         raise SystemExit(0)
     else:
         root = tk.Tk()
+        try:
+            root.tk.call("tk", "appname", "SCADA BONT")
+        except tk.TclError:
+            pass
         scada_app_instance = SCADAMainUI(root)
         startup_lock = tk.Frame(root, bg="#020b13")
         startup_lock.place(x=0, y=0, relwidth=1, relheight=1)
