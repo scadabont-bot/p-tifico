@@ -339,7 +339,7 @@ IOA_MAP_STANDARD = {
     16417: "IE",    16418: "UE",    16419: "f",
 }
 
-APP_VERSION = "2.5.4"
+APP_VERSION = "2.5.5"
 APP_DIR = (
     os.path.dirname(os.path.abspath(sys.executable))
     if getattr(sys, "frozen", False)
@@ -1147,22 +1147,23 @@ SETTING_LOCK = threading.RLock()
 SETTING_REGISTRY = []
 SETTING_BY_IP_TAG = {}
 SETTING_IOA_BY_IP = {}
-# Bootstrap 14-card map. It is replaced by the current ListSetting CSV on every engine reload.
+# Bootstrap map for the 14 bottom cards. The current ListSetting CSV replaces
+# it on every successful engine reload.
 CARD_POINT_MAP = [
-    (1, '11# Circulating Water Pump', '10.100.163.5', {'Uab': (3841, 16388), 'Ia': (3841, 16385), 'P': (3841, 16398), 'Q': (3841, 16399)}),
-    (2, '12# Circulating Water Pump', '10.100.163.5', {'Uab': (3329, 16389), 'Ia': (3329, 16385), 'P': (3329, 16398), 'Q': (3329, 16399)}),
-    (3, '13# Circulating Water Pump', '10.100.163.5', {'Uab': (1, 16395), 'Ia': (1, 16385), 'P': (1, 16398), 'Q': (1, 16399)}),
-    (4, '1# Feed Water Pump', '10.100.163.5', {'Uab': (1, 16395), 'Ia': (1, 16385), 'P': (1, 16398), 'Q': (1, 16399)}),
+    (1, '11# Circulating Water Pump', '10.100.163.5', {'Uab': (2561, 16388), 'Ia': (2561, 16385), 'P': (2561, 16391), 'Q': (2561, 16392)}),
+    (2, '12# Circulating Water Pump', '10.100.163.5', {'Uab': (2817, 16388), 'Ia': (2817, 16385), 'P': (2817, 16391), 'Q': (2817, 16392)}),
+    (3, '13# Circulating Water Pump', '10.100.163.5', {'Uab': (3073, 16388), 'Ia': (3073, 16385), 'P': (3073, 16391), 'Q': (3073, 16392)}),
+    (4, '1# Feed Water Pump', '10.100.163.5', {'Uab': (3329, 16388), 'Ia': (3329, 16385), 'P': (3329, 16391), 'Q': (3329, 16392)}),
     (5, '1# Primary Air Fan', '10.100.163.5', {'Uab': (3585, 16388), 'Ia': (3585, 16385), 'P': (3585, 16391), 'Q': (3585, 16392)}),
-    (6, '1# Forced draft Fan', '10.100.163.5', {'Uab': (1, 16395), 'Ia': (1, 16385), 'P': (1, 16398), 'Q': (1, 16399)}),
-    (7, '1# Induced draft Fan', '10.100.163.5', {'Uab': (1, 16395), 'Ia': (1, 16385), 'P': (1, 16398), 'Q': (1, 16399)}),
-    (8, '2# Induced draft Fan', '10.100.163.6', {'Uab': (1, 16395), 'Ia': (1, 16385), 'P': (1, 16398), 'Q': (1, 16399)}),
-    (9, '2# Forced draft Fan', '10.100.163.6', {'Uab': (1, 16395), 'Ia': (1, 16385), 'P': (1, 16398), 'Q': (1, 16399)}),
-    (10, '2# Primary Air Fan', '10.100.163.6', {'Uab': (5121, 16388), 'Ia': (5121, 16385), 'P': (5121, 16391), 'Q': (5121, 16392)}),
-    (11, '2# Feed Water Pump', '10.100.163.6', {'Uab': (1, 16395), 'Ia': (1, 16385), 'P': (1, 16398), 'Q': (1, 16399)}),
-    (12, '21# Circulating Water Pump', '10.100.163.6', {'Uab': (1, 16395), 'Ia': (1, 16385), 'P': (1, 16398), 'Q': (1, 16399)}),
-    (13, '22# Circulating Water Pump', '10.100.163.6', {'Uab': (1, 16395), 'Ia': (1, 16385), 'P': (1, 16398), 'Q': (1, 16399)}),
-    (14, '23# Circulating Water Pump', '10.100.163.6', {'Uab': (4609, 16388), 'Ia': (1, 16385), 'P': (1, 16398), 'Q': (1, 16399)}),
+    (6, '1# Forced draft Fan', '10.100.163.5', {'Uab': (3841, 16388), 'Ia': (3841, 16385), 'P': (3841, 16391), 'Q': (3841, 16392)}),
+    (7, '1# Induced draft Fan', '10.100.163.5', {'Uab': (4097, 16388), 'Ia': (4097, 16385), 'P': (4097, 16391), 'Q': (4097, 16392)}),
+    (8, '2# Induced draft Fan', '10.100.163.6', {'Uab': (4353, 16388), 'Ia': (4353, 16385), 'P': (4353, 16391), 'Q': (4353, 16392)}),
+    (9, '2# Forced draft Fan', '10.100.163.6', {'Uab': (4609, 16388), 'Ia': (4609, 16385), 'P': (4609, 16391), 'Q': (4609, 16392)}),
+    (10, '2# Primary Air Fan', '10.100.163.6', {'Uab': (4865, 16388), 'Ia': (4865, 16385), 'P': (4865, 16391), 'Q': (4865, 16392)}),
+    (11, '2# Feed Water Pump', '10.100.163.6', {'Uab': (5121, 16388), 'Ia': (5121, 16385), 'P': (5121, 16391), 'Q': (5121, 16392)}),
+    (12, '21# Circulating Water Pump', '10.100.163.6', {'Uab': (5377, 16388), 'Ia': (5377, 16385), 'P': (5377, 16391), 'Q': (5377, 16392)}),
+    (13, '22# Circulating Water Pump', '10.100.163.6', {'Uab': (5633, 16388), 'Ia': (5633, 16385), 'P': (5633, 16391), 'Q': (5633, 16392)}),
+    (14, '23# Circulating Water Pump', '10.100.163.6', {'Uab': (5889, 16388), 'Ia': (5889, 16385), 'P': (5889, 16391), 'Q': (5889, 16392)}),
 ]
 
 CARD_VALUE_STORE = {idx: {"Uab": 0.0, "Ia": 0.0, "P": 0.0, "Q": 0.0} for idx, _bay, _ip, _points in CARD_POINT_MAP}
@@ -2696,124 +2697,6 @@ def _write_xlsx(path, sheet_name, headers, rows):
     return output_path
 
 
-STANDARD_IOA_BOOTSTRAP = {
-    "Uan": 16388, "Ubn": 16389, "Ucn": 16390, "In": 16391,
-    "P_tot": 16401, "Uab": 16395, "Ubc": 16396, "Uca": 16397,
-    "Uab_L": 16411, "Ubc_L": 16412, "Uca_L": 16413,
-    "IE": 16417, "UE": 16418, "f": 16419, "cos": 16400,
-}
-
-CARD_CSV_DEFAULTS = {
-    '11# Circulating Water Pump': ('10.100.163.5', {'Uab': (3841, 16388), 'Ia': (3841, 16385), 'P': (3841, 16398), 'Q': (3841, 16399)}),
-    '12# Circulating Water Pump': ('10.100.163.5', {'Uab': (3329, 16389), 'Ia': (3329, 16385), 'P': (3329, 16398), 'Q': (3329, 16399)}),
-    '13# Circulating Water Pump': ('10.100.163.5', {'Uab': (1, 16395), 'Ia': (1, 16385), 'P': (1, 16398), 'Q': (1, 16399)}),
-    '1# Feed Water Pump': ('10.100.163.5', {'Uab': (1, 16395), 'Ia': (1, 16385), 'P': (1, 16398), 'Q': (1, 16399)}),
-    '1# Primary Air Fan': ('10.100.163.5', {'Uab': (3585, 16388), 'Ia': (3585, 16385), 'P': (3585, 16391), 'Q': (3585, 16392)}),
-    '1# Forced draft Fan': ('10.100.163.5', {'Uab': (1, 16395), 'Ia': (1, 16385), 'P': (1, 16398), 'Q': (1, 16399)}),
-    '1# Induced draft Fan': ('10.100.163.5', {'Uab': (1, 16395), 'Ia': (1, 16385), 'P': (1, 16398), 'Q': (1, 16399)}),
-    '2# Induced draft Fan': ('10.100.163.6', {'Uab': (1, 16395), 'Ia': (1, 16385), 'P': (1, 16398), 'Q': (1, 16399)}),
-    '2# Forced draft Fan': ('10.100.163.6', {'Uab': (1, 16395), 'Ia': (1, 16385), 'P': (1, 16398), 'Q': (1, 16399)}),
-    '2# Primary Air Fan': ('10.100.163.6', {'Uab': (5121, 16388), 'Ia': (5121, 16385), 'P': (5121, 16391), 'Q': (5121, 16392)}),
-    '2# Feed Water Pump': ('10.100.163.6', {'Uab': (1, 16395), 'Ia': (1, 16385), 'P': (1, 16398), 'Q': (1, 16399)}),
-    '21# Circulating Water Pump': ('10.100.163.6', {'Uab': (1, 16395), 'Ia': (1, 16385), 'P': (1, 16398), 'Q': (1, 16399)}),
-    '22# Circulating Water Pump': ('10.100.163.6', {'Uab': (1, 16395), 'Ia': (1, 16385), 'P': (1, 16398), 'Q': (1, 16399)}),
-    '23# Circulating Water Pump': ('10.100.163.6', {'Uab': (4609, 16388), 'Ia': (1, 16385), 'P': (1, 16398), 'Q': (1, 16399)}),
-}
-
-def _default_setting_rows():
-    """Build the complete, internally consistent ListSetting CSV set."""
-    rows_by_bay = {}
-
-    def add(bay, ip, physical, info_idx, asdu, ioa, typ, formula, unit, coef, ctpt=1.0, add_offset=0.0):
-        rows_by_bay.setdefault(bay, []).append({
-            "Device_Addr": ip,
-            "Bay_Name": bay,
-            "Physical_Name": physical,
-            "Info_Name": physical,
-            "Info_Index": str(info_idx),
-            "Type": typ,
-            "Min_Save_Mode": "2Minute",
-            "ASDU": str(asdu),
-            "IOA": "" if ioa is None else str(ioa),
-            "Coefficient": str(coef),
-            "CTPT": str(ctpt),
-            "Tolerance": "0",
-            "Alarm_Class": "Warning",
-            "UUp_Limit": "1000000",
-            "Up_Limit": "1000000",
-            "Down_Limit": "-1000000",
-            "DDown_Limit": "-1000000",
-            "Formula": formula,
-            "Add_Offset": str(add_offset),
-            "Unit": unit,
-        })
-    wire_specs = [
-        ("W1_Ia", 257, 16385, "Current", "MULTIPLY_CTPT", "A", 0.000183, 500, 0.0),
-        ("W1_Uab", 257, 16388, "Voltage", "MULTIPLY_CTPT", "kV", 0.00211438185, 0.10392, 0.0),
-        ("W1_Ubc", 257, 16389, "Voltage", "MULTIPLY_CTPT", "kV", 0.00211438185, 0.10392, 0.0),
-        ("W1_Uca", 257, 16390, "Voltage", "MULTIPLY_CTPT", "kV", 0.00211438185, 0.10392, 0.0),
-        ("W1_P", 257, 16391, "Power", "MULTIPLY_CTPT", "kW", 0.03171386718, 30, 0.0),
-        ("W1_Q", 257, 16392, "Power", "MULTIPLY_CTPT", "kVar", 0.03171386718, 30, 0.0),
-        ("W1_f", 257, 16393, "Frequency", "FREQUENCY_OFFSET", "Hz", 0.000073242187497, 1, 50.0),
-        ("W2_Ia", 513, 16385, "Current", "MULTIPLY_CTPT", "A", 0.000183, 500, 0.0),
-        ("W2_Uab", 513, 16388, "Voltage", "MULTIPLY_CTPT", "kV", 0.00211438185, 0.10392, 0.0),
-        ("W2_Ubc", 513, 16389, "Voltage", "MULTIPLY_CTPT", "kV", 0.00211438185, 0.10392, 0.0),
-        ("W2_Uca", 513, 16390, "Voltage", "MULTIPLY_CTPT", "kV", 0.00211438185, 0.10392, 0.0),
-        ("W2_P", 513, 16391, "Power", "MULTIPLY_CTPT", "kW", 0.03171386718, 30, 0.0),
-        ("W2_Q", 513, 16392, "Power", "MULTIPLY_CTPT", "kVar", 0.03171386718, 30, 0.0),
-        ("W2_f", 513, 16393, "Frequency", "FREQUENCY_OFFSET", "Hz", 0.000073242187497, 1, 50.0),
-    ]
-    for idx, spec in enumerate(wire_specs, 1):
-        add("Connection Wire I" if spec[0].startswith("W1_") else "Connection Wire II",
-            "10.100.163.1", *spec[:1], idx, *spec[1:])
-    standard = [
-        ("Ia", 16385, "Current", "CURRENT_CT", "A", 0.000183, 500),
-        ("Ib", 16386, "Current", "CURRENT_CT", "A", 0.000183, 500),
-        ("Ic", 16387, "Current", "CURRENT_CT", "A", 0.000183, 500),
-        ("Uan", 16388, "Voltage", "PHASE_VOLTAGE", "kV", 0.0036662 * 0.06, 1.0 / 1.732),
-        ("Ubn", 16389, "Voltage", "PHASE_VOLTAGE", "kV", 0.0036662 * 0.06, 1.0 / 1.732),
-        ("Ucn", 16390, "Voltage", "PHASE_VOLTAGE", "kV", 0.0036662 * 0.06, 1.0 / 1.732),
-        ("In", 16391, "Current", "CURRENT_CT", "A", 0.000183, 500),
-        ("Uab", 16395, "Voltage", "LINE_VOLTAGE", "kV", 0.0036662, 0.06),
-        ("Ubc", 16396, "Voltage", "LINE_VOLTAGE", "kV", 0.0036662, 0.06),
-        ("Uca", 16397, "Voltage", "LINE_VOLTAGE", "kV", 0.0036662, 0.06),
-        ("P", 16398, "Power", "POWER", "kW", 0.03171366718, 30),
-        ("Q", 16399, "Power", "POWER", "kVar", 0.03171366718, 30),
-        ("cos", 16400, "Power", "COS", "", 0.000036621097, 1),
-        ("P_tot", 16401, "Power", "P_TOTAL", "kW", 0.03171366718, 30),
-        ("Uab_L", 16411, "Voltage", "LINE_VOLTAGE", "kV", 0.0036662, 0.06),
-        ("Ubc_L", 16412, "Voltage", "LINE_VOLTAGE", "kV", 0.0036662, 0.06),
-        ("Uca_L", 16413, "Voltage", "LINE_VOLTAGE", "kV", 0.0036662, 0.06),
-        ("IE", 16417, "Current", "ROTOR_IE", "A", 0.01098599999, 1.66),
-        ("UE", 16418, "Voltage", "ROTOR_UE", "V", 0.01098599999, 1),
-        ("f", 16419, "Frequency", "FREQUENCY_OFFSET", "Hz", 0.0000732421875, 1, 50.0),
-    ]
-    standard_ips = {f"10.100.163.{n}" for n in range(2, 9)}
-
-    # 14 bottom-card ListSetting CSVs: ONLY Uab, Ia, P, Q.
-    # Existing CSV files are authoritative. Defaults are used only to create
-    # a missing file; later reloads read the CSV values.
-    card_specs = {
-        "Ia":  ("Current", "CURRENT_CT", "A",   0.000183,       500.0, 1),
-        "Uab": ("Voltage", "LINE_VOLTAGE", "kV", 0.0036662,      0.06, 2),
-        "P":   ("Power",   "POWER", "kW",        0.03171366718, 30.0, 3),
-        "Q":   ("Power",   "POWER", "kVar",      0.03171366718, 30.0, 4),
-    }
-
-    for bay, (ip, points) in CARD_CSV_DEFAULTS.items():
-        # Retained only as an engineering reference; runtime never creates CSV.
-        for physical in ("Uab", "Ia", "P", "Q"):
-            asdu, ioa = points[physical]
-            typ, formula, unit, coef, ctpt, info_idx = card_specs[physical]
-            add(bay, ip, physical, info_idx, asdu, ioa, typ, formula, unit, coef, ctpt, 0.0)
-
-    for bay, ip in SETTING_BAY_IP.items():
-        if ip not in standard_ips or bay in CARD_CSV_DEFAULTS:
-            continue
-        for idx, spec in enumerate(standard, 1):
-            add(bay, ip, spec[0], idx, 1, *spec[1:])
-
-    return rows_by_bay
 
 def _to_float(value, default=0.0):
     try:
@@ -2851,6 +2734,26 @@ def _norm_text(value):
 
 def _norm_formula(value):
     return _norm_text(value).upper().replace(" ", "").replace("×", "*")
+
+def _decode_analog_info_name(info_name):
+    """Decode ASDU and IOA from the hexadecimal ``DDYCaaaaiiiiii`` form."""
+    text = _norm_text(info_name).upper()
+    match = re.fullmatch(r"([0-9A-F]{2})YC([0-9A-F]{4})([0-9A-F]{6})", text)
+    if not match:
+        return {}
+    try:
+        device_hex, asdu_hex, ioa_hex = match.groups()
+        return {
+            "Info_Name": text,
+            "Parsed_ASDU": int(asdu_hex, 16),
+            "Parsed_IOA": int(ioa_hex, 16),
+            "Device_Hex": device_hex,
+            "ASDU_Hex": asdu_hex,
+            "IOA_Hex": ioa_hex,
+        }
+    except (TypeError, ValueError):
+        return {}
+
 
 
 def _setting_filename(bay_name):
@@ -3061,7 +2964,7 @@ def _load_all_settings():
 
 
 def _load_setting_engine():
-    """Build runtime IOA/ASDU registry and dynamically rebuild the 14-card map from CSV."""
+    """Build runtime IOA/ASDU registry and dynamically rebuild the 14-card map."""
     global SETTING_REGISTRY, SETTING_BY_IP_TAG, SETTING_IOA_BY_IP, CARD_POINT_MAP, CARD_BAY_BY_INDEX
     rows = _load_all_settings()
     registry = []
@@ -3075,27 +2978,34 @@ def _load_setting_engine():
         if not ip or not physical:
             continue
         formula = _norm_formula(row.get("Formula"))
-        try:
-            ioa_text = _norm_text(row.get("IOA"))
-            if not ioa_text:
-                # Derived values are valid setting rows but have no protocol IOA.
-                if formula in ("DERIVED_P", "DERIVED_Q", "DERIVED_I"):
-                    ioa = None
+        decoded = _decode_analog_info_name(row.get("Info_Name"))
+        if decoded:
+            asdu = int(decoded["Parsed_ASDU"])
+            ioa = int(decoded["Parsed_IOA"])
+        else:
+            try:
+                ioa_text = _norm_text(row.get("IOA"))
+                if not ioa_text:
+                    # Derived values are valid setting rows but have no protocol IOA.
+                    if formula in ("DERIVED_P", "DERIVED_Q", "DERIVED_I"):
+                        ioa = None
+                    else:
+                        continue
                 else:
-                    continue
-            else:
-                ioa = int(float(ioa_text))
-        except Exception:
-            continue
+                    ioa = int(float(ioa_text))
+            except Exception:
+                continue
 
-        try:
-            asdu = int(float(_norm_text(row.get("ASDU")) or "1"))
-        except Exception:
-            asdu = 1
+            try:
+                asdu = int(float(_norm_text(row.get("ASDU")) or "1"))
+            except Exception:
+                asdu = 1
 
         item = dict(row)
         item["Device_Addr"] = ip
         item["Physical_Name"] = physical
+        if decoded:
+            item["Info_Name"] = decoded["Info_Name"]
         item["IOA_INT"] = ioa
         item["ASDU_INT"] = asdu
         item["Coefficient_NUM"] = _to_float(row.get("Coefficient"), 1.0)
@@ -3124,12 +3034,9 @@ def _load_setting_engine():
         SETTING_BY_IP_TAG = by_tag
         SETTING_IOA_BY_IP = by_ioa
 
-    # IMPORTANT:
-    # The CSV is authoritative for the 14 bottom cards.
-    # Every reload rebuilds CARD_POINT_MAP from the current CSV values.
-    # Therefore changing ASDU/IOA in a ListSetting file takes effect on the
-    # next engine reload; the hard-coded defaults are used only when the CSV
-    # file does not exist and is auto-created.
+    # Each reload rebuilds the bottom-card map from ListSetting. A valid
+    # hexadecimal Info_Name is authoritative for ASDU and IOA; the decimal
+    # columns remain the fallback for legacy or derived rows.
     card_order = [
         "11# Circulating Water Pump",
         "12# Circulating Water Pump",
@@ -18459,6 +18366,27 @@ def run_engineering_qc():
         row = rows.get(tag)
         if row is None or (row.get("ASDU_INT"), row.get("IOA_INT")) != key:
             failures.append(f"{tag}: mapping {key} not present")
+    decoded_example = _decode_analog_info_name("05YC0A01004008")
+    if (decoded_example.get("Parsed_ASDU"), decoded_example.get("Parsed_IOA")) != (2561, 16392):
+        failures.append("Analog InfoName decoder: 05YC0A01004008 must resolve to ASDU 2561 / IOA 16392")
+
+    expected_card_asdus = [
+        2561, 2817, 3073, 3329, 3585, 3841, 4097,
+        4353, 4609, 4865, 5121, 5377, 5633, 5889,
+    ]
+    expected_card_ioas = {"Uab": 16388, "Ia": 16385, "P": 16391, "Q": 16392}
+    cards = {idx: points for idx, _bay, _ip, points in CARD_POINT_MAP}
+    for idx, expected_asdu in enumerate(expected_card_asdus, 1):
+        points = cards.get(idx)
+        if points is None:
+            failures.append(f"Card {idx}: address map missing")
+            continue
+        expected_points = {
+            physical: (expected_asdu, ioa)
+            for physical, ioa in expected_card_ioas.items()
+        }
+        if points != expected_points:
+            failures.append(f"Card {idx}: mapping {points} != {expected_points}")
     for (tag, raw), expected in tests:
         row = rows.get(tag)
         if row is None:
@@ -18475,7 +18403,7 @@ def run_engineering_qc():
         for failure in failures:
             print(" -", failure)
         return False
-    print("[ENGINEERING QC] PASS - RTU1 address routing and scaling formulas verified")
+    print("[ENGINEERING QC] PASS - InfoName decoding, card routing, and RTU1 scaling verified")
     return True
 
 # ==============================================================================
@@ -18705,7 +18633,7 @@ else:
 # STARTUP VALIDATION
 # ==============================================================================
 def validate_setting_files():
-    """Validate CSV schema and detect only real address/variable conflicts."""
+    """Validate CSV schema, InfoName-derived addresses, and real conflicts."""
     required = set(SETTING_COLUMNS) - {"Add_Offset"}  # optional for old CSVs
     problems = []
     warnings = []
@@ -18739,14 +18667,25 @@ def validate_setting_files():
                     if not ip or not physical:
                         problems.append(f"{filename}:{line_no}: Device_Addr/Physical_Name kosong")
                         continue
+                    decoded = _decode_analog_info_name(row.get("Info_Name"))
                     try:
-                        asdu = int(float(_norm_text(row.get("ASDU"))))
+                        explicit_asdu = int(float(_norm_text(row.get("ASDU"))))
                         ioa_text = _norm_text(row.get("IOA"))
-                        ioa = int(float(ioa_text)) if ioa_text else None
+                        explicit_ioa = int(float(ioa_text)) if ioa_text else None
                     except Exception:
                         problems.append(f"{filename}:{line_no}: ASDU/IOA bukan angka")
                         continue
-
+                    if decoded:
+                        expected = (int(decoded["Parsed_ASDU"]), int(decoded["Parsed_IOA"]))
+                        explicit = (explicit_asdu, explicit_ioa)
+                        if explicit != expected:
+                            problems.append(
+                                f"{filename}:{line_no}: Info_Name {decoded['Info_Name']} "
+                                f"menghasilkan ASDU/IOA {expected}, bukan {explicit}"
+                            )
+                        asdu, ioa = expected
+                    else:
+                        asdu, ioa = explicit_asdu, explicit_ioa
                     if ioa is not None:
                         key = (ip, asdu, ioa)
                         previous = protocol_keys.get(key)
@@ -18758,7 +18697,7 @@ def validate_setting_files():
                                 f"{previous} vs {physical}; runtime uses the last active row"
                             )
 
-                    vkey = (ip, physical.lower())
+                    vkey = (ip, _norm_text(row.get("Bay_Name")).casefold(), physical.lower())
                     current = (asdu, ioa)
                     previous = variable_keys.get(vkey)
                     if previous is None:
@@ -18784,8 +18723,8 @@ def validate_setting_files():
     print(f"[CSV VALIDATION] OK - {len(files)} active ListSetting files loaded")
     return True
 
-validate_setting_files()
-run_engineering_qc()
+SETTING_VALIDATION_OK = validate_setting_files()
+ENGINEERING_QC_OK = run_engineering_qc()
 
 # ==============================================================================
 # BLOCK 9: APPLICATION ENTRY POINT
@@ -18823,7 +18762,8 @@ if __name__ == "__main__":
                 status_schema_ok = False
                 break
         if (len(RTU_LIST) != 8 or len(setting_files) < 24 or len(status_files) < 24
-                or not status_schema_ok or not all(os.path.isfile(p) for p in required_assets)):
+                or not status_schema_ok or not SETTING_VALIDATION_OK or not ENGINEERING_QC_OK
+                or not all(os.path.isfile(p) for p in required_assets)):
             raise SystemExit(2)
         raise SystemExit(0)
     else:
