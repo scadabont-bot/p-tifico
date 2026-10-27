@@ -21,6 +21,8 @@ import ssl
 import sqlite3
 import zipfile
 import tempfile
+import io
+from collections import deque
 from xml.sax.saxutils import escape
 from concurrent.futures import ThreadPoolExecutor
 from tkinter import ttk, messagebox, filedialog, font as tkfont
@@ -88,7 +90,7 @@ VINCI_TESTFR_TIMEOUT = 8.0
 VINCI_RECONNECT_MAX_DELAY = 30.0
 VINCI_UI_REFRESH_MS = 1000
 ENGINE_UPDATE_INTERVAL = 1.0
-REPORT_LOG_INTERVAL = 2.0
+REPORT_LOG_INTERVAL = 60.0
 REPORT_LOGGER_STARTED = False
 REPORT_LOGGER_LOCK = threading.RLock()
 COMM_LOG_LOCK = threading.RLock()
@@ -246,6 +248,7 @@ IOA_MAP_STANDARD = {
     16417: "IE",    16418: "UE",    16419: "f",
 }
 
+APP_VERSION = "2.5.0"
 APP_DIR = (
     os.path.dirname(os.path.abspath(sys.executable))
     if getattr(sys, "frozen", False)
@@ -258,7 +261,31 @@ TREND_HISTORY_DB = os.path.join(APP_DIR, "TrendHistory.sqlite3")
 TREND_HISTORY_INTERVAL = 60.0
 TREND_HISTORY_STARTED = False
 TREND_HISTORY_LOCK = threading.RLock()
-TREND_HISTORY_RETENTION_DAYS = 400
+TREND_HISTORY_RETENTION_DAYS = 183
+ACTUAL_HISTORY_DB = os.path.abspath(
+    os.environ.get(
+        "SCADA_ACTUAL_HISTORY_DB",
+        os.path.join(APP_DIR, "ActualHistory.sqlite3"),
+    )
+)
+ACTUAL_HISTORY_INTERVAL = 60.0
+ACTUAL_HISTORY_STARTED = False
+ACTUAL_HISTORY_LOCK = threading.RLock()
+ACTUAL_HISTORY_RETENTION_DAYS = 183
+
+_local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+_default_backup_root = (
+    os.path.join(_local_app_data, "TIFICO", "SCADA-BONT", "Backup")
+    if os.name == "nt" and _local_app_data
+    else os.path.join(APP_DIR, "Backup")
+)
+BACKUP_ROOT = os.path.abspath(
+    os.environ.get("SCADA_BACKUP_ROOT", _default_backup_root)
+)
+BACKUP_RETENTION_DAYS = 183
+BACKUP_STARTED = False
+BACKUP_LOCK = threading.RLock()
+BACKUP_LOG_PATH = os.path.join(BACKUP_ROOT, "BackupLog.csv")
 
 
 # MQTT is intentionally implemented with the Python standard library.  The
@@ -1549,6 +1576,859 @@ def start_trend_history_logger():
         name="Process-Trend-Historian",
     ).start()
 
+def _create_actual_history_schema(connection):
+    connection.execute(
+        """
+        CREATE TABLE IF NOT EXISTS actual_samples (
+            captured_at INTEGER NOT NULL,
+            device_addr TEXT NOT NULL,
+            bay_name TEXT NOT NULL,
+            physical_name TEXT NOT NULL,
+            info_name TEXT NOT NULL,
+            value_type TEXT NOT NULL,
+            asdu INTEGER NOT NULL,
+            ioa INTEGER NOT NULL,
+            unit TEXT NOT NULL,
+            value REAL,
+            quality TEXT NOT NULL,
+            PRIMARY KEY (
+                captured_at, device_addr, bay_name,
+                physical_name, asdu, ioa
+            )
+        )
+        """
+    )
+    connection.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_actual_time_bay
+        ON actual_samples (captured_at, bay_name)
+        """
+    )
+
+
+def _actual_history_connect(path=None):
+    """Open the one-minute historian containing every active analog point."""
+    path = ACTUAL_HISTORY_DB if path is None else path
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    connection = sqlite3.connect(path, timeout=20.0)
+    if os.path.abspath(path) == os.path.abspath(ACTUAL_HISTORY_DB):
+        connection.execute("PRAGMA journal_mode=WAL")
+    _create_actual_history_schema(connection)
+    return connection
+
+
+def _actual_history_log_once(captured_at=None):
+    """Persist one one-minute snapshot of every active ListSetting point."""
+    epoch = int(time.time() if captured_at is None else captured_at)
+    with SETTING_LOCK:
+        settings = [dict(row) for row in SETTING_REGISTRY]
+    with DATA_LOCK:
+        values_by_ip = {
+            ip: dict(values) for ip, values in DATA_STORE.items()
+        }
+        values_by_bay = {
+            bay: dict(values) for bay, values in BAY_VALUE_STORE.items()
+        }
+        online_by_ip = dict(VINCI_STATUS)
+
+    rows = []
+    for setting in settings:
+        ip = _norm_text(setting.get("Device_Addr"))
+        bay = _norm_text(setting.get("Bay_Name"))
+        physical = _norm_text(setting.get("Physical_Name"))
+        if not ip or not bay or not physical:
+            continue
+        runtime_name = _runtime_physical_name(setting)
+        raw_value = values_by_bay.get(bay, {}).get(
+            runtime_name,
+            values_by_bay.get(bay, {}).get(
+                physical,
+                values_by_ip.get(ip, {}).get(
+                    runtime_name,
+                    values_by_ip.get(ip, {}).get(physical),
+                ),
+            ),
+        )
+        try:
+            value = float(raw_value)
+            if not math.isfinite(value):
+                value = None
+        except (TypeError, ValueError):
+            value = None
+        online = bool(online_by_ip.get(ip, False))
+        quality = (
+            "ONLINE"
+            if online and value is not None
+            else "NO DATA"
+            if online
+            else "OFFLINE"
+        )
+        try:
+            asdu = int(setting.get("ASDU_INT"))
+        except (TypeError, ValueError):
+            asdu = -1
+        try:
+            ioa = int(setting.get("IOA_INT"))
+        except (TypeError, ValueError):
+            ioa = -1
+        rows.append(
+            (
+                epoch,
+                ip,
+                bay,
+                physical,
+                _norm_text(setting.get("Info_Name")),
+                _norm_text(setting.get("Type")),
+                asdu,
+                ioa,
+                _norm_text(setting.get("Unit")),
+                value,
+                quality,
+            )
+        )
+
+    cutoff = epoch - int(ACTUAL_HISTORY_RETENTION_DAYS * 86400)
+    with ACTUAL_HISTORY_LOCK:
+        connection = _actual_history_connect()
+        try:
+            connection.executemany(
+                """
+                INSERT OR REPLACE INTO actual_samples (
+                    captured_at, device_addr, bay_name, physical_name,
+                    info_name, value_type, asdu, ioa, unit, value, quality
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            connection.execute(
+                "DELETE FROM actual_samples WHERE captured_at < ?",
+                (cutoff,),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+    return len(rows)
+
+
+def _actual_history_worker():
+    while True:
+        started = time.monotonic()
+        try:
+            _actual_history_log_once()
+        except Exception as exc:
+            print(f"[ACTUAL HISTORIAN] {exc}")
+        elapsed = time.monotonic() - started
+        time.sleep(max(0.25, ACTUAL_HISTORY_INTERVAL - elapsed))
+
+
+def start_actual_history_logger():
+    """Start the one-minute all-variable historian once per process."""
+    global ACTUAL_HISTORY_STARTED
+    if ACTUAL_HISTORY_STARTED:
+        return
+    ACTUAL_HISTORY_STARTED = True
+    threading.Thread(
+        target=_actual_history_worker,
+        daemon=True,
+        name="Actual-Value-Historian",
+    ).start()
+
+
+def _backup_sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _backup_date_bounds(backup_date):
+    start = datetime.datetime.combine(
+        backup_date, datetime.time.min,
+    )
+    end = start + datetime.timedelta(days=1)
+    return int(start.timestamp()), int(end.timestamp())
+
+
+def _backup_daily_directory(backup_date):
+    return os.path.join(
+        BACKUP_ROOT,
+        "Daily",
+        f"{backup_date:%Y}",
+        f"{backup_date:%m}",
+        f"{backup_date:%Y-%m-%d}",
+    )
+
+
+def _backup_daily_archive_path(backup_date):
+    return os.path.join(
+        _backup_daily_directory(backup_date),
+        f"SCADA-BONT-Daily-{backup_date:%Y-%m-%d}.zip",
+    )
+
+
+def _backup_configuration_files():
+    fixed_names = {
+        "CBZ8000AppData.json",
+        "CommunicationConfig.json",
+        "MQTTConfig.json",
+        "UIRealtimeBindings.json",
+        "MonitorTVConfig.json",
+        "ConfigSyncState.json",
+    }
+    try:
+        names = os.listdir(APP_DIR)
+    except OSError:
+        return []
+    result = []
+    for name in names:
+        lower = name.lower()
+        is_setting = (
+            lower.endswith(".csv")
+            and (
+                name.startswith("ListSetting ")
+                or name.startswith("StatusSetting ")
+            )
+            and not re.search(
+                r"_(fix|backup|bak|old)\.csv$", name, re.IGNORECASE,
+            )
+        )
+        if name not in fixed_names and not is_setting:
+            continue
+        path = os.path.join(APP_DIR, name)
+        if os.path.isfile(path):
+            result.append((name, path))
+    return sorted(result, key=lambda item: item[0].lower())
+
+
+def _backup_application_files():
+    names = {
+        "SCADA_BONT.ico",
+        "RUNMONITORING FINAL.png",
+        "G1MONITOR.jpg.png",
+        "G2MONITOR.jpg.png",
+        "SYSTEMCONFIG_DARK.png",
+        "AUXILIARY_MATCHED.png",
+        "MONITOR V55.html",
+    }
+    candidates = []
+    if getattr(sys, "frozen", False):
+        candidates.append(
+            (os.path.basename(sys.executable), os.path.abspath(sys.executable))
+        )
+    else:
+        candidates.extend(
+            [
+                (os.path.basename(__file__), os.path.abspath(__file__)),
+                (
+                    "cbz8000_device_data.py",
+                    os.path.join(APP_DIR, "cbz8000_device_data.py"),
+                ),
+            ]
+        )
+    candidates.extend((name, os.path.join(APP_DIR, name)) for name in names)
+    return [
+        (name, path)
+        for name, path in candidates
+        if os.path.isfile(path)
+    ]
+
+
+def _backup_write_checksum(path):
+    digest = _backup_sha256_file(path)
+    checksum_path = path + ".sha256"
+    temporary = checksum_path + ".tmp"
+    with open(temporary, "w", encoding="ascii", newline="\n") as handle:
+        handle.write(f"{digest}  {os.path.basename(path)}\n")
+    os.replace(temporary, checksum_path)
+    return digest
+
+
+def _backup_expected_checksum(path):
+    try:
+        with open(path + ".sha256", "r", encoding="ascii") as handle:
+            return handle.readline().strip().split()[0].lower()
+    except (OSError, IndexError):
+        return ""
+
+
+def _backup_verify_archive(path):
+    if not os.path.isfile(path):
+        raise FileNotFoundError(path)
+    expected = _backup_expected_checksum(path)
+    if not expected:
+        raise ValueError("Checksum file is missing or empty.")
+    actual = _backup_sha256_file(path)
+    if actual.lower() != expected:
+        raise ValueError("SHA-256 checksum does not match.")
+    with zipfile.ZipFile(path, "r") as archive:
+        failed_member = archive.testzip()
+        if failed_member:
+            raise ValueError(f"Damaged ZIP member: {failed_member}")
+        manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+    if manifest.get("status") != "SUCCESS":
+        raise ValueError("Backup manifest is not marked SUCCESS.")
+    return manifest
+
+
+def _backup_append_log(
+    backup_date,
+    trigger,
+    status,
+    archive="",
+    actual_rows=0,
+    trend_rows=0,
+    config_files=0,
+    size_bytes=0,
+    sha256="",
+    deleted="",
+    error="",
+):
+    os.makedirs(BACKUP_ROOT, exist_ok=True)
+    new_file = (
+        not os.path.exists(BACKUP_LOG_PATH)
+        or os.path.getsize(BACKUP_LOG_PATH) == 0
+    )
+    with open(
+        BACKUP_LOG_PATH, "a", newline="", encoding="utf-8-sig",
+    ) as handle:
+        writer = csv.writer(handle)
+        if new_file:
+            writer.writerow(
+                [
+                    "Timestamp",
+                    "Backup_Date",
+                    "Trigger",
+                    "Status",
+                    "Archive",
+                    "Actual_Rows",
+                    "Trend_Rows",
+                    "Config_Files",
+                    "Size_Bytes",
+                    "SHA256",
+                    "Deleted",
+                    "Error",
+                ]
+            )
+        writer.writerow(
+            [
+                datetime.datetime.now().isoformat(timespec="seconds"),
+                backup_date.isoformat(),
+                trigger,
+                status,
+                archive,
+                actual_rows,
+                trend_rows,
+                config_files,
+                size_bytes,
+                sha256,
+                deleted,
+                error,
+            ]
+        )
+
+
+def _backup_actual_rows_for_date(backup_date):
+    start_epoch, end_epoch = _backup_date_bounds(backup_date)
+    with ACTUAL_HISTORY_LOCK:
+        connection = _actual_history_connect()
+        try:
+            return connection.execute(
+                """
+                SELECT captured_at, device_addr, bay_name, physical_name,
+                       info_name, value_type, asdu, ioa, unit, value, quality
+                FROM actual_samples
+                WHERE captured_at >= ? AND captured_at < ?
+                ORDER BY captured_at, bay_name, physical_name, asdu, ioa
+                """,
+                (start_epoch, end_epoch),
+            ).fetchall()
+        finally:
+            connection.close()
+
+
+def _backup_trend_rows_for_date(backup_date):
+    start_epoch, end_epoch = _backup_date_bounds(backup_date)
+    with TREND_HISTORY_LOCK:
+        connection = _trend_history_connect()
+        try:
+            return connection.execute(
+                """
+                SELECT captured_at, device, source_ip, quality,
+                       voltage, current, active_power,
+                       reactive_power, frequency
+                FROM trend_samples
+                WHERE captured_at >= ? AND captured_at < ?
+                ORDER BY captured_at, device
+                """,
+                (start_epoch, end_epoch),
+            ).fetchall()
+        finally:
+            connection.close()
+
+
+def _backup_build_daily_database(path, actual_rows, trend_rows, manifest):
+    connection = sqlite3.connect(path)
+    try:
+        _create_actual_history_schema(connection)
+        connection.executemany(
+            """
+            INSERT OR REPLACE INTO actual_samples (
+                captured_at, device_addr, bay_name, physical_name,
+                info_name, value_type, asdu, ioa, unit, value, quality
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            actual_rows,
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS trend_samples (
+                captured_at INTEGER NOT NULL,
+                device TEXT NOT NULL,
+                source_ip TEXT NOT NULL,
+                quality TEXT NOT NULL,
+                voltage REAL,
+                current REAL,
+                active_power REAL,
+                reactive_power REAL,
+                frequency REAL,
+                PRIMARY KEY (captured_at, device)
+            )
+            """
+        )
+        connection.executemany(
+            """
+            INSERT OR REPLACE INTO trend_samples (
+                captured_at, device, source_ip, quality,
+                voltage, current, active_power,
+                reactive_power, frequency
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            trend_rows,
+        )
+        connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS backup_metadata (
+                name TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+        )
+        connection.executemany(
+            "INSERT OR REPLACE INTO backup_metadata (name, value) VALUES (?, ?)",
+            [
+                ("backup_date", str(manifest["backup_date"])),
+                ("created_at", str(manifest["created_at"])),
+                ("application_version", str(APP_VERSION)),
+            ],
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+def _backup_write_actual_csv(path, actual_rows):
+    with open(path, "w", newline="", encoding="utf-8-sig") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(
+            [
+                "Timestamp",
+                "Device Address",
+                "Bay",
+                "Physical Name",
+                "Information Name",
+                "Type",
+                "ASDU",
+                "IOA",
+                "Unit",
+                "Value",
+                "Quality",
+            ]
+        )
+        for row in actual_rows:
+            writer.writerow(
+                [
+                    datetime.datetime.fromtimestamp(row[0]).strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    ),
+                    *row[1:],
+                ]
+            )
+
+
+def _backup_cleanup_application_versions():
+    application_root = os.path.join(BACKUP_ROOT, "Application")
+    try:
+        version_dirs = [
+            os.path.join(application_root, name)
+            for name in os.listdir(application_root)
+            if os.path.isdir(os.path.join(application_root, name))
+        ]
+    except OSError:
+        return []
+    version_dirs.sort(
+        key=lambda path: os.path.getmtime(path),
+        reverse=True,
+    )
+    deleted = []
+    for path in version_dirs[3:]:
+        shutil.rmtree(path, ignore_errors=True)
+        deleted.append(os.path.basename(path))
+    return deleted
+
+
+def _backup_create_application_snapshot():
+    target_dir = os.path.join(BACKUP_ROOT, "Application", APP_VERSION)
+    target = os.path.join(
+        target_dir,
+        f"SCADA-BONT-Application-{APP_VERSION}.zip",
+    )
+    if os.path.isfile(target):
+        try:
+            _backup_verify_archive(target)
+            return target
+        except Exception:
+            pass
+    os.makedirs(target_dir, exist_ok=True)
+    temporary = target + ".tmp"
+    files = _backup_application_files()
+    members = []
+    with zipfile.ZipFile(
+        temporary,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+        allowZip64=True,
+    ) as archive:
+        for name, path in files:
+            arcname = f"application/{name}"
+            archive.write(path, arcname)
+            members.append(
+                {
+                    "name": arcname,
+                    "size": os.path.getsize(path),
+                    "sha256": _backup_sha256_file(path),
+                }
+            )
+        archive.writestr(
+            "manifest.json",
+            json.dumps(
+                {
+                    "status": "SUCCESS",
+                    "backup_type": "application",
+                    "application_version": APP_VERSION,
+                    "created_at": datetime.datetime.now().isoformat(
+                        timespec="seconds"
+                    ),
+                    "members": members,
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+        )
+    with zipfile.ZipFile(temporary, "r") as archive:
+        failed_member = archive.testzip()
+        if failed_member:
+            raise ValueError(
+                f"Application backup member is damaged: {failed_member}"
+            )
+    os.replace(temporary, target)
+    _backup_write_checksum(target)
+    _backup_cleanup_application_versions()
+    return target
+
+
+def _backup_scan_catalog():
+    daily_root = os.path.join(BACKUP_ROOT, "Daily")
+    records = []
+    if not os.path.isdir(daily_root):
+        return records
+    for directory, _subdirs, filenames in os.walk(daily_root):
+        for filename in filenames:
+            if not (
+                filename.startswith("SCADA-BONT-Daily-")
+                and filename.lower().endswith(".zip")
+            ):
+                continue
+            path = os.path.join(directory, filename)
+            try:
+                with zipfile.ZipFile(path, "r") as archive:
+                    manifest = json.loads(
+                        archive.read("manifest.json").decode("utf-8")
+                    )
+                backup_date = datetime.date.fromisoformat(
+                    str(manifest["backup_date"])
+                )
+            except Exception:
+                continue
+            records.append(
+                {
+                    "backup_date": backup_date,
+                    "path": path,
+                    "folder": directory,
+                    "size_bytes": os.path.getsize(path),
+                    "sha256": _backup_expected_checksum(path),
+                    "manifest": manifest,
+                }
+            )
+    records.sort(key=lambda item: item["backup_date"], reverse=True)
+    return records
+
+
+def _backup_cleanup_daily(reference_date):
+    cutoff = reference_date - datetime.timedelta(
+        days=BACKUP_RETENTION_DAYS - 1
+    )
+    deleted = []
+    daily_root = os.path.realpath(os.path.join(BACKUP_ROOT, "Daily"))
+    for record in _backup_scan_catalog():
+        if record["backup_date"] >= cutoff:
+            continue
+        folder = os.path.realpath(record["folder"])
+        if folder == daily_root or not folder.startswith(daily_root + os.sep):
+            continue
+        shutil.rmtree(folder, ignore_errors=True)
+        deleted.append(record["backup_date"].isoformat())
+    return deleted
+
+
+def _backup_create_daily(backup_date, trigger="scheduled", force=False):
+    """Create one verified daily backup, then enforce the 183-day retention."""
+    if isinstance(backup_date, datetime.datetime):
+        backup_date = backup_date.date()
+    if not isinstance(backup_date, datetime.date):
+        raise TypeError("backup_date must be a date")
+    with BACKUP_LOCK:
+        os.makedirs(BACKUP_ROOT, exist_ok=True)
+        _backup_create_application_snapshot()
+        target = _backup_daily_archive_path(backup_date)
+        if os.path.isfile(target) and not force:
+            try:
+                _backup_verify_archive(target)
+                return next(
+                    (
+                        record
+                        for record in _backup_scan_catalog()
+                        if os.path.abspath(record["path"])
+                        == os.path.abspath(target)
+                    ),
+                    None,
+                )
+            except Exception:
+                pass
+
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        temporary = target + ".tmp"
+        try:
+            actual_rows = _backup_actual_rows_for_date(backup_date)
+            trend_rows = _backup_trend_rows_for_date(backup_date)
+            config_files = _backup_configuration_files()
+            bays = sorted({str(row[2]) for row in actual_rows if row[2]})
+            created_at = datetime.datetime.now().isoformat(timespec="seconds")
+            manifest = {
+                "status": "SUCCESS",
+                "backup_type": "daily",
+                "backup_date": backup_date.isoformat(),
+                "created_at": created_at,
+                "application_version": APP_VERSION,
+                "retention_days": BACKUP_RETENTION_DAYS,
+                "actual_interval_seconds": int(ACTUAL_HISTORY_INTERVAL),
+                "actual_rows": len(actual_rows),
+                "trend_rows": len(trend_rows),
+                "config_files": len(config_files),
+                "bays": bays,
+                "members": [],
+            }
+            with tempfile.TemporaryDirectory(
+                prefix="scada-backup-",
+                dir=BACKUP_ROOT,
+            ) as work_dir:
+                database_name = (
+                    f"SCADA-Daily-{backup_date:%Y-%m-%d}.sqlite3"
+                )
+                database_path = os.path.join(work_dir, database_name)
+                actual_csv_path = os.path.join(
+                    work_dir,
+                    f"Actual-Values-{backup_date:%Y-%m-%d}.csv",
+                )
+                _backup_build_daily_database(
+                    database_path,
+                    actual_rows,
+                    trend_rows,
+                    manifest,
+                )
+                _backup_write_actual_csv(actual_csv_path, actual_rows)
+
+                with zipfile.ZipFile(
+                    temporary,
+                    "w",
+                    compression=zipfile.ZIP_DEFLATED,
+                    allowZip64=True,
+                ) as archive:
+                    for member_name, path in (
+                        (f"database/{database_name}", database_path),
+                        (
+                            f"actual/{os.path.basename(actual_csv_path)}",
+                            actual_csv_path,
+                        ),
+                    ):
+                        archive.write(path, member_name)
+                        manifest["members"].append(
+                            {
+                                "name": member_name,
+                                "size": os.path.getsize(path),
+                                "sha256": _backup_sha256_file(path),
+                            }
+                        )
+                    for name, path in config_files:
+                        with open(path, "rb") as handle:
+                            payload = handle.read()
+                        member_name = f"config/{name}"
+                        archive.writestr(member_name, payload)
+                        manifest["members"].append(
+                            {
+                                "name": member_name,
+                                "size": len(payload),
+                                "sha256": hashlib.sha256(payload).hexdigest(),
+                            }
+                        )
+                    archive.writestr(
+                        "manifest.json",
+                        json.dumps(
+                            manifest,
+                            ensure_ascii=False,
+                            indent=2,
+                        ),
+                    )
+            with zipfile.ZipFile(temporary, "r") as archive:
+                failed_member = archive.testzip()
+                if failed_member:
+                    raise ValueError(
+                        f"Daily backup member is damaged: {failed_member}"
+                    )
+            os.replace(temporary, target)
+            digest = _backup_write_checksum(target)
+            deleted = _backup_cleanup_daily(backup_date)
+            _backup_append_log(
+                backup_date,
+                trigger,
+                "SUCCESS",
+                archive=target,
+                actual_rows=len(actual_rows),
+                trend_rows=len(trend_rows),
+                config_files=len(config_files),
+                size_bytes=os.path.getsize(target),
+                sha256=digest,
+                deleted=";".join(deleted),
+            )
+            return next(
+                (
+                    record
+                    for record in _backup_scan_catalog()
+                    if os.path.abspath(record["path"])
+                    == os.path.abspath(target)
+                ),
+                None,
+            )
+        except Exception as exc:
+            try:
+                if os.path.exists(temporary):
+                    os.remove(temporary)
+            except OSError:
+                pass
+            _backup_append_log(
+                backup_date,
+                trigger,
+                "FAILED",
+                archive=target,
+                error=str(exc),
+            )
+            raise
+
+
+def _backup_actual_csv_member(archive):
+    names = [
+        name
+        for name in archive.namelist()
+        if name.startswith("actual/") and name.lower().endswith(".csv")
+    ]
+    if not names:
+        raise ValueError("Actual-value CSV is missing from the backup.")
+    return names[0]
+
+
+def _backup_read_actual_rows(path, bay_name="", limit=5000):
+    selected_bay = str(bay_name or "").strip()
+    total = 0
+    truncated = False
+    collected = deque(maxlen=limit) if limit else []
+    with zipfile.ZipFile(path, "r") as archive:
+        member = _backup_actual_csv_member(archive)
+        with archive.open(member, "r") as raw_handle:
+            with io.TextIOWrapper(
+                raw_handle, encoding="utf-8-sig", newline="",
+            ) as text_handle:
+                reader = csv.DictReader(text_handle)
+                for row in reader:
+                    if (
+                        selected_bay
+                        and selected_bay != "All Bays"
+                        and row.get("Bay") != selected_bay
+                    ):
+                        continue
+                    total += 1
+                    collected.append(dict(row))
+                    if limit and total > limit:
+                        truncated = True
+    rows = list(collected)
+    if limit:
+        rows.reverse()
+    return rows, total, truncated
+
+
+def _backup_open_folder():
+    os.makedirs(BACKUP_ROOT, exist_ok=True)
+    if os.name == "nt":
+        os.startfile(BACKUP_ROOT)
+    elif sys.platform == "darwin":
+        subprocess.Popen(["open", BACKUP_ROOT])
+    else:
+        subprocess.Popen(["xdg-open", BACKUP_ROOT])
+
+
+def _daily_backup_worker():
+    last_target = None
+    while True:
+        try:
+            target = datetime.date.today() - datetime.timedelta(days=1)
+            if target != last_target:
+                _backup_create_daily(
+                    target,
+                    trigger="scheduled",
+                    force=False,
+                )
+                last_target = target
+        except Exception as exc:
+            print(f"[DAILY BACKUP] {exc}")
+        time.sleep(60.0)
+
+
+def start_daily_backup_worker():
+    """Start daily backup catch-up and midnight rollover processing."""
+    global BACKUP_STARTED
+    if BACKUP_STARTED:
+        return
+    BACKUP_STARTED = True
+    threading.Thread(
+        target=_daily_backup_worker,
+        daemon=True,
+        name="Daily-Backup",
+    ).start()
+
 
 def _xlsx_column_name(index):
     name = ""
@@ -2648,7 +3528,7 @@ def _report_log_once():
 
 
 def _report_all_variables_once():
-    """One explicit row for every active ListSetting point, every 2 seconds."""
+    """One explicit row for every active ListSetting point, every minute."""
     path = os.path.join(APP_DIR, "Report_All_Realtime_Variables.csv")
     with SETTING_LOCK:
         rows = [dict(row) for row in SETTING_REGISTRY]
@@ -3402,6 +4282,8 @@ class SCADAMainUI:
         self.update_clock()
         self.start_background_polling()
         start_trend_history_logger()
+        start_actual_history_logger()
+        start_daily_backup_worker()
         self.root.protocol("WM_DELETE_WINDOW", self.confirm_exit)
 
     # ==========================================================================
@@ -3647,11 +4529,31 @@ class SCADAMainUI:
         )
         menubar.add_cascade(label="Graph", menu=graph_menu)
 
+        # Backup Menu — deliberately placed before Help.
+        backup_menu = tk.Menu(menubar, tearoff=0)
+        backup_menu.add_command(
+            label="Daily Backup Explorer",
+            command=self.open_backup_window,
+            state=authenticated_state,
+        )
+        backup_menu.add_command(
+            label="Open Backup Folder",
+            command=_backup_open_folder,
+            state=authenticated_state,
+        )
+        menubar.add_cascade(label="Backup", menu=backup_menu)
+
         # Help Menu
         help_menu = tk.Menu(menubar, tearoff=0)
-        help_menu.add_command(label='System Manual', command=lambda: messagebox.showinfo("Help", "SCADA BONT System Manual v2.4"))
-        help_menu.add_command(label='SCADA Information', command=lambda: messagebox.showinfo("About", "SCADA BONT\nUnified SCADA Master"))
-        menubar.add_cascade(label='Help', menu=help_menu)
+        help_menu.add_command(
+            label="System Manual",
+            command=self.open_system_manual,
+        )
+        help_menu.add_command(
+            label="SCADA Information",
+            command=self.show_scada_information,
+        )
+        menubar.add_cascade(label="Help", menu=help_menu)
 
         self.root.config(menu=menubar)
 
@@ -7106,6 +8008,1255 @@ class SCADAMainUI:
         )
         close_button.pack(side="bottom", pady=(0, 16))
 
+    def open_backup_window(self):
+        """Open daily backup history, verification, and Excel export."""
+        existing = getattr(self, "_backup_window", None)
+        if existing is not None and existing.winfo_exists():
+            existing.deiconify()
+            existing.lift()
+            existing.focus_force()
+            return
+
+        palette = {
+            "navy": "#14324b",
+            "navy_dark": "#10263c",
+            "toolbar": "#e7ebf0",
+            "workspace": "#cfd5dc",
+            "panel": "#ffffff",
+            "border": "#9aa7b4",
+            "text": "#17212b",
+            "muted": "#5d6b78",
+            "green": "#147a42",
+            "warning": "#9a6200",
+            "danger": "#a62828",
+            "row_alt": "#eef3f7",
+        }
+        win = tk.Toplevel(self.root)
+        self._backup_window = win
+        self._make_toplevel_responsive(
+            win,
+            "Daily Backup Explorer",
+            fullscreen=False,
+        )
+        win.configure(bg=palette["workspace"])
+
+        def close_window():
+            self._backup_window = None
+            win.destroy()
+
+        win.protocol("WM_DELETE_WINDOW", close_window)
+
+        header = tk.Frame(win, bg=palette["navy"], padx=18, pady=12)
+        header.pack(fill="x")
+        tk.Label(
+            header,
+            text="DAILY BACKUP EXPLORER",
+            bg=palette["navy"],
+            fg="#ffffff",
+            font=("Segoe UI", 17, "bold"),
+            anchor="w",
+        ).pack(fill="x")
+        tk.Label(
+            header,
+            text=(
+                "Backup konfigurasi, rumus, database, dan nilai aktual "
+                "setiap 60 detik"
+            ),
+            bg=palette["navy"],
+            fg="#c8d7e6",
+            font=("Segoe UI", 9),
+            anchor="w",
+        ).pack(fill="x", pady=(3, 0))
+
+        summary = tk.Frame(win, bg=palette["workspace"], padx=10, pady=8)
+        summary.pack(fill="x")
+        last_backup_var = tk.StringVar(value="Last backup: checking")
+        retention_var = tk.StringVar(
+            value=f"Retention: {BACKUP_RETENTION_DAYS} days"
+        )
+        location_var = tk.StringVar(value=f"Location: {BACKUP_ROOT}")
+        for column, (title, variable, color) in enumerate(
+            (
+                ("STATUS", last_backup_var, palette["green"]),
+                ("POLICY", retention_var, palette["navy"]),
+                ("LOCAL STORAGE", location_var, palette["muted"]),
+            )
+        ):
+            card = tk.Frame(
+                summary,
+                bg=palette["panel"],
+                highlightbackground=palette["border"],
+                highlightthickness=1,
+                padx=12,
+                pady=8,
+            )
+            card.grid(
+                row=0,
+                column=column,
+                sticky="nsew",
+                padx=(0 if column == 0 else 5, 0),
+            )
+            summary.grid_columnconfigure(
+                column,
+                weight=1 if column < 2 else 3,
+            )
+            tk.Label(
+                card,
+                text=title,
+                bg=palette["panel"],
+                fg=palette["muted"],
+                font=("Segoe UI", 8, "bold"),
+                anchor="w",
+            ).pack(fill="x")
+            tk.Label(
+                card,
+                textvariable=variable,
+                bg=palette["panel"],
+                fg=color,
+                font=("Segoe UI", 10, "bold"),
+                anchor="w",
+            ).pack(fill="x", pady=(2, 0))
+
+        toolbar = tk.Frame(
+            win,
+            bg=palette["toolbar"],
+            bd=1,
+            relief="raised",
+        )
+        toolbar.pack(fill="x", padx=10, pady=(0, 6))
+
+        status_var = tk.StringVar(value="Ready")
+        selected = {
+            "record": None,
+            "records": {},
+            "rows": [],
+            "total": 0,
+        }
+        bay_var = tk.StringVar(value="All Bays")
+
+        body = tk.PanedWindow(
+            win,
+            orient="horizontal",
+            bg=palette["workspace"],
+            sashwidth=5,
+            sashrelief="raised",
+        )
+        body.pack(fill="both", expand=True, padx=10, pady=(0, 6))
+
+        history_frame = tk.Frame(
+            body,
+            bg=palette["panel"],
+            bd=1,
+            relief="sunken",
+        )
+        body.add(history_frame, minsize=430, width=520)
+        tk.Label(
+            history_frame,
+            text="AVAILABLE DAILY BACKUPS",
+            bg=palette["navy_dark"],
+            fg="#ffffff",
+            font=("Segoe UI", 9, "bold"),
+            anchor="w",
+            padx=10,
+            pady=7,
+        ).pack(fill="x")
+        history_columns = ("date", "created", "rows", "size")
+        history_tree = ttk.Treeview(
+            history_frame,
+            columns=history_columns,
+            show="headings",
+        )
+        history_scroll = ttk.Scrollbar(
+            history_frame,
+            orient="vertical",
+            command=history_tree.yview,
+        )
+        history_tree.configure(yscrollcommand=history_scroll.set)
+        history_scroll.pack(side="right", fill="y")
+        history_tree.pack(side="left", fill="both", expand=True)
+        for column, title, width in (
+            ("date", "BACKUP DATE", 110),
+            ("created", "CREATED", 150),
+            ("rows", "ACTUAL ROWS", 100),
+            ("size", "SIZE", 90),
+        ):
+            history_tree.heading(column, text=title)
+            history_tree.column(
+                column,
+                width=width,
+                minwidth=75,
+                anchor="center",
+                stretch=True,
+            )
+        self._bind_mousewheel(history_tree)
+
+        data_frame = tk.Frame(
+            body,
+            bg=palette["panel"],
+            bd=1,
+            relief="sunken",
+        )
+        body.add(data_frame, minsize=620)
+        data_header = tk.Frame(data_frame, bg=palette["navy_dark"])
+        data_header.pack(fill="x")
+        selected_label = tk.Label(
+            data_header,
+            text="ACTUAL VALUES  •  SELECT A BACKUP",
+            bg=palette["navy_dark"],
+            fg="#ffffff",
+            font=("Segoe UI", 9, "bold"),
+            anchor="w",
+            padx=10,
+            pady=7,
+        )
+        selected_label.pack(side="left", fill="x", expand=True)
+        tk.Label(
+            data_header,
+            text="Bay",
+            bg=palette["navy_dark"],
+            fg="#c8d7e6",
+            font=("Segoe UI", 9),
+        ).pack(side="left", padx=(8, 4))
+        bay_combo = ttk.Combobox(
+            data_header,
+            textvariable=bay_var,
+            values=("All Bays",),
+            state="readonly",
+            width=28,
+        )
+        bay_combo.pack(side="right", padx=(0, 9), pady=4)
+
+        table_host = tk.Frame(data_frame, bg=palette["panel"])
+        table_host.pack(fill="both", expand=True)
+        data_columns = (
+            "timestamp",
+            "bay",
+            "physical",
+            "value",
+            "unit",
+            "quality",
+            "ip",
+            "asdu",
+            "ioa",
+        )
+        data_tree = ttk.Treeview(
+            table_host,
+            columns=data_columns,
+            show="headings",
+        )
+        data_vertical = ttk.Scrollbar(
+            table_host,
+            orient="vertical",
+            command=data_tree.yview,
+        )
+        data_horizontal = ttk.Scrollbar(
+            table_host,
+            orient="horizontal",
+            command=data_tree.xview,
+        )
+        data_tree.configure(
+            yscrollcommand=data_vertical.set,
+            xscrollcommand=data_horizontal.set,
+        )
+        table_host.grid_rowconfigure(0, weight=1)
+        table_host.grid_columnconfigure(0, weight=1)
+        data_tree.grid(row=0, column=0, sticky="nsew")
+        data_vertical.grid(row=0, column=1, sticky="ns")
+        data_horizontal.grid(row=1, column=0, sticky="ew")
+        for column, title, width in (
+            ("timestamp", "TIMESTAMP", 150),
+            ("bay", "BAY", 190),
+            ("physical", "VARIABLE", 145),
+            ("value", "VALUE", 95),
+            ("unit", "UNIT", 70),
+            ("quality", "QUALITY", 85),
+            ("ip", "DEVICE ADDRESS", 120),
+            ("asdu", "ASDU", 75),
+            ("ioa", "IOA", 85),
+        ):
+            data_tree.heading(column, text=title)
+            data_tree.column(
+                column,
+                width=width,
+                minwidth=65,
+                anchor=(
+                    "center"
+                    if column in {"value", "unit", "quality", "asdu", "ioa"}
+                    else "w"
+                ),
+                stretch=False,
+            )
+        data_tree.tag_configure("online", foreground=palette["green"])
+        data_tree.tag_configure("offline", foreground=palette["danger"])
+        data_tree.tag_configure("nodata", foreground=palette["warning"])
+        self._bind_mousewheel(data_tree)
+
+        footer = tk.Frame(
+            win,
+            bg=palette["toolbar"],
+            bd=1,
+            relief="sunken",
+        )
+        footer.pack(fill="x", padx=10, pady=(0, 8))
+        tk.Label(
+            footer,
+            textvariable=status_var,
+            bg=palette["toolbar"],
+            fg=palette["muted"],
+            font=("Segoe UI", 9),
+            anchor="w",
+        ).pack(side="left", padx=10, pady=4)
+        count_var = tk.StringVar(value="0 rows")
+        tk.Label(
+            footer,
+            textvariable=count_var,
+            bg=palette["toolbar"],
+            fg=palette["navy"],
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="right", padx=10, pady=4)
+
+        def format_size(size):
+            value = float(size or 0)
+            for unit in ("B", "KB", "MB", "GB"):
+                if value < 1024.0 or unit == "GB":
+                    return f"{value:.1f} {unit}"
+                value /= 1024.0
+            return f"{value:.1f} GB"
+
+        def load_actual_values(_event=None):
+            record = selected["record"]
+            if not record:
+                return
+            status_var.set("Reading verified backup data...")
+            win.update_idletasks()
+            try:
+                rows, total, truncated = _backup_read_actual_rows(
+                    record["path"],
+                    bay_name=bay_var.get(),
+                    limit=5000,
+                )
+                selected["rows"] = rows
+                selected["total"] = total
+                for item in data_tree.get_children():
+                    data_tree.delete(item)
+                for row in rows:
+                    quality = str(row.get("Quality", "")).upper()
+                    tag = (
+                        "online"
+                        if quality == "ONLINE"
+                        else "nodata"
+                        if quality == "NO DATA"
+                        else "offline"
+                    )
+                    data_tree.insert(
+                        "",
+                        "end",
+                        values=(
+                            row.get("Timestamp", ""),
+                            row.get("Bay", ""),
+                            row.get("Physical Name", ""),
+                            row.get("Value", ""),
+                            row.get("Unit", ""),
+                            quality,
+                            row.get("Device Address", ""),
+                            row.get("ASDU", ""),
+                            row.get("IOA", ""),
+                        ),
+                        tags=(tag,),
+                    )
+                count_var.set(
+                    f"{len(rows):,}{'+' if truncated else ''} shown"
+                    f"  •  {total:,} available"
+                )
+                status_var.set(
+                    f"{record['backup_date']:%Y-%m-%d}"
+                    f"  •  {bay_var.get()}"
+                    f"{'  •  latest 5,000 displayed' if truncated else ''}"
+                )
+            except Exception as exc:
+                selected["rows"] = []
+                selected["total"] = 0
+                count_var.set("Load failed")
+                status_var.set(str(exc))
+                messagebox.showerror(
+                    "Backup Data",
+                    f"Unable to read daily backup:\n{exc}",
+                    parent=win,
+                )
+
+        def select_backup(_event=None):
+            items = history_tree.selection()
+            if not items:
+                return
+            record = selected["records"].get(items[0])
+            if not record:
+                return
+            selected["record"] = record
+            manifest = record["manifest"]
+            bays = ["All Bays"] + list(manifest.get("bays", []))
+            bay_combo.configure(values=tuple(bays))
+            bay_var.set("All Bays")
+            selected_label.configure(
+                text=(
+                    "ACTUAL VALUES  •  "
+                    f"{record['backup_date']:%Y-%m-%d}  •  "
+                    f"APP {manifest.get('application_version', '-')}"
+                )
+            )
+            load_actual_values()
+
+        def refresh_catalog(select_path=None):
+            records = _backup_scan_catalog()
+            selected["records"] = {}
+            for item in history_tree.get_children():
+                history_tree.delete(item)
+            selected_item = None
+            for index, record in enumerate(records):
+                item = f"backup-{index}"
+                manifest = record["manifest"]
+                history_tree.insert(
+                    "",
+                    "end",
+                    iid=item,
+                    values=(
+                        record["backup_date"].isoformat(),
+                        str(manifest.get("created_at", "")).replace("T", " "),
+                        f"{int(manifest.get('actual_rows', 0)):,}",
+                        format_size(record["size_bytes"]),
+                    ),
+                )
+                selected["records"][item] = record
+                if (
+                    select_path
+                    and os.path.abspath(record["path"])
+                    == os.path.abspath(select_path)
+                ):
+                    selected_item = item
+            if records:
+                latest = records[0]
+                last_backup_var.set(
+                    "Last backup: "
+                    f"{latest['backup_date']:%Y-%m-%d}  •  SUCCESS"
+                )
+                item = selected_item or "backup-0"
+                history_tree.selection_set(item)
+                history_tree.focus(item)
+                history_tree.see(item)
+                select_backup()
+            else:
+                last_backup_var.set("Last backup: not available")
+                selected["record"] = None
+                selected_label.configure(
+                    text="ACTUAL VALUES  •  NO DAILY BACKUP"
+                )
+                status_var.set(
+                    "No backup is available. Admin can choose Backup Now."
+                )
+                count_var.set("0 rows")
+
+        def backup_finished(record=None, error=None):
+            backup_button.configure(state="normal")
+            if not win.winfo_exists():
+                return
+            if error:
+                status_var.set(f"Backup failed: {error}")
+                messagebox.showerror(
+                    "Daily Backup",
+                    f"Backup failed:\n{error}",
+                    parent=win,
+                )
+                return
+            status_var.set("Backup completed and SHA-256 verified.")
+            refresh_catalog(record["path"] if record else None)
+            messagebox.showinfo(
+                "Daily Backup",
+                "Backup harian selesai dan telah diverifikasi.",
+                parent=win,
+            )
+
+        def backup_now():
+            if not self.require_permission(
+                "configure",
+                "create a manual daily backup",
+                parent=win,
+            ):
+                return
+            if not messagebox.askyesno(
+                "Backup Now",
+                (
+                    "Create or refresh today's daily backup?\n\n"
+                    "The current configuration, formulas, database, and "
+                    "actual values will be verified before replacing the "
+                    "existing archive."
+                ),
+                parent=win,
+            ):
+                return
+            backup_button.configure(state="disabled")
+            status_var.set("Creating and verifying daily backup...")
+
+            def worker():
+                try:
+                    _actual_history_log_once()
+                    record = _backup_create_daily(
+                        datetime.date.today(),
+                        trigger="manual",
+                        force=True,
+                    )
+                    win.after(
+                        0,
+                        lambda: backup_finished(record=record),
+                    )
+                except Exception as exc:
+                    win.after(
+                        0,
+                        lambda message=str(exc): backup_finished(
+                            error=message
+                        ),
+                    )
+
+            threading.Thread(
+                target=worker,
+                daemon=True,
+                name="Manual-Daily-Backup",
+            ).start()
+
+        def verify_selected():
+            record = selected["record"]
+            if not record:
+                messagebox.showwarning(
+                    "Verify Backup",
+                    "Select a daily backup first.",
+                    parent=win,
+                )
+                return
+            status_var.set("Checking ZIP contents and SHA-256...")
+
+            def worker():
+                try:
+                    manifest = _backup_verify_archive(record["path"])
+                    message = (
+                        "Backup is valid.\n\n"
+                        f"Date: {manifest.get('backup_date', '-')}\n"
+                        f"Actual rows: {manifest.get('actual_rows', 0):,}\n"
+                        f"SHA-256: {record.get('sha256', '-')}"
+                    )
+                    win.after(
+                        0,
+                        lambda: (
+                            status_var.set(
+                                "Selected backup passed integrity verification."
+                            ),
+                            messagebox.showinfo(
+                                "Verify Backup",
+                                message,
+                                parent=win,
+                            ),
+                        ),
+                    )
+                except Exception as exc:
+                    win.after(
+                        0,
+                        lambda message=str(exc): (
+                            status_var.set(
+                                f"Integrity verification failed: {message}"
+                            ),
+                            messagebox.showerror(
+                                "Verify Backup",
+                                message,
+                                parent=win,
+                            ),
+                        ),
+                    )
+
+            threading.Thread(
+                target=worker,
+                daemon=True,
+                name="Verify-Daily-Backup",
+            ).start()
+
+        def export_excel():
+            record = selected["record"]
+            if not record:
+                messagebox.showwarning(
+                    "Export Excel",
+                    "Select a daily backup first.",
+                    parent=win,
+                )
+                return
+            safe_bay = re.sub(
+                r"[^A-Za-z0-9#_-]+",
+                "_",
+                bay_var.get(),
+            ).strip("_")
+            path = filedialog.asksaveasfilename(
+                parent=win,
+                title="Export Daily Backup to Excel",
+                defaultextension=".xlsx",
+                filetypes=[("Excel Workbook", "*.xlsx")],
+                initialfile=(
+                    f"Daily_Backup_{record['backup_date']:%Y%m%d}_"
+                    f"{safe_bay or 'All'}.xlsx"
+                ),
+            )
+            if not path:
+                return
+            export_button.configure(state="disabled")
+            status_var.set("Exporting complete selected data to Excel...")
+
+            def worker():
+                try:
+                    rows, total, _truncated = _backup_read_actual_rows(
+                        record["path"],
+                        bay_name=bay_var.get(),
+                        limit=0,
+                    )
+                    workbook_rows = []
+                    for row in rows:
+                        value = row.get("Value", "")
+                        try:
+                            value = float(value)
+                        except (TypeError, ValueError):
+                            pass
+                        workbook_rows.append(
+                            [
+                                row.get("Timestamp", ""),
+                                row.get("Device Address", ""),
+                                row.get("Bay", ""),
+                                row.get("Physical Name", ""),
+                                row.get("Information Name", ""),
+                                row.get("Type", ""),
+                                row.get("ASDU", ""),
+                                row.get("IOA", ""),
+                                row.get("Unit", ""),
+                                value,
+                                row.get("Quality", ""),
+                            ]
+                        )
+                    saved = _write_xlsx(
+                        path,
+                        "Daily Backup",
+                        [
+                            "Timestamp",
+                            "Device Address",
+                            "Bay",
+                            "Physical Name",
+                            "Information Name",
+                            "Type",
+                            "ASDU",
+                            "IOA",
+                            "Unit",
+                            "Value",
+                            "Quality",
+                        ],
+                        workbook_rows,
+                    )
+                    win.after(
+                        0,
+                        lambda: (
+                            export_button.configure(state="normal"),
+                            status_var.set(
+                                f"{total:,} rows exported to Excel."
+                            ),
+                            messagebox.showinfo(
+                                "Export Excel",
+                                f"Excel workbook created:\n{saved}",
+                                parent=win,
+                            ),
+                        ),
+                    )
+                except Exception as exc:
+                    win.after(
+                        0,
+                        lambda message=str(exc): (
+                            export_button.configure(state="normal"),
+                            status_var.set(f"Export failed: {message}"),
+                            messagebox.showerror(
+                                "Export Excel",
+                                message,
+                                parent=win,
+                            ),
+                        ),
+                    )
+
+            threading.Thread(
+                target=worker,
+                daemon=True,
+                name="Export-Daily-Backup",
+            ).start()
+
+        button_options = {
+            "font": ("Segoe UI", 9, "bold"),
+            "relief": "raised",
+            "bd": 1,
+            "padx": 11,
+            "pady": 5,
+        }
+        backup_button = tk.Button(
+            toolbar,
+            text="Backup Now",
+            command=backup_now,
+            bg="#dcefe3",
+            fg=palette["green"],
+            **button_options,
+        )
+        backup_button.pack(side="left", padx=(8, 3), pady=6)
+        tk.Button(
+            toolbar,
+            text="Refresh",
+            command=refresh_catalog,
+            bg="#f8f9fa",
+            fg=palette["text"],
+            **button_options,
+        ).pack(side="left", padx=3, pady=6)
+        tk.Button(
+            toolbar,
+            text="Verify Selected",
+            command=verify_selected,
+            bg="#fff3cd",
+            fg=palette["warning"],
+            **button_options,
+        ).pack(side="left", padx=3, pady=6)
+        export_button = tk.Button(
+            toolbar,
+            text="Export Excel",
+            command=export_excel,
+            bg="#dcefe3",
+            fg=palette["green"],
+            **button_options,
+        )
+        export_button.pack(side="left", padx=3, pady=6)
+        tk.Button(
+            toolbar,
+            text="Open Backup Folder",
+            command=_backup_open_folder,
+            bg="#f8f9fa",
+            fg=palette["navy"],
+            **button_options,
+        ).pack(side="left", padx=3, pady=6)
+        tk.Label(
+            toolbar,
+            text="AUTO BACKUP  •  183-DAY ROLLING RETENTION",
+            bg=palette["toolbar"],
+            fg=palette["green"],
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="right", padx=12)
+
+        history_tree.bind("<<TreeviewSelect>>", select_backup)
+        bay_combo.bind("<<ComboboxSelected>>", load_actual_values)
+        refresh_catalog()
+
+    def open_system_manual(self):
+        """Open the searchable in-application operator manual."""
+        existing = getattr(self, "_manual_window", None)
+        if existing is not None and existing.winfo_exists():
+            existing.deiconify()
+            existing.lift()
+            existing.focus_force()
+            return
+
+        chapters = (
+            (
+                "1. Pengenalan dan Persyaratan Sistem",
+                (
+                    "SCADA BONT adalah aplikasi desktop untuk pemantauan IEC-104, "
+                    "nilai analog, status digital, alarm, histori proses, konfigurasi "
+                    "peralatan, Monitor TV, dan backup harian.\n\n"
+                    "Sistem operasi yang didukung:\n"
+                    "• Windows 10 64-bit versi 1809/build 17763 atau lebih baru.\n"
+                    "• Windows 11 64-bit.\n"
+                    "• Windows 7, Windows 8, dan Windows 32-bit tidak didukung.\n\n"
+                    "Gunakan resolusi layar minimal 1366×768. Pastikan komputer "
+                    "terhubung ke jaringan RTU sebelum memulai monitoring."
+                ),
+            ),
+            (
+                "2. Login dan Hak Akses",
+                (
+                    "Saat aplikasi dibuka, pengguna harus memilih role dan login.\n\n"
+                    "Operator:\n"
+                    "• Melihat seluruh layar monitoring, alarm, report, dan backup.\n"
+                    "• Mengekspor data yang tersedia.\n"
+                    "• Tidak dapat mengubah konfigurasi atau membuat backup manual.\n\n"
+                    "Admin dan Developer:\n"
+                    "• Memiliki seluruh hak Operator.\n"
+                    "• Dapat mengubah parameter, mapping, komunikasi, dan membuat "
+                    "backup manual.\n\n"
+                    "Gunakan Management > Switch User untuk mengganti role tanpa "
+                    "menutup aplikasi. Management > User Permissions menampilkan "
+                    "ringkasan hak setiap role."
+                ),
+            ),
+            (
+                "3. Menu Management",
+                (
+                    "Switch User\n"
+                    "Mengganti sesi Operator, Admin, atau Developer.\n\n"
+                    "User Permissions\n"
+                    "Menampilkan matriks hak akses View, CRUD, dan Configure.\n\n"
+                    "Exit SCADA\n"
+                    "Menutup sesi operator dan menghentikan monitoring pada "
+                    "workstation ini. Gunakan menu ini agar aplikasi ditutup dengan "
+                    "tertib."
+                ),
+            ),
+            (
+                "4. Menu Supervision dan Navigasi Utama",
+                (
+                    "Real-Time Monitoring\n"
+                    "Membuka halaman Run Monitor utama.\n\n"
+                    "Generator 1 Status / Generator 2 Status\n"
+                    "Membuka halaman status dan proteksi masing-masing generator.\n\n"
+                    "Tab navigasi di bawah header:\n"
+                    "• Run Monitor\n"
+                    "• System Configuration\n"
+                    "• Network\n"
+                    "• Auxiliary System\n"
+                    "• 1# Generator Monitor\n"
+                    "• 2# Generator Monitor\n\n"
+                    "Tombol Previous dan Next dapat digunakan untuk berpindah tab "
+                    "secara berurutan."
+                ),
+            ),
+            (
+                "5. Run Monitor",
+                (
+                    "Run Monitor menampilkan single-line diagram utama, nilai analog, "
+                    "dan status breaker dari seluruh bay.\n\n"
+                    "Nilai U, I, P, Q, frekuensi, dan parameter lainnya mengikuti "
+                    "ListSetting CSV aktif. Status breaker mengikuti StatusSetting "
+                    "digital YX:\n"
+                    "• 1 / SET / Closed = merah.\n"
+                    "• 0 / RESET / Open = hijau.\n"
+                    "• Data tidak valid atau RTU offline = abu-abu dengan tanda ?.\n\n"
+                    "Klik ganda pada objek yang mendukung mapping untuk memilih "
+                    "sumber data. Perubahan mapping hanya dapat disimpan oleh Admin "
+                    "atau Developer."
+                ),
+            ),
+            (
+                "6. System Configuration",
+                (
+                    "Halaman ini menampilkan konfigurasi sistem pembangkit dan 23 "
+                    "indikator breaker: Connection Wire, Generator, sisi HV/LV "
+                    "Auxiliary Transformer, feeder motor, dan No.3 Feed Water Pump.\n\n"
+                    "Indikator menggunakan StatusSetting yang sama dengan Run Monitor. "
+                    "Abu-abu berarti sumber YX belum tersedia atau komunikasi RTU "
+                    "offline. Tombol AUX STG membuka tahapan Auxiliary System."
+                ),
+            ),
+            (
+                "7. Network",
+                (
+                    "Network menampilkan topologi komunikasi workstation, relay, dan "
+                    "delapan RTU IEC-104.\n\n"
+                    "Status ONLINE menunjukkan sesi komunikasi dan data terbaru masih "
+                    "valid. OFFLINE menunjukkan koneksi tidak tersedia. Gunakan "
+                    "Maintenance > System Diagnostics untuk melihat counter frame, "
+                    "error terakhir, dan waktu penerimaan data."
+                ),
+            ),
+            (
+                "8. Auxiliary System",
+                (
+                    "Auxiliary System menampilkan Connection Wire I/II, dua Auxiliary "
+                    "Transformer, 14 feeder motor, dan No.3 Feed Water Pump.\n\n"
+                    "Tabel nilai memperlihatkan Uab/Ubc/Uca, Ia, P, dan Q berdasarkan "
+                    "ListSetting masing-masing bay. Setiap breaker mengambil status "
+                    "digital YX dari StatusSetting; status tidak diperkirakan dari "
+                    "besar arus."
+                ),
+            ),
+            (
+                "9. Generator Monitor",
+                (
+                    "Halaman 1# dan 2# Generator Monitor menampilkan nilai generator, "
+                    "status breaker, Generator Protection, dan Protection of Generator.\n\n"
+                    "Lampu proteksi berasal dari StatusSetting generator terkait. "
+                    "Gunakan nilai, warna, dan status komunikasi secara bersamaan "
+                    "sebelum mengambil keputusan operasi."
+                ),
+            ),
+            (
+                "10. Menu Maintenance",
+                (
+                    "System Diagnostics\n"
+                    "Melihat kesehatan komunikasi IEC-104, jumlah frame, counter "
+                    "error, dan status RTU.\n\n"
+                    "Reset Communication Counters\n"
+                    "Mengosongkan counter diagnostik tanpa mengubah konfigurasi RTU. "
+                    "Hanya Admin/Developer.\n\n"
+                    "Parameter Settings\n"
+                    "Membuka Device Manager untuk melihat atau mengubah database "
+                    "peralatan dan point. Operator bersifat read-only.\n\n"
+                    "Mapping Run Monitoring\n"
+                    "Memilih ListSetting atau StatusSetting yang menjadi sumber objek "
+                    "pada Run Monitor."
+                ),
+            ),
+            (
+                "11. Menu Setup",
+                (
+                    "IEC-104 Communication Settings\n"
+                    "Mengatur identitas station, kepemilikan RTU, relay realtime, "
+                    "dan alamat yang diizinkan. Perubahan konfigurasi hanya boleh "
+                    "dilakukan oleh personel berwenang.\n\n"
+                    "Communication Overview\n"
+                    "Membuka System Configuration untuk melihat ringkasan sistem dan "
+                    "status komunikasi."
+                ),
+            ),
+            (
+                "12. Menu Graph dan Report",
+                (
+                    "Process Trend Explorer\n"
+                    "Menampilkan histori U, I, P, Q, dan frekuensi dengan sampling "
+                    "60 detik. Pilih peralatan dan rentang waktu, lalu gunakan Export "
+                    "Excel jika dibutuhkan.\n\n"
+                    "Alarm History Explorer\n"
+                    "Menampilkan histori alarm berdasarkan rentang waktu dan dapat "
+                    "diekspor ke Excel.\n\n"
+                    "Toolbar Report\n"
+                    "Menampilkan laporan per bay, seluruh variabel realtime, dan event "
+                    "status rectangle. Logger laporan berjalan setiap 60 detik."
+                ),
+            ),
+            (
+                "13. Alarm",
+                (
+                    "Real-Time Alarm menampilkan alarm aktif dan diperbarui setiap "
+                    "detik. Alarm History menyimpan perubahan keadaan agar event yang "
+                    "sama tidak ditulis berulang-ulang.\n\n"
+                    "Periksa Description, Device, Status, dan waktu event. Hilangnya "
+                    "alarm dari daftar aktif tidak menghapus histori alarm."
+                ),
+            ),
+            (
+                "14. Menu Backup",
+                (
+                    "Daily Backup Explorer\n"
+                    "Menampilkan daftar backup harian, tanggal pembuatan, jumlah nilai "
+                    "aktual, ukuran arsip, dan data aktual di dalam backup.\n\n"
+                    "Backup otomatis:\n"
+                    "• Nilai aktual disimpan setiap 60 detik.\n"
+                    "• Backup hari sebelumnya dibuat otomatis saat aplikasi aktif.\n"
+                    "• Konfigurasi, rumus, database harian, dan nilai aktual disimpan "
+                    "dalam ZIP dengan manifest serta SHA-256.\n"
+                    "• Retensi rolling adalah 183 hari.\n"
+                    "• Backup lama hanya dihapus setelah backup baru berhasil.\n\n"
+                    "Backup Now\n"
+                    "Admin/Developer dapat membuat atau memperbarui backup hari ini.\n\n"
+                    "Verify Selected\n"
+                    "Memeriksa isi ZIP dan kecocokan SHA-256.\n\n"
+                    "Export Excel\n"
+                    "Mengekspor seluruh data dari tanggal dan Bay yang dipilih. Tabel "
+                    "aplikasi membatasi tampilan menjadi 5.000 baris terbaru, tetapi "
+                    "Export Excel menggunakan seluruh baris yang tersedia.\n\n"
+                    "Open Backup Folder\n"
+                    "Membuka lokasi backup lokal Windows."
+                ),
+            ),
+            (
+                "15. Toolbar Utama",
+                (
+                    "Report: membuka Report Explorer.\n"
+                    "Process Trend: membuka histori proses.\n"
+                    "Alarm History: membuka histori alarm.\n"
+                    "Real-Time Alarm: membuka alarm aktif.\n"
+                    "Previous / Next: berpindah halaman.\n"
+                    "Home: kembali ke Run Monitor.\n"
+                    "Edit: membuka Parameter Settings sesuai hak akses.\n"
+                    "Zoom: mengubah mode tampilan jendela.\n"
+                    "Print: mencetak tampilan SCADA aktif.\n"
+                    "Preview: melihat hasil sebelum dicetak.\n"
+                    "Flash: mengaktifkan fungsi flash/status visual yang tersedia."
+                ),
+            ),
+            (
+                "16. Parameter, Rumus, dan Sumber Data",
+                (
+                    "ListSetting CSV berisi alamat perangkat, Bay, nama point, ASDU, "
+                    "IOA, coefficient, CT/PT, formula, offset, unit, dan limit alarm.\n\n"
+                    "StatusSetting CSV khusus untuk status digital seperti breaker dan "
+                    "proteksi. Jangan menggunakan point analog untuk menggantikan "
+                    "status digital.\n\n"
+                    "Setelah perubahan parameter, gunakan Reload pada Device Manager "
+                    "dan verifikasi nilai pada layar terkait. Backup manual dianjurkan "
+                    "sebelum import atau perubahan besar."
+                ),
+            ),
+            (
+                "17. Monitor TV",
+                (
+                    "Monitor TV mempublikasikan tampilan monitoring melalui file JSON "
+                    "dan halaman HTML pada port lokal yang dikonfigurasi. Nilai numeric "
+                    "mengikuti ListSetting, sedangkan rectangle status mengikuti "
+                    "StatusSetting.\n\n"
+                    "Perubahan editor Monitor TV dibatasi oleh daftar alamat IP yang "
+                    "diizinkan pada Communication Settings."
+                ),
+            ),
+            (
+                "18. Prosedur Operasi dan Troubleshooting",
+                (
+                    "Sebelum operasi:\n"
+                    "1. Login menggunakan role yang sesuai.\n"
+                    "2. Pastikan status IEC-104 ONLINE.\n"
+                    "3. Periksa System Configuration dan Network.\n"
+                    "4. Pastikan timestamp dan kualitas data valid.\n\n"
+                    "Jika nilai tidak tampil:\n"
+                    "• Periksa status RTU dan Network.\n"
+                    "• Periksa ASDU/IOA di ListSetting.\n"
+                    "• Gunakan System Diagnostics.\n"
+                    "• Jangan menganggap nilai 0 sebagai komunikasi normal tanpa "
+                    "melihat quality.\n\n"
+                    "Jika backup gagal:\n"
+                    "• Periksa ruang disk dan akses folder backup.\n"
+                    "• Buka BackupLog.csv untuk detail.\n"
+                    "• Backup lama tidak akan dihapus ketika backup baru gagal."
+                ),
+            ),
+        )
+
+        palette = {
+            "navy": "#14324b",
+            "navy_dark": "#10263c",
+            "workspace": "#cfd5dc",
+            "panel": "#ffffff",
+            "border": "#9aa7b4",
+            "text": "#17212b",
+            "muted": "#5d6b78",
+            "accent": "#147a42",
+        }
+        win = tk.Toplevel(self.root)
+        self._manual_window = win
+        self._make_toplevel_responsive(
+            win,
+            f"SCADA BONT System Manual v{APP_VERSION}",
+            fullscreen=False,
+        )
+        win.configure(bg=palette["workspace"])
+
+        def close_window():
+            self._manual_window = None
+            win.destroy()
+
+        win.protocol("WM_DELETE_WINDOW", close_window)
+        header = tk.Frame(win, bg=palette["navy"], padx=20, pady=13)
+        header.pack(fill="x")
+        tk.Label(
+            header,
+            text="SCADA BONT — SYSTEM MANUAL",
+            bg=palette["navy"],
+            fg="#ffffff",
+            font=("Segoe UI", 18, "bold"),
+            anchor="w",
+        ).pack(fill="x")
+        tk.Label(
+            header,
+            text=(
+                f"Manual aplikasi v{APP_VERSION}  •  "
+                "Pilih bab atau gunakan pencarian"
+            ),
+            bg=palette["navy"],
+            fg="#c8d7e6",
+            font=("Segoe UI", 9),
+            anchor="w",
+        ).pack(fill="x", pady=(3, 0))
+
+        body = tk.PanedWindow(
+            win,
+            orient="horizontal",
+            bg=palette["workspace"],
+            sashwidth=5,
+            sashrelief="raised",
+        )
+        body.pack(fill="both", expand=True, padx=10, pady=10)
+
+        navigation = tk.Frame(
+            body,
+            bg=palette["panel"],
+            bd=1,
+            relief="sunken",
+        )
+        body.add(navigation, minsize=300, width=340)
+        tk.Label(
+            navigation,
+            text="DAFTAR ISI",
+            bg=palette["navy_dark"],
+            fg="#ffffff",
+            font=("Segoe UI", 9, "bold"),
+            anchor="w",
+            padx=10,
+            pady=7,
+        ).pack(fill="x")
+        search_var = tk.StringVar()
+        search_entry = tk.Entry(
+            navigation,
+            textvariable=search_var,
+            font=("Segoe UI", 10),
+            bg="#ffffff",
+            fg=palette["text"],
+            insertbackground=palette["text"],
+            selectbackground="#c8def1",
+            selectforeground=palette["text"],
+            relief="sunken",
+            bd=1,
+        )
+        search_entry.pack(fill="x", padx=9, pady=9)
+        chapter_list = tk.Listbox(
+            navigation,
+            font=("Segoe UI", 10),
+            bg=palette["panel"],
+            fg=palette["text"],
+            selectbackground="#c8def1",
+            selectforeground=palette["text"],
+            activestyle="none",
+            exportselection=False,
+            bd=0,
+            highlightthickness=0,
+        )
+        chapter_scroll = ttk.Scrollbar(
+            navigation,
+            orient="vertical",
+            command=chapter_list.yview,
+        )
+        chapter_list.configure(yscrollcommand=chapter_scroll.set)
+        chapter_scroll.pack(side="right", fill="y")
+        chapter_list.pack(side="left", fill="both", expand=True)
+        self._bind_mousewheel(chapter_list)
+
+        reader_frame = tk.Frame(
+            body,
+            bg=palette["panel"],
+            bd=1,
+            relief="sunken",
+        )
+        body.add(reader_frame, minsize=620)
+        manual_text = tk.Text(
+            reader_frame,
+            wrap="word",
+            bg=palette["panel"],
+            fg=palette["text"],
+            insertbackground=palette["text"],
+            font=("Segoe UI", 11),
+            padx=24,
+            pady=20,
+            relief="flat",
+            state="disabled",
+            spacing1=2,
+            spacing3=5,
+        )
+        manual_scroll = ttk.Scrollbar(
+            reader_frame,
+            orient="vertical",
+            command=manual_text.yview,
+        )
+        manual_text.configure(yscrollcommand=manual_scroll.set)
+        manual_scroll.pack(side="right", fill="y")
+        manual_text.pack(side="left", fill="both", expand=True)
+        manual_text.tag_configure(
+            "title",
+            font=("Segoe UI", 18, "bold"),
+            foreground=palette["navy"],
+            spacing3=14,
+        )
+        manual_text.tag_configure(
+            "body",
+            font=("Segoe UI", 11),
+            foreground=palette["text"],
+            lmargin1=4,
+            lmargin2=4,
+            spacing2=3,
+        )
+        self._bind_mousewheel(manual_text)
+
+        visible_chapters = {"items": list(chapters)}
+
+        def show_chapter(_event=None):
+            selection = chapter_list.curselection()
+            if not selection:
+                return
+            title, content = visible_chapters["items"][selection[0]]
+            manual_text.configure(state="normal")
+            manual_text.delete("1.0", "end")
+            manual_text.insert("end", title + "\n", "title")
+            manual_text.insert("end", content, "body")
+            manual_text.configure(state="disabled")
+            manual_text.yview_moveto(0)
+
+        def filter_chapters(*_args):
+            query = search_var.get().strip().lower()
+            items = [
+                item
+                for item in chapters
+                if not query
+                or query in item[0].lower()
+                or query in item[1].lower()
+            ]
+            visible_chapters["items"] = items
+            chapter_list.delete(0, "end")
+            for title, _content in items:
+                chapter_list.insert("end", title)
+            if items:
+                chapter_list.selection_set(0)
+                chapter_list.activate(0)
+                show_chapter()
+            else:
+                manual_text.configure(state="normal")
+                manual_text.delete("1.0", "end")
+                manual_text.insert(
+                    "end",
+                    "Tidak ada bab yang cocok dengan pencarian.",
+                    "body",
+                )
+                manual_text.configure(state="disabled")
+
+        chapter_list.bind("<<ListboxSelect>>", show_chapter)
+        search_var.trace_add("write", filter_chapters)
+        filter_chapters()
+        search_entry.focus_set()
+
+        footer = tk.Frame(win, bg=palette["navy_dark"], padx=12, pady=6)
+        footer.pack(fill="x")
+        tk.Label(
+            footer,
+            text=(
+                f"SCADA BONT v{APP_VERSION}  •  "
+                "Windows 10 1809+ / Windows 11 64-bit"
+            ),
+            bg=palette["navy_dark"],
+            fg="#c8d7e6",
+            font=("Segoe UI", 9),
+            anchor="w",
+        ).pack(side="left")
+        tk.Button(
+            footer,
+            text="Close",
+            command=close_window,
+            bg="#e7ebf0",
+            fg=palette["text"],
+            font=("Segoe UI", 9, "bold"),
+            padx=16,
+            pady=4,
+        ).pack(side="right")
+
+    def show_scada_information(self):
+        messagebox.showinfo(
+            "SCADA Information",
+            (
+                "SCADA BONT — Unified SCADA Master\n"
+                f"Application version: {APP_VERSION}\n\n"
+                "Supported OS:\n"
+                "Windows 10 64-bit version 1809 or newer\n"
+                "Windows 11 64-bit\n\n"
+                "Actual-value interval: 60 seconds\n"
+                f"Backup retention: {BACKUP_RETENTION_DAYS} days\n"
+                f"Backup location:\n{BACKUP_ROOT}"
+            ),
+            parent=self.root,
+        )
+
     def confirm_exit(self):
         if self._shutting_down:
             return
@@ -7244,7 +9395,7 @@ class SCADAMainUI:
             title_group,
             text=(
                 "Engineering records by source and date range • "
-                "realtime source files are recorded every 2 seconds"
+                "realtime source files are recorded every minute"
             ),
             bg=palette["navy"],
             fg="#c8d7e6",
@@ -7335,7 +9486,7 @@ class SCADAMainUI:
         export_button.pack(side="left", padx=3, pady=7)
         tk.Label(
             filter_frame,
-            text="LOGGER SOURCE  •  2 second records",
+            text="LOGGER SOURCE  •  60 second records",
             bg=palette["toolbar"],
             fg=palette["green"],
             font=("Segoe UI", 9, "bold"),
@@ -7784,7 +9935,7 @@ class SCADAMainUI:
             "",
             "end",
             iid="__all_realtime__",
-            text="All Realtime Variables (2 sec)",
+            text="All Realtime Variables (60 sec)",
         )
         tree_menu.insert(
             "",
@@ -14297,7 +16448,7 @@ class SCADAMainUI:
             ).start()
 
             # Report data logger is independent of UI refresh. It records one
-            # engineering snapshot every 2 seconds for every configured Bay.
+            # engineering snapshot every minute for every configured Bay.
             start_report_logger()
             # Publish the same live IEC-104/relay state to MQTT.  This is
             # read-only and runs independently from the UI refresh loop.
