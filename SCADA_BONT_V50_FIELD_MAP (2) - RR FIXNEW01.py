@@ -248,7 +248,7 @@ IOA_MAP_STANDARD = {
     16417: "IE",    16418: "UE",    16419: "f",
 }
 
-APP_VERSION = "2.5.1"
+APP_VERSION = "2.5.2"
 APP_DIR = (
     os.path.dirname(os.path.abspath(sys.executable))
     if getattr(sys, "frozen", False)
@@ -1097,6 +1097,8 @@ RAW_STORE = {rtu["ip"]: {} for rtu in RTU_LIST}
 # device IP and reuse names such as Uab/Ia/Q, therefore RAW_STORE alone is
 # not sufficiently specific for a rectangle condition.
 RAW_BAY_VALUE_STORE = {}
+RAW_ADDRESS_STORE = {}
+RAW_ADDRESS_TIMESTAMP = {}
 RAW_TIMESTAMP = {rtu["ip"]: 0.0 for rtu in RTU_LIST}
 ENGINE_LAST_UPDATE = 0.0
 ENGINE_UPDATE_INTERVAL = 1.0
@@ -3861,6 +3863,9 @@ def _parse_iec104_frame(ip, frame, sock, rx_state):
                     offset += 5
 
                 ioa = ioa_start + i
+                address_key = (str(ip).strip(), int(asdu_addr), int(ioa))
+                RAW_ADDRESS_STORE[address_key] = float(raw_val)
+                RAW_ADDRESS_TIMESTAMP[address_key] = time.monotonic()
 
                 # ---------------------------------------------
                 # CSV FIRST
@@ -3944,6 +3949,9 @@ def _parse_iec104_frame(ip, frame, sock, rx_state):
                     )[0]
 
                     offset += 8
+                address_key = (str(ip).strip(), int(asdu_addr), int(ioa))
+                RAW_ADDRESS_STORE[address_key] = float(raw_val)
+                RAW_ADDRESS_TIMESTAMP[address_key] = time.monotonic()
 
                 # ---------------------------------------------
                 # CSV FIRST
@@ -7521,6 +7529,8 @@ class SCADAMainUI:
                 self.user_switch_button = None
 
     def _handle_role_change(self, previous_role):
+        global MONITOR_TV_ACTIVE_ROLE
+        MONITOR_TV_ACTIVE_ROLE = self.current_user
         if previous_role == self.current_user:
             self._refresh_user_display()
             return
@@ -8992,7 +9002,12 @@ class SCADAMainUI:
                     "dan halaman HTML pada port lokal yang dikonfigurasi. Nilai numeric "
                     "mengikuti ListSetting, sedangkan rectangle status mengikuti "
                     "StatusSetting.\n\n"
-                    "Perubahan editor Monitor TV dibatasi oleh daftar alamat IP yang "
+                    "Editor konfigurasi hanya tersedia ketika aplikasi desktop sedang "
+                    "login sebagai Admin atau Developer; password kedua tidak diperlukan. "
+                    "Modal menampilkan nilai RAW, hasil rumus, unit, dan status RTU sebelum "
+                    "Save. Perubahan ASDU, IOA, coefficient, CT/PT, formula, atau offset "
+                    "langsung memperbarui preview nilai yang akan tampil pada G1/G2.\n\n"
+                    "Perubahan editor Monitor TV tetap dibatasi oleh daftar alamat IP yang "
                     "diizinkan pada Communication Settings."
                 ),
             ),
@@ -16652,6 +16667,8 @@ try:
     MONITOR_TV_HTML_PATH = os.path.join(APP_DIR, "MONITOR V55.html")
     MONITOR_TV_CONFIG_PATH = os.path.join(APP_DIR, "MonitorTVConfig.json")
     MONITOR_TV_CONFIG_LOCK = threading.RLock()
+    MONITOR_TV_ACTIVE_ROLE = None
+    MONITOR_TV_EDITOR_ROLES = frozenset({"Admin", "Developer"})
 
     def _monitor_tv_operator_allowed(remote_ip):
         """Allow counter controls only from configured SCADA and TV stations."""
@@ -16660,9 +16677,12 @@ try:
         allowed_ips.update({_local_scada_ip(), "127.0.0.1", "::1"})
         return str(remote_ip) in allowed_ips
 
-    def _monitor_tv_editor_allowed(remote_ip, supplied_password):
-        """Require the admin password for full Monitor-TV field editing."""
-        return _monitor_tv_operator_allowed(remote_ip) and str(supplied_password) == "admin"
+    def _monitor_tv_editor_allowed(remote_ip):
+        """Authorize TV editing from the active privileged desktop session."""
+        return (
+            _monitor_tv_operator_allowed(remote_ip)
+            and MONITOR_TV_ACTIVE_ROLE in MONITOR_TV_EDITOR_ROLES
+        )
     def _default_operational_counter():
         """Keep a new day counter at zero until the operator presses Start."""
         return {
@@ -16954,6 +16974,82 @@ try:
             with open(temporary, "w", encoding="utf-8") as handle:
                 json.dump(config, handle, ensure_ascii=False, indent=2)
             os.replace(temporary, MONITOR_TV_CONFIG_PATH)
+
+    def _monitor_tv_preview(binding):
+        """Calculate an unsaved Monitor-TV binding from its exact live IEC point."""
+        if not isinstance(binding, dict):
+            raise ValueError("Data preview tidak valid")
+        ip = str(binding.get("Device_Addr", "")).strip()
+        if not ip:
+            raise ValueError("Device IP wajib diisi")
+        try:
+            asdu = int(float(binding.get("ASDU")))
+            ioa = int(float(binding.get("IOA")))
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("ASDU dan IOA wajib berupa angka") from None
+
+        bay = str(binding.get("Bay_Name", "")).strip()
+        formula = _norm_formula(binding.get("Formula"))
+        derived = formula in {"DERIVED_P", "DERIVED_Q", "DERIVED_I"}
+        address_key = (ip, asdu, ioa)
+        with DATA_LOCK:
+            raw_value = (
+                0.0 if derived else RAW_ADDRESS_STORE.get(address_key)
+            )
+            captured_at = RAW_ADDRESS_TIMESTAMP.get(address_key)
+            online = bool(VINCI_STATUS.get(ip, False))
+            source_values = dict(BAY_VALUE_STORE.get(bay, {}))
+
+        unit = str(binding.get("Unit", "")).strip()
+        try:
+            decimals = int(float(binding.get("Decimals", 2)))
+        except (TypeError, ValueError, OverflowError):
+            decimals = 2
+        decimals = max(0, min(6, decimals))
+        formula_text = FORMULA_PRESETS.get(
+            formula,
+            str(binding.get("Formula", "")).strip() or "Raw",
+        )
+        result = {
+            "ok": True,
+            "online": online,
+            "available": raw_value is not None,
+            "device_ip": ip,
+            "asdu": asdu,
+            "ioa": ioa,
+            "raw": raw_value,
+            "actual": None,
+            "formatted": "—",
+            "unit": unit,
+            "decimals": decimals,
+            "formula": formula_text,
+            "age_seconds": (
+                max(0.0, time.monotonic() - captured_at)
+                if captured_at is not None
+                else None
+            ),
+        }
+        if raw_value is None:
+            result["message"] = (
+                f"Belum ada data RAW untuk {ip} / ASDU {asdu} / IOA {ioa}."
+            )
+            return result
+
+        calculated = _calculate_formula(
+            float(raw_value),
+            binding,
+            source_values,
+        )
+        if not math.isfinite(float(calculated)):
+            raise ValueError("Hasil formula tidak valid")
+        result["actual"] = float(calculated)
+        result["formatted"] = f"{float(calculated):.{decimals}f}"
+        result["message"] = (
+            "Preview live sesuai data RTU saat ini."
+            if online
+            else "RTU offline; preview memakai data RAW terakhir yang diterima."
+        )
+        return result
     def _set_operational_counter(action, started_at=None):
         """Persist a reset, an immediate start, or an operator-selected start."""
         action = str(action or "").strip().lower()
@@ -17490,11 +17586,16 @@ try:
                 self.send_header("Cache-Control", "no-store")
             elif path == "/MonitorTVOptions.json":
                 remote_ip = str(self.client_address[0])
-                supplied_password = str(self.headers.get("X-SCADA-Admin", ""))
-                if not _monitor_tv_editor_allowed(remote_ip, supplied_password):
-                    body = b"Forbidden"
+                if not _monitor_tv_editor_allowed(remote_ip):
+                    body = json.dumps({
+                        "ok": False,
+                        "message": (
+                            "Login aplikasi desktop sebagai Admin atau Developer "
+                            "untuk membuka editor Monitor TV."
+                        ),
+                    }, ensure_ascii=False).encode("utf-8")
                     self.send_response(403)
-                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
                 else:
                     with SETTING_LOCK:
                         options = [{key: row.get(key, "") for key in SETTING_COLUMNS} for row in SETTING_REGISTRY]
@@ -17535,25 +17636,59 @@ try:
         def do_POST(self):
             path = urlparse(self.path).path.rstrip("/")
             remote_ip = str(self.client_address[0])
-            supplied_password = str(self.headers.get("X-SCADA-Admin", ""))
-            allowed_paths = {"/MonitorTVConfig.json", "/OperationalDays.json"}
+            allowed_paths = {
+                "/MonitorTVConfig.json",
+                "/MonitorTVPreview.json",
+                "/OperationalDays.json",
+            }
+            requires_privileged_role = path in {
+                "/MonitorTVConfig.json",
+                "/MonitorTVPreview.json",
+            }
             can_write = (
-                _monitor_tv_operator_allowed(remote_ip)
-                if path == "/OperationalDays.json"
-                else _monitor_tv_editor_allowed(remote_ip, supplied_password)
+                _monitor_tv_editor_allowed(remote_ip)
+                if requires_privileged_role
+                else _monitor_tv_operator_allowed(remote_ip)
             )
             if path not in allowed_paths or not can_write:
+                body = json.dumps({
+                    "ok": False,
+                    "message": (
+                        "Login aplikasi desktop sebagai Admin atau Developer "
+                        "untuk mengubah konfigurasi Monitor TV."
+                        if requires_privileged_role
+                        else "Akses ditolak."
+                    ),
+                }, ensure_ascii=False).encode("utf-8")
                 self.send_response(403)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
+                self.wfile.write(body)
                 return
             try:
-                max_length = 4096 if path == "/OperationalDays.json" else 262144
-                length = min(int(self.headers.get("Content-Length", "0")), max_length)
-                request_body = json.loads(self.rfile.read(length).decode("utf-8"))
-                if path == "/OperationalDays.json":
+                max_length = (
+                    4096
+                    if path in {"/OperationalDays.json", "/MonitorTVPreview.json"}
+                    else 262144
+                )
+                length = min(
+                    int(self.headers.get("Content-Length", "0")),
+                    max_length,
+                )
+                request_body = json.loads(
+                    self.rfile.read(length).decode("utf-8")
+                )
+                if path == "/MonitorTVPreview.json":
+                    response = _monitor_tv_preview(request_body)
+                elif path == "/OperationalDays.json":
                     if not isinstance(request_body, dict):
-                        raise ValueError("Permintaan operational days tidak valid")
-                    action = str(request_body.get("action", "")).strip().lower()
+                        raise ValueError(
+                            "Permintaan operational days tidak valid"
+                        )
+                    action = str(
+                        request_body.get("action", "")
+                    ).strip().lower()
                     state = _set_operational_counter(
                         action,
                         request_body.get("started_at"),
@@ -17561,27 +17696,47 @@ try:
                     messages = {
                         "reset": "Operational days direset ke 0",
                         "start": "Penghitung dimulai dari waktu saat ini",
-                        "start_now": "Penghitung dimulai dari waktu saat ini",
+                        "start_now": (
+                            "Penghitung dimulai dari waktu saat ini"
+                        ),
                         "set_start": "Tanggal dan jam mulai disimpan",
                     }
                     response = {
                         "ok": True,
-                        "message": messages.get(action, "Pengaturan tersimpan"),
+                        "message": messages.get(
+                            action,
+                            "Pengaturan tersimpan",
+                        ),
                         "state": state,
                     }
                 else:
                     config = request_body
-                    if not isinstance(config, dict) or not all(k in config for k in ("G1", "G2")):
+                    if (
+                        not isinstance(config, dict)
+                        or not all(key in config for key in ("G1", "G2"))
+                    ):
                         raise ValueError("Konfigurasi TV tidak valid")
                     _save_monitor_tv_config(config)
                     response = {"ok": True, "message": "Save berhasil"}
-                body = json.dumps(response, ensure_ascii=False).encode("utf-8")
+                body = json.dumps(
+                    response,
+                    ensure_ascii=False,
+                ).encode("utf-8")
                 self.send_response(200)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header(
+                    "Content-Type",
+                    "application/json; charset=utf-8",
+                )
             except Exception as exc:
-                body = json.dumps({"ok": False, "message": str(exc)}).encode("utf-8")
+                body = json.dumps({
+                    "ok": False,
+                    "message": str(exc),
+                }, ensure_ascii=False).encode("utf-8")
                 self.send_response(400)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header(
+                    "Content-Type",
+                    "application/json; charset=utf-8",
+                )
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
