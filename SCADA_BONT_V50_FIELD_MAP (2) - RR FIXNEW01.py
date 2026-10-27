@@ -338,7 +338,7 @@ IOA_MAP_STANDARD = {
     16411: "Uab_L", 16412: "Ubc_L", 16413: "Uca_L",
 }
 
-APP_VERSION = "2.5.7"
+APP_VERSION = "2.5.8"
 APP_DIR = (
     os.path.dirname(os.path.abspath(sys.executable))
     if getattr(sys, "frozen", False)
@@ -17328,15 +17328,21 @@ try:
     MONITOR_TV_ACTIVE_ROLE = None
     MONITOR_TV_EDITOR_ROLES = frozenset({"Admin", "Developer"})
 
-    # Preserve the established G1/G2 MW presentation. Only reactive power
-    # fields use the kVar-to-Mvar display conversion here.
+    # Active and reactive power arrive as kW/kVar. Convert them once so the
+    # G1/G2 display and modal formula both report MW/Mvar.
     MONITOR_TV_DISPLAY_DIVISORS = {
+        "ct4": 1000.0,
         "ct5": 1000.0,
+        "ll1": 1000.0,
         "ll2": 1000.0,
+        "rr2": 1000.0,
     }
     MONITOR_TV_DISPLAY_UNITS = {
+        "ct4": "MW",
         "ct5": "Mvar",
+        "ll1": "MW",
         "ll2": "Mvar",
+        "rr2": "MW",
     }
 
     def _monitor_tv_display_value(field_id, value):
@@ -18703,8 +18709,8 @@ def run_monitor_tv_qc():
         g2 = _monitor_tv_generator_payload(RTU_LIST[2]["ip"], "W2", "G2")
 
         # Central red-marked block: W1/W2.
-        expected_g1_wire = {"ct1": 6.10, "ct2": 50.10, "ct3": 13.10, "ct4": 116.10, "ct5": -0.08470}
-        expected_g2_wire = {"ct1": 6.40, "ct2": 50.20, "ct3": 14.60, "ct4": 232.10, "ct5": -0.02470}
+        expected_g1_wire = {"ct1": 6.10, "ct2": 50.10, "ct3": 13.10, "ct4": 0.11610, "ct5": -0.08470}
+        expected_g2_wire = {"ct1": 6.40, "ct2": 50.20, "ct3": 14.60, "ct4": 0.23210, "ct5": -0.02470}
         for key, wanted in expected_g1_wire.items():
             if not math.isclose(float(g1[key]), wanted, rel_tol=1e-9, abs_tol=1e-9):
                 failures.append(f"G1 {key} wire routing: {g1[key]} != {wanted}")
@@ -18714,14 +18720,14 @@ def run_monitor_tv_qc():
 
         # Remaining blocks must follow the Auxiliary/Voltage/Measure-Control map.
         gen_g1 = {"tk1":301.0, "tk2":701.0, "tk3":702.0, "tk4":703.0,
-                  "ll1":507.0, "ll2":0.510, "ll3":508.0, "ll4":509.0,
+                  "ll1":0.507, "ll2":0.510, "ll3":508.0, "ll4":509.0,
                   "ll5":0.87, "cm1":502.0, "cm2":503.0, "cm3":504.0,
-                  "cm4":505.0, "cm5":506.0, "rr1":304.0, "rr2":307.0,
+                  "cm4":505.0, "cm5":506.0, "rr1":304.0, "rr2":0.307,
                   "rr3":501.0}
         gen_g2 = {"tk1":401.0, "tk2":701.0, "tk3":702.0, "tk4":703.0,
-                  "ll1":607.0, "ll2":0.610, "ll3":608.0, "ll4":609.0,
+                  "ll1":0.607, "ll2":0.610, "ll3":608.0, "ll4":609.0,
                   "ll5":0.92, "cm1":602.0, "cm2":603.0, "cm3":604.0,
-                  "cm4":605.0, "cm5":606.0, "rr1":404.0, "rr2":407.0,
+                  "cm4":605.0, "cm5":606.0, "rr1":404.0, "rr2":0.407,
                   "rr3":601.0}
         for key, wanted in gen_g1.items():
             if not math.isclose(float(g1[key]), wanted, rel_tol=1e-9, abs_tol=1e-9):
