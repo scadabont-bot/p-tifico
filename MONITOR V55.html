@@ -2599,7 +2599,7 @@ body.monitor-display .reference-layout{display:block;}
         </div>
 
         <span class="unit">
-            Mw
+            MW
         </span>
 
     </div>
@@ -3642,26 +3642,10 @@ function updatePanel(p){
             : p[id];
 
         /*
-           SCALING BERDASARKAN LABEL SATUAN:
-           - MW  -> /1000
-           - Mvar -> /1000
-           Parameter lain TIDAK diubah.
-
-           Label yang benar-benar ada pada HTML yang dipakai:
-           CT4 = Mw
-           CT5 = Mvar
-           LL1 = MW
-           LL2 = Mvar
-           RR2 = MW
+           Nilai payload adalah hasil engineering yang sama dengan preview
+           modal. Jangan lakukan scaling tersembunyi berdasarkan label satuan;
+           G1 dan G2 harus menampilkan angka yang persis sama dengan preview.
         */
-        const el = document.getElementById(id);
-        const unitEl = el ? el.closest(".row, .center-row")?.querySelector(".unit") : null;
-        const unitText = unitEl ? unitEl.textContent.trim().toLowerCase() : "";
-
-        if(unitText==="mw" || unitText==="mvar"){
-            const n=Number(v);
-            v=Number.isFinite(n) ? n/1000 : 0;
-        }
 
         // TAMPILKAN ANGKA TERLEBIH DAHULU.
         setSmall(
