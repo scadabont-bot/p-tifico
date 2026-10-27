@@ -1,5 +1,5 @@
 #define MyAppName "p-tifico-backup"
-#define MyAppVersion "2.5.3"
+#define MyAppVersion "2.5.4"
 #define MyAppPublisher "TIFICO"
 #define MyAppExeName "p-tifico-backup.exe"
 
@@ -46,6 +46,11 @@ Source: "..\G1MONITOR.jpg.png"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\G2MONITOR.jpg.png"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\SYSTEMCONFIG_DARK.png"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\AUXILIARY_MATCHED.png"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\MANUAL_MAPPING_G1_G2.png"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\MANUAL_COMMUNICATION_SETTINGS.png"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\MANUAL_PROCESS_TREND.png"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\MANUAL_BACKUP_EXPLORER.png"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\MANUAL_MONITOR_TV_BREAKER.png"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\MONITOR V55.html"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\CommunicationConfig.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\MQTTConfig.json"; DestDir: "{app}"; Flags: ignoreversion

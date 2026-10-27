@@ -339,7 +339,7 @@ IOA_MAP_STANDARD = {
     16417: "IE",    16418: "UE",    16419: "f",
 }
 
-APP_VERSION = "2.5.3"
+APP_VERSION = "2.5.4"
 APP_DIR = (
     os.path.dirname(os.path.abspath(sys.executable))
     if getattr(sys, "frozen", False)
@@ -5616,7 +5616,7 @@ class SCADAMainUI:
             "element": ("Elemen", 105, "center"),
             "point": ("Nama Point", 220, "w"),
             "actual": ("Nilai Aktual", 110, "e"),
-            "raw": ("RAW / YX", 90, "e"),
+            "raw": ("RAW / Pembanding", 120, "e"),
             "quality": ("Kualitas", 105, "center"),
             "source": ("Sumber Konfigurasi", 245, "w"),
             "ip": ("IP RTU", 125, "center"),
@@ -5661,8 +5661,8 @@ class SCADAMainUI:
         tk.Label(
             footer,
             text=(
-                "Nilai aktual sama dengan tampilan G1/G2. Breaker memakai "
-                "Effective YX = Raw YX XOR Reverse."
+                "Nilai aktual sama dengan tampilan G1/G2. Breaker aktif jika "
+                "nilai pembanding memenuhi operator > / < terhadap threshold."
             ),
             bg="#d4d0c8",
             fg="#555555",
@@ -9271,9 +9271,10 @@ class SCADAMainUI:
                     "Menampilkan sumber ListSetting, nilai RAW, rumus, dan nilai aktual "
                     "setiap objek pada Run Monitor.\n\n"
                     "Mapping G1 dan G2\n"
-                    "Menampilkan sumber IEC-104, rumus, nilai aktual, serta logika "
-                    "breaker yang dipakai Monitor TV G1/G2. Tabel diperbarui otomatis "
-                    "ketika konfigurasi disimpan dari modal Monitor TV."
+                    "Menampilkan sumber IEC-104, rumus, nilai aktual, serta evaluasi "
+                    "breaker berbasis operator > / < dan threshold yang dipakai Monitor "
+                    "TV G1/G2. Tabel diperbarui otomatis ketika konfigurasi disimpan "
+                    "dari modal Monitor TV."
                 ),
             ),
             (
@@ -9360,8 +9361,9 @@ class SCADAMainUI:
                     "ListSetting CSV berisi alamat perangkat, Bay, nama point, ASDU, "
                     "IOA, coefficient, CT/PT, formula, offset, unit, dan limit alarm.\n\n"
                     "StatusSetting CSV khusus untuk status digital seperti breaker dan "
-                    "proteksi. Jangan menggunakan point analog untuk menggantikan "
-                    "status digital.\n\n"
+                    "proteksi pada Run Monitor, System Configuration, dan Auxiliary "
+                    "System. Breaker khusus Monitor TV G1/G2 memakai perbandingan nilai "
+                    "aktual ListSetting terhadap threshold, bukan status YX.\n\n"
                     "Setelah perubahan parameter, gunakan Reload pada Device Manager "
                     "dan verifikasi nilai pada layar terkait. Backup manual dianjurkan "
                     "sebelum import atau perubahan besar."
@@ -9371,18 +9373,21 @@ class SCADAMainUI:
                 "17. Monitor TV",
                 (
                     "Monitor TV mempublikasikan tampilan monitoring melalui file JSON "
-                    "dan halaman HTML pada port lokal yang dikonfigurasi. Nilai numeric "
-                    "mengikuti ListSetting, sedangkan rectangle status mengikuti "
-                    "StatusSetting.\n\n"
+                    "dan halaman HTML pada port lokal yang dikonfigurasi. Nilai numerik "
+                    "mengikuti ListSetting. Empat indikator breaker pada setiap layar "
+                    "membandingkan nilai aktual hasil formula dengan threshold.\n\n"
                     "Editor konfigurasi hanya tersedia ketika aplikasi desktop sedang "
                     "login sebagai Admin atau Developer; password kedua tidak diperlukan. "
                     "Modal nilai hanya menampilkan sumber IEC-104, Device IP, ASDU, IOA, "
                     "formula, coefficient, CT/PT, offset, unit, decimal, dan preview "
                     "hasil aktual. Perubahan input langsung memperbarui preview sebelum "
                     "Save.\n\n"
-                    "Modal breaker hanya menampilkan sumber StatusSetting, nama indikator, "
-                    "warna Closed/Open, efek status, dan aturan YX XOR Reverse. Kedua modal "
-                    "menyesuaikan ukuran layar desktop, tablet, dan ponsel.\n\n"
+                    "Modal breaker menampilkan sumber nilai pembanding dari ListSetting, "
+                    "operator lebih besar (>) atau lebih kecil (<), nilai threshold, "
+                    "warna kondisi benar/salah, dan efek kondisi aktif. Contoh: ACTUAL "
+                    "> 1 berarti breaker aktif ketika hasil perhitungan sumber lebih "
+                    "besar dari 1. Kedua modal menyesuaikan ukuran layar desktop, tablet, "
+                    "dan ponsel.\n\n"
                     "Perubahan editor Monitor TV tetap dibatasi oleh daftar alamat IP yang "
                     "diizinkan pada Communication Settings."
                 ),
@@ -9488,6 +9493,89 @@ class SCADAMainUI:
                     ),
                 ),
             ),
+            "10. Menu Maintenance": (
+                (
+                    "MANUAL_MAPPING_G1_G2.png",
+                    "Gambar 10-1 — Mapping live Monitor TV G1 dan G2.",
+                    (
+                        "Keterangan gambar:\n"
+                        "• Filter Monitor dan Jenis membatasi baris G1, G2, nilai aktual, "
+                        "atau breaker; kotak Cari menyaring semua kolom.\n"
+                        "• Baris Nilai Aktual menampilkan RAW, formula, coefficient, CT/PT, "
+                        "offset, unit, dan nilai yang dikirim ke Monitor TV.\n"
+                        "• Baris Breaker menampilkan sumber ListSetting serta logika "
+                        "ACTUAL > / < threshold.\n"
+                        "• Kualitas OFFLINE atau NO DATA harus diselesaikan sebelum nilai "
+                        "dipakai untuk keputusan operasi."
+                    ),
+                ),
+            ),
+            "11. Menu Setup": (
+                (
+                    "MANUAL_COMMUNICATION_SETTINGS.png",
+                    "Gambar 11-1 — IEC-104 Communication Settings.",
+                    (
+                        "Keterangan gambar:\n"
+                        "• Connection Mode menentukan pola standalone atau master/slave.\n"
+                        "• Master IP, Peer IP, Relay Port, dan Relay Token harus sama pada "
+                        "pasangan workstation yang berkomunikasi.\n"
+                        "• Node RTUs menentukan kepemilikan koneksi IEC-104 setiap PC.\n"
+                        "• TV Editor Allowed IPs membatasi perangkat yang boleh menyimpan "
+                        "konfigurasi Monitor TV; perubahan berlaku setelah restart SCADA."
+                    ),
+                ),
+            ),
+            "12. Menu Graph dan Report": (
+                (
+                    "MANUAL_PROCESS_TREND.png",
+                    "Gambar 12-1 — Process Trend Explorer dan histori IEC-104.",
+                    (
+                        "Keterangan gambar:\n"
+                        "• Pilih rentang waktu dan peralatan pada panel kiri, lalu Apply.\n"
+                        "• Tabel Curve Values memperlihatkan tag, unit, limit, nilai "
+                        "terpilih, dan nilai terkini.\n"
+                        "• Grafik memisahkan tegangan/arus dari daya/frekuensi agar skala "
+                        "tetap terbaca.\n"
+                        "• Status OFFLINE berarti histori pada periode tersebut tidak "
+                        "memiliki nilai valid; gunakan Export Excel untuk data terpilih."
+                    ),
+                ),
+            ),
+            "14. Menu Backup": (
+                (
+                    "MANUAL_BACKUP_EXPLORER.png",
+                    "Gambar 14-1 — Daily Backup Explorer.",
+                    (
+                        "Keterangan gambar:\n"
+                        "• Panel kiri berisi tanggal backup, waktu pembuatan, jumlah baris, "
+                        "dan ukuran arsip.\n"
+                        "• Panel kanan menampilkan nilai aktual dari backup terpilih dan "
+                        "dapat difilter berdasarkan Bay.\n"
+                        "• Verify Selected memeriksa manifest serta SHA-256; Export Excel "
+                        "mengekspor data tanggal terpilih.\n"
+                        "• Retensi berjalan 183 hari dan Backup Now hanya tersedia untuk "
+                        "Admin atau Developer."
+                    ),
+                ),
+            ),
+            "17. Monitor TV": (
+                (
+                    "MANUAL_MONITOR_TV_BREAKER.png",
+                    "Gambar 17-1 — Editor breaker berbasis nilai dan threshold.",
+                    (
+                        "Keterangan gambar:\n"
+                        "• Sumber nilai pembanding berasal dari ListSetting dan memakai "
+                        "alamat serta formula engineering point yang dipilih.\n"
+                        "• Operator > mengaktifkan indikator saat actual melewati threshold; "
+                        "operator < mengaktifkannya saat actual berada di bawah threshold.\n"
+                        "• Warna kondisi benar/salah dan efek aktif hanya mengubah tampilan, "
+                        "bukan nilai IEC-104.\n"
+                        "• Save langsung memperbarui Mapping G1 dan G2 serta layar Monitor "
+                        "TV yang sedang melakukan refresh."
+                    ),
+                ),
+            ),
+
         }
 
         palette = {
@@ -16053,11 +16141,6 @@ class SCADAMainUI:
 
         config = _monitor_tv_config()
         payload = _monitor_tv_payload()
-        breaker_payload = _breaker_status_payload()
-        breaker_rows = {
-            str(item.get("id", "")): item
-            for item in breaker_payload.get("monitor_tv", [])
-        }
         default_field_order = list(dict.fromkeys(
             list(globals().get("MONITOR_TV_FIELD_MAP_G1", {}).keys())
             + list(globals().get("MONITOR_TV_FIELD_MAP_G2", {}).keys())
@@ -16142,34 +16225,72 @@ class SCADAMainUI:
                 })
 
             rectangles = section.get("rectangles", {})
+            comparison_values = panel.get("rectangle_values", {})
             for rectangle_id, binding in sorted(rectangles.items()):
                 if not isinstance(binding, dict):
                     continue
-                status = breaker_rows.get(
-                    f"{monitor_id}:{rectangle_id}", {}
-                )
-                status_quality = status.get("quality", "")
-                quality = (
-                    "ONLINE" if status_quality == "GOOD"
-                    else "OFFLINE" if status_quality == "RTU OFFLINE"
-                    else "CONFIG" if status_quality == "CONFIG INVALID"
-                    else "NO DATA"
-                )
-                raw_yx = status.get("raw_yx")
-                effective_yx = status.get("effective_yx")
+                value = comparison_values.get(rectangle_id)
+                operator = "<" if binding.get("operator") == "<" else ">"
+                try:
+                    threshold = float(binding.get("threshold", 0.0))
+                except (TypeError, ValueError, OverflowError):
+                    threshold = 0.0
+                try:
+                    numeric_value = float(value)
+                    active = (
+                        numeric_value < threshold
+                        if operator == "<"
+                        else numeric_value > threshold
+                    )
+                except (TypeError, ValueError, OverflowError):
+                    numeric_value = None
+                    active = None
+
+                ip = _norm_text(binding.get("Device_Addr"))
                 bay = _norm_text(binding.get("Bay_Name"))
                 physical = _norm_text(binding.get("Physical_Name"))
                 info_name = _norm_text(binding.get("Info_Name"))
-                reverse_value = status.get(
-                    "reverse", binding.get("Reverse", 0)
-                )
-                condition = status.get("condition", "Unknown")
-                color_name = status.get("color_name", "Abu-abu")
+                try:
+                    preview = _monitor_tv_preview(binding)
+                    raw_value = preview.get("raw")
+                    if not ip:
+                        quality = "CONFIG"
+                    elif preview.get("online"):
+                        quality = (
+                            "ONLINE" if preview.get("available") else "NO DATA"
+                        )
+                    else:
+                        quality = "OFFLINE"
+                except Exception:
+                    preview = {}
+                    raw_value = None
+                    quality = "CONFIG"
+
+                actual_text = self._run_monitor_number(numeric_value)
+                threshold_text = self._run_monitor_number(threshold)
+                if active is None:
+                    condition = "--"
+                    result_text = "UNKNOWN"
+                    color = "#808080"
+                elif active:
+                    condition = "TRUE / AKTIF"
+                    result_text = "TRUE"
+                    color = (
+                        binding.get("true_color")
+                        or binding.get("active_color")
+                        or "#ff2020"
+                    )
+                else:
+                    condition = "FALSE / TIDAK AKTIF"
+                    result_text = "FALSE"
+                    color = (
+                        binding.get("false_color")
+                        or binding.get("inactive_color")
+                        or "#14d84a"
+                    )
                 rule = (
-                    f"Raw {raw_yx if raw_yx is not None else '-'} XOR "
-                    f"Reverse {reverse_value} = "
-                    f"{effective_yx if effective_yx is not None else '-'}; "
-                    f"{condition} / {color_name}; flow "
+                    f"{actual_text} {operator} {threshold_text} = "
+                    f"{result_text}; warna {color}; flow "
                     f"{binding.get('flow', 'none')}"
                 )
                 rows.append({
@@ -16181,22 +16302,26 @@ class SCADAMainUI:
                         binding.get("label")
                     ) or "-",
                     "actual": condition,
-                    "raw": (
-                        str(raw_yx) if raw_yx is not None else "-"
-                    ),
+                    "raw": self._run_monitor_number(raw_value),
                     "quality": quality,
                     "source": (
-                        f"StatusSetting {bay}.csv"
+                        f"ListSetting {bay}.csv"
                         if bay else "Mapping tidak ditemukan"
                     ),
-                    "ip": _norm_text(binding.get("Device_Addr")) or "-",
+                    "ip": ip or "-",
                     "asdu": self._run_monitor_number(binding.get("ASDU")),
                     "ioa": self._run_monitor_number(binding.get("IOA")),
-                    "formula": "YX XOR REVERSE",
-                    "coefficient": "-",
-                    "ctpt": "-",
-                    "offset": "-",
-                    "unit": "status",
+                    "formula": (
+                        f"ACTUAL {operator} {threshold_text}"
+                    ),
+                    "coefficient": self._run_monitor_number(
+                        binding.get("Coefficient")
+                    ),
+                    "ctpt": self._run_monitor_number(binding.get("CTPT")),
+                    "offset": self._run_monitor_number(
+                        binding.get("Add_Offset")
+                    ),
+                    "unit": _norm_text(binding.get("Unit")) or "-",
                     "rule": rule,
                 })
 
@@ -17275,7 +17400,7 @@ try:
         # Rectangle / junction dapat menggunakan nilai hasil telemetry mana pun.
         # ``operator`` dan ``threshold`` menentukan kondisi BENAR; warna serta
         # efek flow dapat diubah dari editor Monitor TV dan tersimpan di JSON.
-        def rectangle(field, label, operator="=", threshold=1.0):
+        def rectangle(field, label, operator=">", threshold=1.0):
             return {
                 "field": field,
                 "label": label,
@@ -17288,10 +17413,10 @@ try:
 
         default_rectangles = {
             "j-main": rectangle("ct3", "Main Junction"),
-            "j-generator": rectangle("ll3", "Generator Junction"),
-            "j-transformer": rectangle("rr1", "Transformer Junction"),
+            "j-generator": rectangle("ll1", "Generator Junction"),
+            "j-transformer": rectangle("rr2", "Transformer Junction"),
             "j-transformer-bottom": rectangle(
-                "rr3", "Transformer Bottom", operator=">", threshold=0.0,
+                "rr3", "Transformer Bottom", threshold=0.0,
             ),
         }
         result = {
@@ -17399,100 +17524,48 @@ try:
                     rectangle["key"] = variable.get("key", "")
                     config_changed = True
 
-        # Refresh selected TV rectangles from StatusSetting while preserving
-        # their display logic (label/colors/operator/threshold/flow).
-        with STATUS_LOCK:
-            status_rows = [dict(row) for row in STATUS_REGISTRY]
+        # Older releases converted these four TV indicators to StatusSetting
+        # YX points. Restore their original engineering-value threshold model:
+        # the selected ListSetting value is calculated first, then compared
+        # with either ``>`` or ``<`` and the configured threshold.
         for monitor_id in ("G1", "G2"):
-            for _rect_name, rectangle in result[monitor_id]["rectangles"].items():
-                if not isinstance(rectangle, dict) or rectangle.get("Source_Kind") != "rectangle_status_csv":
-                    continue
-                fixed_logic = {
-                    "operator": "=", "threshold": 1.0,
-                    "true_color": "#ff2020", "false_color": "#14d84a",
-                    "on_color": "#ff2020", "off_color": "#14d84a",
-                }
-                for column, value in fixed_logic.items():
-                    if rectangle.get(column) != value:
-                        rectangle[column] = value
-                        config_changed = True
-                bay = str(rectangle.get("Bay_Name", "")).strip()
-                info_name = str(rectangle.get("Info_Name", rectangle.get("InfoName", ""))).strip()
-                info_index = str(rectangle.get("Info_Index", "")).strip()
-                physical = str(rectangle.get("Physical_Name", "")).strip()
-                candidates = [row for row in status_rows
-                              if str(row.get("Bay_Name", "")).strip() == bay]
-                row = next((item for item in candidates
-                            if info_name and str(item.get("InfoName", "")).strip() == info_name), None)
-                if row is None:
-                    row = next((item for item in candidates
-                                if info_index and str(item.get("Info_Index", "")).strip() == info_index), None)
-                if row is None:
-                    row = next((item for item in candidates
-                                if physical and str(item.get("PhysicalName", "")).strip() == physical), None)
-                if row is None:
-                    continue
-                refreshed = {
-                    "Device_Addr": row.get("Device_Addr", ""),
-                    "Bay_Name": row.get("Bay_Name", ""),
-                    "Physical_Name": row.get("PhysicalName", ""),
-                    "Info_Name": row.get("InfoName", ""),
-                    "Info_Index": row.get("Info_Index", ""),
-                    "Jian_Ge_Id": row.get("Jian_Ge_Id", ""),
-                    "ASDU": row.get("Parsed_ASDU", ""),
-                    "IOA": row.get("Parsed_IOA", ""),
-                    "Reverse": row.get("Reverse", ""),
-                    "SetStr": row.get("SetStr", ""),
-                    "ResetStr": row.get("ResetStr", ""),
-                    "Source_Kind": "rectangle_status_csv",
-                }
-                for column, value in refreshed.items():
-                    if rectangle.get(column) != value:
-                        rectangle[column] = value
-                        config_changed = True
-
-        # Convert legacy analog-driven TV rectangles to digital StatusSetting
-        # points. Once an operator selects another status row, Source_Kind is
-        # already rectangle_status_csv and that explicit choice is preserved.
-        status_targets = {
-            "G1": {
-                "j-main": ("Connection Wire I", ("breaker position",)),
-                "j-generator": ("1# Measure Control Box", ("1# G circuit breaker close position",)),
-                "j-transformer": ("1# Auxiliary Transformer", ("hv breaker close",)),
-                "j-transformer-bottom": ("1# Auxiliary Transformer", ("UV breaker close",)),
-            },
-            "G2": {
-                "j-main": ("Connection Wire II", ("breaker position",)),
-                "j-generator": ("2# Measure Control Box", ("2# G circuit breaker close position",)),
-                "j-transformer": ("2# Auxiliary Transformer", ("hv breaker close",)),
-                "j-transformer-bottom": ("2# Auxiliary Transformer", ("UV breaker close",)),
-            },
-        }
-        analog_only_columns = ("Coefficient", "CTPT", "Formula", "Add_Offset",
-                               "Unit", "Decimals", "Type", "Min_Save_Mode",
-                               "Tolerance", "Alarm_Class", "UUp_Limit", "Up_Limit",
-                               "Down_Limit", "DDown_Limit")
-        for monitor_id, targets in status_targets.items():
+            variables = result[monitor_id]["variables"]
             rectangles = result[monitor_id]["rectangles"]
-            for rectangle_id, (bay_name, preferred_names) in targets.items():
+            for rectangle_id, fallback in default_rectangles.items():
                 rectangle = rectangles.get(rectangle_id)
                 if not isinstance(rectangle, dict):
                     continue
                 if rectangle.get("Source_Kind") == "rectangle_status_csv":
+                    field = fallback["field"]
+                    linked = variables.get(field, {})
+                    migrated = (
+                        dict(linked) if isinstance(linked, dict) else {}
+                    )
+                    migrated.update({
+                        "field": field,
+                        "label": rectangle.get(
+                            "label", fallback["label"],
+                        ),
+                        "operator": fallback["operator"],
+                        "threshold": fallback["threshold"],
+                        "true_color": rectangle.get(
+                            "true_color",
+                            rectangle.get("active_color", "#ff2020"),
+                        ),
+                        "false_color": rectangle.get(
+                            "false_color",
+                            rectangle.get("inactive_color", "#14d84a"),
+                        ),
+                        "flow": rectangle.get("flow", "none"),
+                        "Source_Kind": "",
+                    })
+                    rectangles[rectangle_id] = migrated
+                    config_changed = True
                     continue
-                status_binding = _status_binding_for_bay(bay_name, preferred_names)
-                if not status_binding:
-                    continue
-                rectangle.update(status_binding)
-                rectangle["operator"] = "="
-                rectangle["threshold"] = 1.0
-                rectangle["true_color"] = "#ff2020"
-                rectangle["false_color"] = "#14d84a"
-                rectangle["on_color"] = "#ff2020"
-                rectangle["off_color"] = "#14d84a"
-                for column in analog_only_columns:
-                    rectangle.pop(column, None)
-                config_changed = True
+                if rectangle.get("operator") not in {">", "<"}:
+                    rectangle["operator"] = fallback["operator"]
+                    rectangle["threshold"] = fallback["threshold"]
+                    config_changed = True
         # Do not persist normalization from this read path.  Monitor-TV is
         # served by more than one SCADA process, so saving a result assembled
         # from a stale snapshot can overwrite a CT/PT edit that was just
@@ -17818,8 +17891,9 @@ try:
 
         payload["online"] = generator_online
         payload["wire_online"] = wire_online
-        # Rectangle selalu membaca nilai IEC-104 RAW.  Formula/koefisien pada
-        # card layar tidak ikut diterapkan terhadap logika warna rectangle.
+        # Breaker indicators on Monitor TV use calculated engineering values,
+        # not StatusSetting YX. Each selected ListSetting point is evaluated
+        # with its normal formula before the browser applies > / < threshold.
         rectangle_values = {}
         for rectangle_id, item in config.get("rectangles", {}).items():
             if not isinstance(item, dict):
@@ -17827,29 +17901,15 @@ try:
             linked = configured_variables.get(str(item.get("field", "")), {})
             binding = dict(linked) if isinstance(linked, dict) else {}
             binding.update(item)
-            bay = str(binding.get("Bay_Name", "")).strip()
-            physical = str(binding.get("Physical_Name", "")).strip()
-            ip = str(binding.get("Device_Addr", "")).strip()
-            if binding.get("Source_Kind") == "rectangle_status_csv":
-                info_name = str(binding.get("Info_Name", binding.get("InfoName", ""))).strip()
-                info_index = str(binding.get("Info_Index", "")).strip()
-                status_value = None
-                with DATA_LOCK:
-                    if ip and bool(VINCI_STATUS.get(ip, False)):
-                        if info_name:
-                            status_value = STATUS_VALUE_STORE.get((ip, "info", info_name))
-                        if status_value is None and physical:
-                            status_value = STATUS_VALUE_STORE.get((ip, "physical", physical))
-                        if status_value is None and info_index:
-                            status_value = STATUS_VALUE_STORE.get((ip, "index", info_index))
-                # Null explicitly means that neither open nor closed is known.
+            try:
+                preview = _monitor_tv_preview(binding)
                 rectangle_values[str(rectangle_id)] = (
-                    None if status_value is None else int(status_value)
+                    preview.get("actual")
+                    if preview.get("available")
+                    else None
                 )
-            elif bay and physical:
-                rectangle_values[str(rectangle_id)] = read_value(raw_bay_values.get(bay, {}), physical)
-            elif ip and physical:
-                rectangle_values[str(rectangle_id)] = read_value(raw_ip_values.get(ip, {}), physical)
+            except (TypeError, ValueError):
+                rectangle_values[str(rectangle_id)] = None
         payload["rectangles"] = config.get("rectangles", {})
         payload["rectangle_values"] = rectangle_values
         return payload
@@ -18131,29 +18191,13 @@ try:
                     self.send_header("Content-Type", "application/json; charset=utf-8")
                 else:
                     with SETTING_LOCK:
-                        options = [{key: row.get(key, "") for key in SETTING_COLUMNS} for row in SETTING_REGISTRY]
-                    # Numeric TV fields use ListSetting. Rectangle choices use
-                    # the isolated StatusSetting registry for every configured bay.
-                    for row in _load_status_settings():
-                        options.append({
-                            "Device_Addr": row.get("Device_Addr", ""),
-                            "Bay_Name": row.get("Bay_Name", ""),
-                            "Physical_Name": row.get("PhysicalName", ""),
-                            "Info_Name": row.get("InfoName", ""),
-                            "Info_Index": row.get("Info_Index", ""),
-                            "ASDU": row.get("Parsed_ASDU", ""),
-                            "IOA": row.get("Parsed_IOA", ""),
-                            "Coefficient": 1,
-                            "CTPT": 1,
-                            "Formula": "RAW",
-                            "Add_Offset": 0,
-                            "Unit": "",
-                            "Decimals": 0,
-                            "Source_Kind": "rectangle_status_csv",
-                            "SetStr": row.get("SetStr", ""),
-                            "ResetStr": row.get("ResetStr", ""),
-                            "Reverse": row.get("Reverse", ""),
-                        })
+                        options = [
+                            {
+                                key: row.get(key, "")
+                                for key in SETTING_COLUMNS
+                            }
+                            for row in SETTING_REGISTRY
+                        ]
                     body = json.dumps(options, ensure_ascii=False).encode("utf-8")
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -18753,6 +18797,11 @@ if __name__ == "__main__":
         required_assets = [
             os.path.join(APP_DIR, "UIRealtimeBindings.json"),
             os.path.join(APP_DIR, "MONITOR V55.html"),
+            os.path.join(APP_DIR, "MANUAL_MAPPING_G1_G2.png"),
+            os.path.join(APP_DIR, "MANUAL_COMMUNICATION_SETTINGS.png"),
+            os.path.join(APP_DIR, "MANUAL_PROCESS_TREND.png"),
+            os.path.join(APP_DIR, "MANUAL_BACKUP_EXPLORER.png"),
+            os.path.join(APP_DIR, "MANUAL_MONITOR_TV_BREAKER.png"),
         ]
         setting_files = [
             name for name in os.listdir(APP_DIR)
