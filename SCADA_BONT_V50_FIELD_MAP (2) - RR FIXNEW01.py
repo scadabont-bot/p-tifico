@@ -338,7 +338,7 @@ IOA_MAP_STANDARD = {
     16411: "Uab_L", 16412: "Ubc_L", 16413: "Uca_L",
 }
 
-APP_VERSION = "2.5.8"
+APP_VERSION = "2.5.9"
 APP_DIR = (
     os.path.dirname(os.path.abspath(sys.executable))
     if getattr(sys, "frozen", False)
@@ -1057,6 +1057,7 @@ def _apply_relay_snapshot(payload):
         raise ValueError("invalid SCADA relay payload")
     with DATA_LOCK:
         owned = _owned_rtu_ips()
+        relay_now = time.monotonic()
         for ip, values in payload.get("data_store", {}).items():
             if str(ip) in owned:
                 continue
@@ -1068,6 +1069,53 @@ def _apply_relay_snapshot(payload):
                 continue
             if isinstance(values, dict):
                 BAY_VALUE_STORE.setdefault(str(bay), {}).update(values)
+        for ip, values in payload.get("raw_store", {}).items():
+            address = str(ip)
+            if address in owned or not isinstance(values, dict):
+                continue
+            target = RAW_STORE.setdefault(address, {})
+            for key, value in values.items():
+                try:
+                    numeric = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(numeric):
+                    target[str(key)] = numeric
+            RAW_TIMESTAMP[address] = relay_now
+        for bay, values in payload.get("raw_bay_store", {}).items():
+            bay_name = str(bay)
+            if (
+                str(SETTING_BAY_IP.get(bay_name, "")) in owned
+                or not isinstance(values, dict)
+            ):
+                continue
+            target = RAW_BAY_VALUE_STORE.setdefault(bay_name, {})
+            for key, value in values.items():
+                try:
+                    numeric = float(value)
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(numeric):
+                    target[str(key)] = numeric
+            BAY_TIMESTAMP[bay_name] = relay_now
+        for item in payload.get("raw_address_store", []):
+            if not isinstance(item, dict):
+                continue
+            address = str(item.get("ip", "")).strip()
+            if not address or address in owned:
+                continue
+            try:
+                key = (
+                    address,
+                    int(item.get("asdu")),
+                    int(item.get("ioa")),
+                )
+                numeric = float(item.get("value"))
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(numeric):
+                RAW_ADDRESS_STORE[key] = numeric
+                RAW_ADDRESS_TIMESTAMP[key] = relay_now
         for card, values in payload.get("card_store", {}).items():
             if isinstance(values, dict):
                 try:
@@ -1093,7 +1141,7 @@ def _apply_relay_snapshot(payload):
                 STATUS_VALUE_STORE[key] = int(float(item.get("value", 0)))
             except (TypeError, ValueError):
                 continue
-        now = time.monotonic()
+        now = relay_now
         now_epoch = time.time()
         for ip in payload.get("data_store", {}):
             if str(ip) not in owned:
@@ -17614,6 +17662,44 @@ try:
                 json.dump(config, handle, ensure_ascii=False, indent=2)
             os.replace(temporary, MONITOR_TV_CONFIG_PATH)
 
+    def _monitor_tv_relay_engineered_value(binding, display_field):
+        """Read an engineered fallback from an older PC1 relay snapshot."""
+        ip = str(binding.get("Device_Addr", "")).strip()
+        bay = str(binding.get("Bay_Name", "")).strip()
+        physical = str(binding.get("Physical_Name", "")).strip()
+        runtime_physical = _runtime_physical_name(binding) or physical
+        with DATA_LOCK:
+            bay_values = dict(BAY_VALUE_STORE.get(bay, {}))
+            ip_values = dict(DATA_STORE.get(ip, {}))
+
+        # PC1 relay versions before raw-address synchronization already expose
+        # the three calculated G2 phase values through these compatibility keys.
+        phase_key = {
+            "W2_Uab": "W2_Uab_phase",
+            "W2_Ubc": "W2_Ubc_phase",
+            "W2_Uca": "W2_Uca_phase",
+        }.get(physical)
+        candidates = []
+        if display_field in {"tk2", "tk3", "tk4"} and phase_key:
+            candidates.append((ip_values, phase_key))
+        candidates.extend((
+            (bay_values, physical),
+            (bay_values, runtime_physical),
+            (ip_values, runtime_physical),
+            (ip_values, physical),
+        ))
+        for values, key in candidates:
+            if not key or key not in values:
+                continue
+            try:
+                numeric = float(values[key])
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(numeric):
+                return numeric
+        return None
+
+
     def _monitor_tv_preview(binding):
         """Calculate an unsaved Monitor-TV binding from its exact live IEC point."""
         if not isinstance(binding, dict):
@@ -17640,6 +17726,11 @@ try:
             source_values = dict(BAY_VALUE_STORE.get(bay, {}))
 
         display_field = str(binding.get("Display_Field", "")).strip()
+        relay_engineered = (
+            _monitor_tv_relay_engineered_value(binding, display_field)
+            if raw_value is None
+            else None
+        )
         unit = _monitor_tv_display_unit(
             display_field,
             str(binding.get("Unit", "")).strip(),
@@ -17659,7 +17750,7 @@ try:
         result = {
             "ok": True,
             "online": online,
-            "available": raw_value is not None,
+            "available": raw_value is not None or relay_engineered is not None,
             "device_ip": ip,
             "asdu": asdu,
             "ioa": ioa,
@@ -17676,9 +17767,19 @@ try:
             ),
         }
         if raw_value is None:
-            result["message"] = (
-                f"Belum ada data RAW untuk {ip} / ASDU {asdu} / IOA {ioa}."
+            if relay_engineered is None:
+                result["message"] = (
+                    f"Belum ada data RAW untuk {ip} / ASDU {asdu} / IOA {ioa}."
+                )
+                return result
+            displayed = _monitor_tv_display_value(
+                display_field,
+                relay_engineered,
             )
+            result["actual"] = displayed
+            result["formatted"] = f"{displayed:.{decimals}f}"
+            result["source"] = "PC1 relay"
+            result["message"] = "Hasil engineering diterima dari relay PC1."
             return result
 
         calculated = _calculate_formula(
@@ -18141,6 +18242,29 @@ try:
                 "generated_at": datetime.datetime.now().isoformat(timespec="milliseconds"),
                 "source_ip": _communication_config().get("master_ip", "10.100.163.149"),
                 "data_store": data_store,
+                "raw_store": {
+                    str(ip): dict(values)
+                    for ip, values in RAW_STORE.items()
+                },
+                "raw_bay_store": {
+                    str(bay): dict(values)
+                    for bay, values in RAW_BAY_VALUE_STORE.items()
+                },
+                "raw_address_store": [
+                    {
+                        "ip": str(key[0]),
+                        "asdu": int(key[1]),
+                        "ioa": int(key[2]),
+                        "value": float(value),
+                    }
+                    for key, value in RAW_ADDRESS_STORE.items()
+                    if (
+                        isinstance(key, tuple)
+                        and len(key) == 3
+                        and isinstance(value, (int, float))
+                        and math.isfinite(float(value))
+                    )
+                ],
                 "bay_store": {bay: dict(values) for bay, values in BAY_VALUE_STORE.items()},
                 "card_store": {str(idx): dict(values) for idx, values in CARD_VALUE_STORE.items()},
                 "vinci_status": dict(VINCI_STATUS),
@@ -18552,6 +18676,125 @@ def run_engineering_qc():
     print("[ENGINEERING QC] PASS - Device Manager CT/PT, InfoName decoding, card routing, and RTU1 scaling verified")
     return True
 
+
+def run_pc2_relay_qc():
+    """Regression check for PC2 consuming current and legacy PC1 snapshots."""
+    if not MONITOR_TV_AVAILABLE:
+        print("[PC2 RELAY QC] FAILED - Monitor TV unavailable")
+        return False
+
+    store_names = (
+        "DATA_STORE",
+        "BAY_VALUE_STORE",
+        "RAW_STORE",
+        "RAW_BAY_VALUE_STORE",
+        "RAW_ADDRESS_STORE",
+        "RAW_ADDRESS_TIMESTAMP",
+        "RAW_TIMESTAMP",
+        "BAY_TIMESTAMP",
+        "VINCI_STATUS",
+    )
+    with DATA_LOCK:
+        saved = {
+            name: copy.deepcopy(globals()[name])
+            for name in store_names
+        }
+    failures = []
+    try:
+        with DATA_LOCK:
+            RAW_STORE.clear()
+            RAW_BAY_VALUE_STORE.clear()
+            RAW_ADDRESS_STORE.clear()
+            RAW_ADDRESS_TIMESTAMP.clear()
+            DATA_STORE.setdefault("10.100.163.1", {}).update({
+                "W2_P": 232.1,
+                "W2_Uab": 11.085,
+                "W2_Uab_phase": 6.4,
+            })
+            DATA_STORE.setdefault("10.100.163.3", {})["P"] = 607.0
+            BAY_VALUE_STORE["Connection Wire II"] = {
+                "W2_P": 232.1,
+                "W2_Uab": 11.085,
+            }
+            BAY_VALUE_STORE["2# Measure Control Box"] = {"P": 607.0}
+            BAY_VALUE_STORE["2# Auxiliary Transformer"] = {"P": 407.0}
+            VINCI_STATUS["10.100.163.1"] = True
+            VINCI_STATUS["10.100.163.3"] = True
+
+        config = _monitor_tv_config()["G2"]["variables"]
+        payload = _monitor_tv_generator_payload(
+            RTU_LIST[2]["ip"],
+            "W2",
+            "G2",
+        )
+        expected = {
+            "ct4": 0.2321,
+            "ll1": 0.607,
+            "rr2": 0.407,
+            "tk2": 6.4,
+        }
+        for field, wanted in expected.items():
+            binding = dict(config[field])
+            binding["Display_Field"] = field
+            preview = _monitor_tv_preview(binding)
+            displayed = float(payload[field])
+            if (
+                preview.get("source") != "PC1 relay"
+                or not math.isclose(displayed, wanted, rel_tol=1e-12, abs_tol=1e-12)
+                or not math.isclose(
+                    displayed,
+                    float(preview.get("actual")),
+                    rel_tol=1e-12,
+                    abs_tol=1e-12,
+                )
+            ):
+                failures.append(
+                    f"{field}: display={displayed}, modal={preview.get('actual')}, expected={wanted}"
+                )
+
+        raw_address = ("10.100.163.3", 2049, 16398)
+        with DATA_LOCK:
+            RAW_STORE.setdefault("10.100.163.3", {})["P"] = 321.5
+            RAW_BAY_VALUE_STORE.setdefault(
+                "2# Measure Control Box",
+                {},
+            )["P"] = 321.5
+            RAW_ADDRESS_STORE[raw_address] = 321.5
+            RAW_ADDRESS_TIMESTAMP[raw_address] = time.monotonic()
+        relay = _full_realtime_relay_payload()
+        raw_points = relay.get("raw_address_store", [])
+        if (
+            relay.get("raw_store", {}).get("10.100.163.3", {}).get("P") != 321.5
+            or relay.get("raw_bay_store", {}).get(
+                "2# Measure Control Box",
+                {},
+            ).get("P") != 321.5
+            or not any(
+                item.get("ip") == raw_address[0]
+                and item.get("asdu") == raw_address[1]
+                and item.get("ioa") == raw_address[2]
+                and item.get("value") == 321.5
+                for item in raw_points
+            )
+        ):
+            failures.append("PC1 snapshot does not contain complete RAW telemetry")
+    except Exception as exc:
+        failures.append(str(exc))
+    finally:
+        with DATA_LOCK:
+            for name, state in saved.items():
+                target = globals()[name]
+                target.clear()
+                target.update(state)
+
+    if failures:
+        print("[PC2 RELAY QC] FAILED")
+        for failure in failures:
+            print(" -", failure)
+        return False
+    print("[PC2 RELAY QC] PASS - G2 display/modal and RAW relay verified")
+    return True
+
 # ==============================================================================
 
 # ==============================================================================
@@ -18871,6 +19114,7 @@ def validate_setting_files():
 
 SETTING_VALIDATION_OK = validate_setting_files()
 ENGINEERING_QC_OK = run_engineering_qc()
+PC2_RELAY_QC_OK = run_pc2_relay_qc()
 
 # ==============================================================================
 # BLOCK 9: APPLICATION ENTRY POINT
@@ -18909,6 +19153,7 @@ if __name__ == "__main__":
                 break
         if (len(RTU_LIST) != 8 or len(setting_files) < 24 or len(status_files) < 24
                 or not status_schema_ok or not SETTING_VALIDATION_OK or not ENGINEERING_QC_OK
+                or not PC2_RELAY_QC_OK
                 or not all(os.path.isfile(p) for p in required_assets)):
             raise SystemExit(2)
         raise SystemExit(0)

@@ -35,16 +35,19 @@ jobs:
       - name: Build GUI executable
         run: pyinstaller --noconfirm --clean p-tifico-backup.spec
 
-      - name: Build Windows installer
+      - name: Build Windows installers
         shell: pwsh
         run: |
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
+          $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          & $compiler "installer\p-tifico-backup.iss"
+          & $compiler `
+            "/DMyOutputBaseFilename=p-tifico-backup-PC2-Setup" `
             "installer\p-tifico-backup.iss"
 
       - name: Install and verify packaged application
         shell: pwsh
         run: |
-          $installer = Resolve-Path "dist\p-tifico-backup-Setup.exe"
+          $installer = Resolve-Path "dist\p-tifico-backup-PC2-Setup.exe"
           $installDir = Join-Path $env:RUNNER_TEMP "p-tifico-backup-installed"
           $install = Start-Process `
             -FilePath $installer `
@@ -79,6 +82,17 @@ jobs:
             if (-not (Test-Path (Join-Path $installDir $file))) {
               throw "Missing installed file: $file"
             }
+          }
+
+          $communication = Get-Content `
+            (Join-Path $installDir "CommunicationConfig.json") `
+            -Raw | ConvertFrom-Json
+          if (
+            $communication.mode -ne "master_slave" -or
+            $communication.master_ip -ne "10.100.163.150" -or
+            $communication.peer_ip -ne "10.100.163.149"
+          ) {
+            throw "PC2 installer communication role is not configured for PC1 .150 / PC2 .149."
           }
 
           $listSettings = @(Get-ChildItem $installDir -Filter "ListSetting *.csv")
@@ -121,15 +135,21 @@ jobs:
             throw "Uninstaller exited with code $($uninstall.ExitCode)."
           }
 
-      - name: Create checksum
+      - name: Create checksums
         shell: pwsh
         run: |
-          $installer = "dist\p-tifico-backup-Setup.exe"
-          $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  p-tifico-backup-Setup.exe" |
-            Set-Content "dist\p-tifico-backup-Setup.exe.sha256" -Encoding ascii
-          Get-Item $installer
-          Get-Content "dist\p-tifico-backup-Setup.exe.sha256"
+          $installers = @(
+            "p-tifico-backup-Setup.exe",
+            "p-tifico-backup-PC2-Setup.exe"
+          )
+          foreach ($name in $installers) {
+            $path = Join-Path "dist" $name
+            $hash = (Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            "$hash  $name" |
+              Set-Content "$path.sha256" -Encoding ascii
+            Get-Item $path
+            Get-Content "$path.sha256"
+          }
 
       - name: Upload Windows installer
         uses: actions/upload-artifact@v4
@@ -138,5 +158,7 @@ jobs:
           path: |
             dist/p-tifico-backup-Setup.exe
             dist/p-tifico-backup-Setup.exe.sha256
+            dist/p-tifico-backup-PC2-Setup.exe
+            dist/p-tifico-backup-PC2-Setup.exe.sha256
           if-no-files-found: error
           compression-level: 0

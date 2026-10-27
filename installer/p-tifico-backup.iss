@@ -1,7 +1,11 @@
 #define MyAppName "p-tifico-backup"
-#define MyAppVersion "2.5.8"
+#define MyAppVersion "2.5.9"
 #define MyAppPublisher "TIFICO"
 #define MyAppExeName "p-tifico-backup.exe"
+
+#ifndef MyOutputBaseFilename
+#define MyOutputBaseFilename "p-tifico-backup-Setup"
+#endif
 
 [Setup]
 AppId={{8E147B9B-4775-4D21-8C94-1A9BFD4592C8}
@@ -21,7 +25,7 @@ ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 MinVersion=10.0.17763
 OutputDir=..\dist
-OutputBaseFilename=p-tifico-backup-Setup
+OutputBaseFilename={#MyOutputBaseFilename}
 SetupIconFile=..\SCADA_BONT.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 Compression=lzma2/ultra64
