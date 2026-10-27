@@ -4422,6 +4422,7 @@ async function responseJson(response){
 async function refreshTvPreview(){
     if(!tvEditTarget||tvEditTarget.kind!=="variable")return;
     const binding=collectTvAddress();
+    binding.Display_Field=tvEditTarget.name;
     const preview=document.getElementById("tv-value-preview");
     const raw=document.getElementById("tv-preview-raw");
     const actual=document.getElementById("tv-preview-actual");

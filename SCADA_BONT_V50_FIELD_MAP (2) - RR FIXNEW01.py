@@ -339,7 +339,7 @@ IOA_MAP_STANDARD = {
     16417: "IE",    16418: "UE",    16419: "f",
 }
 
-APP_VERSION = "2.5.5"
+APP_VERSION = "2.5.6"
 APP_DIR = (
     os.path.dirname(os.path.abspath(sys.executable))
     if getattr(sys, "frozen", False)
@@ -2754,6 +2754,69 @@ def _decode_analog_info_name(info_name):
     except (TypeError, ValueError):
         return {}
 
+def _normalize_device_manager_point_name(value):
+    """Normalize Device Manager labels only for unambiguous address fallback."""
+    text = _norm_text(value).casefold()
+    text = re.sub(r"^\d+#\s*generator\s*", "", text)
+    return re.sub(r"[^a-z0-9]+", "", text)
+
+
+def _load_device_manager_analog_metadata():
+    """Index authoritative analog CT/PT values from Device Manager."""
+    by_info = {}
+    address_candidates = {}
+    try:
+        with open(CBZ8000_DEVICE_DATA_PATH, "r", encoding="utf-8-sig") as handle:
+            payload = json.load(handle)
+        devices = payload.get("device_manager", {}).get("devices", [])
+    except (OSError, ValueError, TypeError):
+        return by_info, {}
+
+    for device in devices if isinstance(devices, list) else []:
+        bay_name = _norm_text(device.get("bay", {}).get("Jiange_name"))
+        records = device.get("sections", {}).get("analog", [])
+        for record in records if isinstance(records, list) else []:
+            info_name = _norm_text(record.get("Infoname")).upper()
+            decoded = _decode_analog_info_name(info_name)
+            if not decoded:
+                continue
+            metadata = {
+                "Info_Name": info_name,
+                "Bay_Name": bay_name,
+                "Physical_Name": _norm_text(record.get("Physicalname")),
+                "CTPT": record.get("CTPT"),
+            }
+            by_info[info_name] = metadata
+            address = (
+                int(decoded["Parsed_ASDU"]),
+                int(decoded["Parsed_IOA"]),
+            )
+            address_candidates.setdefault(address, []).append(metadata)
+
+    by_address = {
+        address: candidates[0]
+        for address, candidates in address_candidates.items()
+        if len(candidates) == 1
+    }
+    return by_info, by_address
+
+
+def _device_manager_metadata_for_setting(row, asdu, ioa, by_info, by_address):
+    """Resolve one ListSetting row to its exact Device Manager analog record."""
+    info_name = _norm_text(row.get("Info_Name")).upper()
+    metadata = by_info.get(info_name)
+    if metadata is not None or ioa is None:
+        return metadata
+    metadata = by_address.get((int(asdu), int(ioa)))
+    if metadata is None:
+        return None
+    if (
+        _normalize_device_manager_point_name(metadata.get("Physical_Name"))
+        != _normalize_device_manager_point_name(row.get("Physical_Name"))
+    ):
+        return None
+    return metadata
+
 
 
 def _setting_filename(bay_name):
@@ -2967,6 +3030,9 @@ def _load_setting_engine():
     """Build runtime IOA/ASDU registry and dynamically rebuild the 14-card map."""
     global SETTING_REGISTRY, SETTING_BY_IP_TAG, SETTING_IOA_BY_IP, CARD_POINT_MAP, CARD_BAY_BY_INDEX
     rows = _load_all_settings()
+    device_manager_by_info, device_manager_by_address = (
+        _load_device_manager_analog_metadata()
+    )
     registry = []
     tag_candidates = {}
     by_tag = {}
@@ -3006,10 +3072,26 @@ def _load_setting_engine():
         item["Physical_Name"] = physical
         if decoded:
             item["Info_Name"] = decoded["Info_Name"]
+        metadata = _device_manager_metadata_for_setting(
+            item,
+            asdu,
+            ioa,
+            device_manager_by_info,
+            device_manager_by_address,
+        )
+        ctpt_value = row.get("CTPT")
+        ctpt_source = "ListSetting"
+        if metadata is not None:
+            candidate = _to_float(metadata.get("CTPT"), float("nan"))
+            if math.isfinite(candidate):
+                ctpt_value = candidate
+                ctpt_source = "Device Manager"
+        item["CTPT"] = ctpt_value
+        item["CTPT_Source"] = ctpt_source
         item["IOA_INT"] = ioa
         item["ASDU_INT"] = asdu
         item["Coefficient_NUM"] = _to_float(row.get("Coefficient"), 1.0)
-        item["CTPT_NUM"] = _to_float(row.get("CTPT"), 1.0)
+        item["CTPT_NUM"] = _to_float(ctpt_value, 1.0)
         item["Tolerance_NUM"] = _to_float(row.get("Tolerance"), 0.0)
         item["Add_Offset_NUM"] = _to_float(row.get("Add_Offset"), 0.0)
         registry.append(item)
@@ -6641,6 +6723,8 @@ class SCADAMainUI:
                 self.cbz_config,
                 CBZ8000_DEVICE_DATA_PATH,
             )
+            _load_setting_engine()
+            self._synchronize_ui_bindings_from_listsettings(force=True)
 
         def default_record(category):
             result = {}
@@ -15501,10 +15585,10 @@ class SCADAMainUI:
             return False
 
     def _synchronize_ui_bindings_from_listsettings(self, force=False):
-        """Refresh every SCADA/TV reference from the authoritative CSV rows.
+        """Refresh every SCADA/TV reference from authoritative runtime metadata.
 
-        The screen/page binding remains the user's choice, while its exact
-        IEC address and engineering metadata always come from ListSetting.
+        The screen/page binding remains the user's choice. IEC addresses and
+        formulas come from ListSetting; CT/PT comes from Device Manager.
         """
         with SETTING_LOCK:
             rows = [dict(row) for row in SETTING_REGISTRY]
@@ -15512,7 +15596,9 @@ class SCADAMainUI:
             status_rows = [dict(row) for row in STATUS_REGISTRY]
         signature = tuple(sorted(
             (str(row.get("Bay_Name", "")), str(row.get("Physical_Name", "")),
-             str(row.get("Device_Addr", "")), str(row.get("ASDU", "")), str(row.get("IOA", "")))
+             str(row.get("Device_Addr", "")), str(row.get("ASDU", "")),
+             str(row.get("IOA", "")), str(row.get("CTPT", "")),
+             str(row.get("CTPT_Source", "")))
             for row in rows
         ))
         status_signature = tuple(sorted(
@@ -15530,7 +15616,7 @@ class SCADAMainUI:
         }
         changed = False
         engineering = ("Device_Addr", "Bay_Name", "Physical_Name", "Info_Name", "Info_Index", "ASDU", "IOA",
-                       "Coefficient", "CTPT", "Formula", "Add_Offset", "Unit", "Decimals")
+                       "Coefficient", "CTPT", "CTPT_Source", "Formula", "Add_Offset", "Unit", "Decimals")
         # Rectangle status bindings come from the separate StatusSetting CSV
         # and must never be overwritten by analog ListSetting rows.
         for kind in ("variables",):
@@ -15759,7 +15845,7 @@ class SCADAMainUI:
         fields = (
             "Device_Addr", "Bay_Name", "Physical_Name", "Info_Name",
             "Info_Index", "Type", "ASDU", "IOA", "Coefficient", "CTPT",
-            "Tolerance", "Add_Offset", "Formula", "Unit",
+            "CTPT_Source", "Tolerance", "Add_Offset", "Formula", "Unit",
         )
         for name in fields:
             result[name] = setting.get(name, result.get(name, ""))
@@ -16014,8 +16100,9 @@ class SCADAMainUI:
                 except (TypeError, ValueError):
                     actual_text = "--"
 
+            ctpt_source = _norm_text(binding.get("CTPT_Source")) or "ListSetting"
             source = (
-                f"ListSetting {bay}.csv ({mode})"
+                f"ListSetting {bay}.csv ({mode}); CT/PT: {ctpt_source}"
                 if bay else "Mapping tidak ditemukan"
             )
             rows.append({
@@ -16075,7 +16162,9 @@ class SCADAMainUI:
                     else "default"
                 )
                 try:
-                    preview = _monitor_tv_preview(binding)
+                    preview_binding = dict(binding)
+                    preview_binding["Display_Field"] = field_id
+                    preview = _monitor_tv_preview(preview_binding)
                     raw_value = preview.get("raw")
                     if not ip:
                         quality = "CONFIG"
@@ -16103,7 +16192,8 @@ class SCADAMainUI:
 
                 formula = _norm_text(binding.get("Formula")) or "RAW"
                 source = (
-                    f"ListSetting {bay}.csv ({mode})"
+                    f"ListSetting {bay}.csv ({mode}); CT/PT: "
+                    f"{_norm_text(binding.get('CTPT_Source')) or 'ListSetting'}"
                     if bay else "Mapping tidak ditemukan"
                 )
                 rows.append({
@@ -16127,8 +16217,12 @@ class SCADAMainUI:
                     "offset": self._run_monitor_number(
                         binding.get("Add_Offset")
                     ),
-                    "unit": _norm_text(binding.get("Unit")) or "-",
-                    "rule": self._run_monitor_formula_text(binding),
+                    "unit": _monitor_tv_display_unit(
+                        field_id, _norm_text(binding.get("Unit")) or "-"
+                    ),
+                    "rule": _monitor_tv_display_formula(
+                        field_id, self._run_monitor_formula_text(binding)
+                    ),
                 })
 
             rectangles = section.get("rectangles", {})
@@ -17235,6 +17329,34 @@ try:
     MONITOR_TV_ACTIVE_ROLE = None
     MONITOR_TV_EDITOR_ROLES = frozenset({"Admin", "Developer"})
 
+    MONITOR_TV_DISPLAY_DIVISORS = {
+        "ct4": 1000.0,
+        "ct5": 1000.0,
+        "ll1": 1000.0,
+        "ll2": 1000.0,
+        "rr2": 1000.0,
+    }
+    MONITOR_TV_DISPLAY_UNITS = {
+        "ct4": "MW",
+        "ct5": "Mvar",
+        "ll1": "MW",
+        "ll2": "Mvar",
+        "rr2": "MW",
+    }
+
+    def _monitor_tv_display_value(field_id, value):
+        divisor = MONITOR_TV_DISPLAY_DIVISORS.get(str(field_id), 1.0)
+        return float(value) / divisor
+
+    def _monitor_tv_display_unit(field_id, fallback):
+        return MONITOR_TV_DISPLAY_UNITS.get(str(field_id), str(fallback))
+
+    def _monitor_tv_display_formula(field_id, formula_text):
+        divisor = MONITOR_TV_DISPLAY_DIVISORS.get(str(field_id))
+        if divisor is None:
+            return str(formula_text)
+        return f"{formula_text} ÷ {divisor:g}"
+
     def _monitor_tv_operator_allowed(remote_ip):
         """Allow counter controls only from configured SCADA and TV stations."""
         config = _communication_config()
@@ -17381,9 +17503,9 @@ try:
                 elif source == "wire2" and not physical.startswith("W2_"):
                     physical = "W2_" + physical
                 existing = variables.get(str(html_id), {})
-                # Bay + Physical is the persistent selection identity. Default
-                # bindings follow ListSetting changes; values explicitly saved
-                # from the Monitor-TV editor remain authoritative.
+                # Bay + Physical is the persistent selection identity. Address,
+                # formula, and coefficient may be selected in the TV editor;
+                # CT/PT always follows Device Manager through the registry.
                 lookup_bay = str(existing.get("Bay_Name", bay)).strip() if isinstance(existing, dict) else bay
                 lookup_physical = str(existing.get("Physical_Name", physical)).strip() if isinstance(existing, dict) else physical
                 row = next((item for item in registry
@@ -17405,9 +17527,12 @@ try:
                 seeded.setdefault("source", source)
                 seeded.setdefault("key", str(key))
                 seeded.setdefault("Decimals", 2)
-                if row and seeded.get("mode") != "selected":
-                    for column in SETTING_COLUMNS:
-                        seeded[column] = row.get(column, "")
+                if row:
+                    if seeded.get("mode") != "selected":
+                        for column in SETTING_COLUMNS:
+                            seeded[column] = row.get(column, "")
+                    seeded["CTPT"] = row.get("CTPT", "")
+                    seeded["CTPT_Source"] = row.get("CTPT_Source", "")
                 if variables.get(str(html_id)) != seeded:
                     variables[str(html_id)] = seeded
                     config_changed = True
@@ -17513,15 +17638,22 @@ try:
             online = bool(VINCI_STATUS.get(ip, False))
             source_values = dict(BAY_VALUE_STORE.get(bay, {}))
 
-        unit = str(binding.get("Unit", "")).strip()
+        display_field = str(binding.get("Display_Field", "")).strip()
+        unit = _monitor_tv_display_unit(
+            display_field,
+            str(binding.get("Unit", "")).strip(),
+        )
         try:
             decimals = int(float(binding.get("Decimals", 2)))
         except (TypeError, ValueError, OverflowError):
             decimals = 2
         decimals = max(0, min(6, decimals))
-        formula_text = FORMULA_PRESETS.get(
-            formula,
-            str(binding.get("Formula", "")).strip() or "Raw",
+        formula_text = _monitor_tv_display_formula(
+            display_field,
+            FORMULA_PRESETS.get(
+                formula,
+                str(binding.get("Formula", "")).strip() or "Raw",
+            ),
         )
         result = {
             "ok": True,
@@ -17555,8 +17687,9 @@ try:
         )
         if not math.isfinite(float(calculated)):
             raise ValueError("Hasil formula tidak valid")
-        result["actual"] = float(calculated)
-        result["formatted"] = f"{float(calculated):.{decimals}f}"
+        displayed = _monitor_tv_display_value(display_field, calculated)
+        result["actual"] = displayed
+        result["formatted"] = f"{displayed:.{decimals}f}"
         result["message"] = (
             "Preview live sesuai data RTU saat ini."
             if online
@@ -17789,6 +17922,13 @@ try:
                     payload[str(html_id)] = float(calculated)
             except Exception:
                 continue
+        # Convert kW/kVar engineering values once, in the backend, so the JSON
+        # payload, mapping formula, modal preview, and HTML all use one value.
+        for html_id in MONITOR_TV_DISPLAY_DIVISORS:
+            if html_id in payload:
+                payload[html_id] = _monitor_tv_display_value(
+                    html_id, payload[html_id]
+                )
         # Hindari menampilkan angka cache dari RTU yang sedang offline.
         for html_id, (source, data_key) in field_map.items():
             if source.startswith("measure_control") and not generator_online:
@@ -18354,6 +18494,14 @@ def run_engineering_qc():
     with SETTING_LOCK:
         rows = {r.get("Physical_Name"): r for r in SETTING_REGISTRY
                 if r.get("Device_Addr") == "10.100.163.1"}
+        device_manager_current = next(
+            (
+                r for r in SETTING_REGISTRY
+                if r.get("Bay_Name") == "11# Circulating Water Pump"
+                and r.get("Physical_Name") == "Ia"
+            ),
+            None,
+        )
     expected_keys = {
         "W1_Ia": (257, 16385), "W1_Uab": (257, 16388),
         "W1_Ubc": (257, 16389), "W1_Uca": (257, 16390),
@@ -18369,6 +18517,25 @@ def run_engineering_qc():
     decoded_example = _decode_analog_info_name("05YC0A01004008")
     if (decoded_example.get("Parsed_ASDU"), decoded_example.get("Parsed_IOA")) != (2561, 16392):
         failures.append("Analog InfoName decoder: 05YC0A01004008 must resolve to ASDU 2561 / IOA 16392")
+    if device_manager_current is None:
+        failures.append("Device Manager CT/PT: 11# Circulating Water Pump Ia mapping missing")
+    else:
+        if (
+            device_manager_current.get("CTPT_Source") != "Device Manager"
+            or not math.isclose(_to_float(device_manager_current.get("CTPT"), 0.0), 15.0)
+        ):
+            failures.append(
+                "Device Manager CT/PT: 11# Circulating Water Pump Ia must use CT/PT 15"
+            )
+        elif not math.isclose(
+            _calculate_formula(100.0, device_manager_current, {}),
+            0.2745,
+            rel_tol=1e-12,
+            abs_tol=1e-12,
+        ):
+            failures.append(
+                "Device Manager CT/PT: RAW 100 × 0.000183 × 15 must equal 0.2745"
+            )
 
     expected_card_asdus = [
         2561, 2817, 3073, 3329, 3585, 3841, 4097,
@@ -18403,7 +18570,7 @@ def run_engineering_qc():
         for failure in failures:
             print(" -", failure)
         return False
-    print("[ENGINEERING QC] PASS - InfoName decoding, card routing, and RTU1 scaling verified")
+    print("[ENGINEERING QC] PASS - Device Manager CT/PT, InfoName decoding, card routing, and RTU1 scaling verified")
     return True
 
 # ==============================================================================
@@ -18563,8 +18730,8 @@ def run_monitor_tv_qc():
         g2 = _monitor_tv_generator_payload(RTU_LIST[2]["ip"], "W2", "G2")
 
         # Central red-marked block: W1/W2.
-        expected_g1_wire = {"ct1": 6.10, "ct2": 50.10, "ct3": 13.10, "ct4": 116.10, "ct5": -84.70}
-        expected_g2_wire = {"ct1": 6.40, "ct2": 50.20, "ct3": 14.60, "ct4": 232.10, "ct5": -24.70}
+        expected_g1_wire = {"ct1": 6.10, "ct2": 50.10, "ct3": 13.10, "ct4": 0.11610, "ct5": -0.08470}
+        expected_g2_wire = {"ct1": 6.40, "ct2": 50.20, "ct3": 14.60, "ct4": 0.23210, "ct5": -0.02470}
         for key, wanted in expected_g1_wire.items():
             if not math.isclose(float(g1[key]), wanted, rel_tol=1e-9, abs_tol=1e-9):
                 failures.append(f"G1 {key} wire routing: {g1[key]} != {wanted}")
@@ -18574,14 +18741,14 @@ def run_monitor_tv_qc():
 
         # Remaining blocks must follow the Auxiliary/Voltage/Measure-Control map.
         gen_g1 = {"tk1":301.0, "tk2":701.0, "tk3":702.0, "tk4":703.0,
-                  "ll1":507.0, "ll2":510.0, "ll3":508.0, "ll4":509.0,
+                  "ll1":0.507, "ll2":0.510, "ll3":508.0, "ll4":509.0,
                   "ll5":0.87, "cm1":502.0, "cm2":503.0, "cm3":504.0,
-                  "cm4":505.0, "cm5":506.0, "rr1":304.0, "rr2":307.0,
+                  "cm4":505.0, "cm5":506.0, "rr1":304.0, "rr2":0.307,
                   "rr3":501.0}
         gen_g2 = {"tk1":401.0, "tk2":701.0, "tk3":702.0, "tk4":703.0,
-                  "ll1":607.0, "ll2":610.0, "ll3":608.0, "ll4":609.0,
+                  "ll1":0.607, "ll2":0.610, "ll3":608.0, "ll4":609.0,
                   "ll5":0.92, "cm1":602.0, "cm2":603.0, "cm3":604.0,
-                  "cm4":605.0, "cm5":606.0, "rr1":404.0, "rr2":407.0,
+                  "cm4":605.0, "cm5":606.0, "rr1":404.0, "rr2":0.407,
                   "rr3":601.0}
         for key, wanted in gen_g1.items():
             if not math.isclose(float(g1[key]), wanted, rel_tol=1e-9, abs_tol=1e-9):
