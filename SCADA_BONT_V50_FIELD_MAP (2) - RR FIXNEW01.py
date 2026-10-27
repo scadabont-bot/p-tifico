@@ -336,10 +336,9 @@ IOA_MAP_STANDARD = {
     16395: "Uab",   16396: "Ubc",   16397: "Uca",
     16398: "P",     16399: "Q",     16400: "cos",   16401: "P_tot",
     16411: "Uab_L", 16412: "Ubc_L", 16413: "Uca_L",
-    16417: "IE",    16418: "UE",    16419: "f",
 }
 
-APP_VERSION = "2.5.6"
+APP_VERSION = "2.5.7"
 APP_DIR = (
     os.path.dirname(os.path.abspath(sys.executable))
     if getattr(sys, "frozen", False)
@@ -17329,19 +17328,15 @@ try:
     MONITOR_TV_ACTIVE_ROLE = None
     MONITOR_TV_EDITOR_ROLES = frozenset({"Admin", "Developer"})
 
+    # Preserve the established G1/G2 MW presentation. Only reactive power
+    # fields use the kVar-to-Mvar display conversion here.
     MONITOR_TV_DISPLAY_DIVISORS = {
-        "ct4": 1000.0,
         "ct5": 1000.0,
-        "ll1": 1000.0,
         "ll2": 1000.0,
-        "rr2": 1000.0,
     }
     MONITOR_TV_DISPLAY_UNITS = {
-        "ct4": "MW",
         "ct5": "Mvar",
-        "ll1": "MW",
         "ll2": "Mvar",
-        "rr2": "MW",
     }
 
     def _monitor_tv_display_value(field_id, value):
@@ -17845,9 +17840,6 @@ try:
                     {}
                 )
             )
-            raw_bay_values = {bay: dict(values) for bay, values in RAW_BAY_VALUE_STORE.items()}
-            raw_ip_values = {ip: dict(values) for ip, values in RAW_STORE.items()}
-            engineered_bay_values = {bay: dict(values) for bay, values in BAY_VALUE_STORE.items()}
 
         now = time.localtime()
         prefix = str(wire_prefix or "").strip()
@@ -17885,47 +17877,28 @@ try:
             "time": time.strftime("%H:%M:%S", now),
         }
 
-        for html_id, (source, data_key) in field_map.items():
-            payload[html_id] = read_source(source, data_key)
-        # Apply the Monitor-TV binding to the RAW point. This makes Coefficient,
-        # CT/PT, Formula, and Add Offset saved in the editor affect the display
-        # instead of reusing the ListSetting-engineered value unchanged.
+        configured_fields = set()
         for html_id, item in configured_variables.items():
             if not isinstance(item, dict):
                 continue
-            bay = str(item.get("Bay_Name", "")).strip()
-            physical = str(item.get("Physical_Name", "")).strip()
-            if not bay or not physical:
-                continue
-            raw_physical = _runtime_physical_name(item) or physical
-            formula = _norm_formula(item.get("Formula"))
-            raw_value = None
-            if formula in {"DERIVED_P", "DERIVED_Q", "DERIVED_I"}:
-                raw_value = 0.0
-            else:
-                raw_value = raw_bay_values.get(bay, {}).get(raw_physical)
-                if raw_value is None:
-                    ip = str(item.get("Device_Addr", "")).strip()
-                    raw_value = raw_ip_values.get(ip, {}).get(raw_physical)
-                if raw_value is None and raw_physical != physical:
-                    raw_value = raw_bay_values.get(bay, {}).get(physical)
-                if raw_value is None:
-                    ip = str(item.get("Device_Addr", "")).strip()
-                    raw_value = raw_ip_values.get(ip, {}).get(physical)
-            if raw_value is None:
-                continue
+            field_id = str(html_id)
+            configured_fields.add(field_id)
+            binding = dict(item)
+            binding["Display_Field"] = field_id
             try:
-                calculated = _calculate_formula(
-                    float(raw_value), item, engineered_bay_values.get(bay, {}),
+                preview = _monitor_tv_preview(binding)
+                payload[field_id] = (
+                    float(preview["actual"])
+                    if preview.get("available") and preview.get("actual") is not None
+                    else 0.0
                 )
-                if math.isfinite(float(calculated)):
-                    payload[str(html_id)] = float(calculated)
-            except Exception:
-                continue
-        # Convert kW/kVar engineering values once, in the backend, so the JSON
-        # payload, mapping formula, modal preview, and HTML all use one value.
+            except (TypeError, ValueError, OverflowError):
+                payload[field_id] = 0.0
+        # Unconfigured fallback fields still need their normal display-unit
+        # conversion. Configured fields already came through the exact same
+        # preview calculation used by the modal.
         for html_id in MONITOR_TV_DISPLAY_DIVISORS:
-            if html_id in payload:
+            if html_id in payload and html_id not in configured_fields:
                 payload[html_id] = _monitor_tv_display_value(
                     html_id, payload[html_id]
                 )
@@ -18730,8 +18703,8 @@ def run_monitor_tv_qc():
         g2 = _monitor_tv_generator_payload(RTU_LIST[2]["ip"], "W2", "G2")
 
         # Central red-marked block: W1/W2.
-        expected_g1_wire = {"ct1": 6.10, "ct2": 50.10, "ct3": 13.10, "ct4": 0.11610, "ct5": -0.08470}
-        expected_g2_wire = {"ct1": 6.40, "ct2": 50.20, "ct3": 14.60, "ct4": 0.23210, "ct5": -0.02470}
+        expected_g1_wire = {"ct1": 6.10, "ct2": 50.10, "ct3": 13.10, "ct4": 116.10, "ct5": -0.08470}
+        expected_g2_wire = {"ct1": 6.40, "ct2": 50.20, "ct3": 14.60, "ct4": 232.10, "ct5": -0.02470}
         for key, wanted in expected_g1_wire.items():
             if not math.isclose(float(g1[key]), wanted, rel_tol=1e-9, abs_tol=1e-9):
                 failures.append(f"G1 {key} wire routing: {g1[key]} != {wanted}")
@@ -18741,14 +18714,14 @@ def run_monitor_tv_qc():
 
         # Remaining blocks must follow the Auxiliary/Voltage/Measure-Control map.
         gen_g1 = {"tk1":301.0, "tk2":701.0, "tk3":702.0, "tk4":703.0,
-                  "ll1":0.507, "ll2":0.510, "ll3":508.0, "ll4":509.0,
+                  "ll1":507.0, "ll2":0.510, "ll3":508.0, "ll4":509.0,
                   "ll5":0.87, "cm1":502.0, "cm2":503.0, "cm3":504.0,
-                  "cm4":505.0, "cm5":506.0, "rr1":304.0, "rr2":0.307,
+                  "cm4":505.0, "cm5":506.0, "rr1":304.0, "rr2":307.0,
                   "rr3":501.0}
         gen_g2 = {"tk1":401.0, "tk2":701.0, "tk3":702.0, "tk4":703.0,
-                  "ll1":0.607, "ll2":0.610, "ll3":608.0, "ll4":609.0,
+                  "ll1":607.0, "ll2":0.610, "ll3":608.0, "ll4":609.0,
                   "ll5":0.92, "cm1":602.0, "cm2":603.0, "cm3":604.0,
-                  "cm4":605.0, "cm5":606.0, "rr1":404.0, "rr2":0.407,
+                  "cm4":605.0, "cm5":606.0, "rr1":404.0, "rr2":407.0,
                   "rr3":601.0}
         for key, wanted in gen_g1.items():
             if not math.isclose(float(g1[key]), wanted, rel_tol=1e-9, abs_tol=1e-9):
