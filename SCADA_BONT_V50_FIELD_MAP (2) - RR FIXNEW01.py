@@ -3196,7 +3196,6 @@ def _load_setting_engine():
     by_ioa = {}
 
     for row in rows:
-        preliminary_formula = _norm_formula(row.get("Formula"))
         decoded = _decode_analog_info_name(row.get("Info_Name"))
         if decoded:
             preliminary_asdu = int(decoded["Parsed_ASDU"])
