@@ -7,6 +7,28 @@ import unittest
 from test_config_sync import scada
 
 
+class VoltageMonitoringMappingTests(unittest.TestCase):
+    def test_three_phase_addresses_match_authoritative_device_map(self):
+        expected = {
+            "Uab": (6402, 16394),
+            "Ubc": (6402, 16395),
+            "Uca": (6402, 16396),
+        }
+        actual = {
+            row["Physical_Name"]: (
+                row["ASDU_INT"],
+                row["IOA_INT"],
+            )
+            for row in scada.SETTING_REGISTRY
+            if (
+                row.get("Device_Addr") == "10.100.163.7"
+                and row.get("Bay_Name") == "Voltage Monitoring"
+                and row.get("Physical_Name") in expected
+            )
+        }
+        self.assertEqual(actual, expected)
+
+
 class CredentialSecurityTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
