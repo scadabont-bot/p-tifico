@@ -338,7 +338,7 @@ IOA_MAP_STANDARD = {
     16411: "Uab_L", 16412: "Ubc_L", 16413: "Uca_L",
 }
 
-APP_VERSION = "2.5.9"
+APP_VERSION = "2.6.0"
 APP_DIR = (
     os.path.dirname(os.path.abspath(sys.executable))
     if getattr(sys, "frozen", False)
@@ -807,9 +807,19 @@ CONFIG_SYNC_LOCK = threading.RLock()
 def _config_sync_name_allowed(name):
     """Return True only for operator-editable, portable configuration files."""
     name = os.path.basename(str(name or ""))
-    if name in ("UIRealtimeBindings.json", "MonitorTVConfig.json"):
+    if name in (
+        "UIRealtimeBindings.json",
+        "MonitorTVConfig.json",
+        "CBZ8000AppData.json",
+    ):
         return True
-    return bool(re.fullmatch(r"(?:ListSetting|StatusSetting) .+\.csv", name, re.IGNORECASE))
+    return bool(
+        re.fullmatch(
+            r"(?:ListSetting|StatusSetting) .+\.csv",
+            name,
+            re.IGNORECASE,
+        )
+    )
 
 
 def _config_sync_files():
@@ -916,7 +926,14 @@ def _config_sync_version(entry):
 
 def _reload_synced_configuration(changed_names):
     """Reload registries immediately, then refresh Tk widgets on its UI thread."""
-    if any(name.lower().startswith("listsetting ") for name in changed_names):
+    parameter_settings_changed = any(
+        name.casefold() == "cbz8000appdata.json"
+        for name in changed_names
+    )
+    if (
+        parameter_settings_changed
+        or any(name.lower().startswith("listsetting ") for name in changed_names)
+    ):
         _load_setting_engine()
     if any(name.lower().startswith("statussetting ") for name in changed_names):
         _load_status_settings()
@@ -927,6 +944,10 @@ def _reload_synced_configuration(changed_names):
 
     def refresh_ui():
         try:
+            if parameter_settings_changed:
+                app.cbz_config = cbz_device_data.load_config(
+                    CBZ8000_DEVICE_DATA_PATH
+                )
             app.ui_bindings = app._load_ui_bindings()
             app._synchronize_ui_bindings_from_listsettings(force=True)
         except Exception as exc:
@@ -970,7 +991,7 @@ def _apply_config_sync_snapshot(payload):
             except Exception:
                 continue
             total_bytes += len(raw)
-            if len(raw) > 2 * 1024 * 1024 or total_bytes > 32 * 1024 * 1024:
+            if len(raw) > 8 * 1024 * 1024 or total_bytes > 32 * 1024 * 1024:
                 raise ValueError("configuration sync payload is too large")
             digest = _config_sync_sha256(raw)
             if digest != str(remote.get("sha256", "")):
@@ -2802,54 +2823,97 @@ def _decode_analog_info_name(info_name):
         return {}
 
 def _normalize_device_manager_point_name(value):
-    """Normalize Device Manager labels only for unambiguous address fallback."""
+    """Normalize UI aliases for unambiguous Parameter Setting matching."""
     text = _norm_text(value).casefold()
     text = re.sub(r"^\d+#\s*generator\s*", "", text)
+    text = re.sub(r"^w[12][\s_-]*", "", text)
     return re.sub(r"[^a-z0-9]+", "", text)
 
 
 def _load_device_manager_analog_metadata():
-    """Index authoritative analog CT/PT values from Device Manager."""
+    """Index analog engineering data from the Parameter Setting database."""
     by_info = {}
     address_candidates = {}
+    point_candidates = {}
     try:
         with open(CBZ8000_DEVICE_DATA_PATH, "r", encoding="utf-8-sig") as handle:
             payload = json.load(handle)
         devices = payload.get("device_manager", {}).get("devices", [])
     except (OSError, ValueError, TypeError):
-        return by_info, {}
+        return by_info, {}, {}
 
     for device in devices if isinstance(devices, list) else []:
         bay_name = _norm_text(device.get("bay", {}).get("Jiange_name"))
         records = device.get("sections", {}).get("analog", [])
         for record in records if isinstance(records, list) else []:
             info_name = _norm_text(record.get("Infoname")).upper()
+            physical_name = _norm_text(record.get("Physicalname"))
             decoded = _decode_analog_info_name(info_name)
-            if not decoded:
-                continue
+            device_ip = ""
+            if decoded:
+                device_octet = int(decoded["Device_Hex"], 16)
+                if 0 < device_octet < 255:
+                    device_ip = f"10.100.163.{device_octet}"
             metadata = {
-                "Info_Name": info_name,
+                "Device_Addr": device_ip,
                 "Bay_Name": bay_name,
-                "Physical_Name": _norm_text(record.get("Physicalname")),
+                "Physical_Name": physical_name,
+                "Info_Name": info_name,
+                "Info_Index": record.get("Info_index"),
+                "Type": record.get("Type"),
+                "ASDU": decoded.get("Parsed_ASDU", ""),
+                "IOA": decoded.get("Parsed_IOA", ""),
+                "Coefficient": record.get("Cof"),
+                "Tolerance": record.get("tolerance"),
+                "Formula": record.get("Expression"),
                 "CTPT": record.get("CTPT"),
+                "UseFlag": record.get("UseFlag"),
+                "Protocol_Valid": bool(decoded),
             }
-            by_info[info_name] = metadata
-            address = (
-                int(decoded["Parsed_ASDU"]),
-                int(decoded["Parsed_IOA"]),
+            if info_name:
+                by_info[info_name] = metadata
+            point_key = (
+                bay_name.casefold(),
+                _normalize_device_manager_point_name(physical_name),
             )
-            address_candidates.setdefault(address, []).append(metadata)
+            point_candidates.setdefault(point_key, []).append(metadata)
+            if decoded:
+                address = (
+                    int(decoded["Parsed_ASDU"]),
+                    int(decoded["Parsed_IOA"]),
+                )
+                address_candidates.setdefault(address, []).append(metadata)
 
     by_address = {
         address: candidates[0]
         for address, candidates in address_candidates.items()
         if len(candidates) == 1
     }
-    return by_info, by_address
+    by_point = {
+        point: candidates[0]
+        for point, candidates in point_candidates.items()
+        if point[0] and point[1] and len(candidates) == 1
+    }
+    return by_info, by_address, by_point
 
 
-def _device_manager_metadata_for_setting(row, asdu, ioa, by_info, by_address):
-    """Resolve one ListSetting row to its exact Device Manager analog record."""
+def _device_manager_metadata_for_setting(
+    row,
+    asdu,
+    ioa,
+    by_info,
+    by_address,
+    by_point,
+):
+    """Resolve a ListSetting row to its current Parameter Setting record."""
+    point_key = (
+        _norm_text(row.get("Bay_Name")).casefold(),
+        _normalize_device_manager_point_name(row.get("Physical_Name")),
+    )
+    metadata = by_point.get(point_key)
+    if metadata is not None:
+        return metadata
+
     info_name = _norm_text(row.get("Info_Name")).upper()
     metadata = by_info.get(info_name)
     if metadata is not None or ioa is None:
@@ -2863,6 +2927,49 @@ def _device_manager_metadata_for_setting(row, asdu, ioa, by_info, by_address):
     ):
         return None
     return metadata
+
+
+def _apply_parameter_setting_metadata(row, metadata):
+    """Overlay current Parameter Setting fields on one runtime mapping row."""
+    item = dict(row)
+    item["Engineering_Source"] = "ListSetting"
+    item["CTPT_Source"] = "ListSetting"
+    if metadata is None:
+        return item
+
+    item["Engineering_Source"] = "Parameter Setting"
+    device_ip = _norm_text(metadata.get("Device_Addr"))
+    if device_ip:
+        item["Device_Addr"] = device_ip
+    item["Parameter_Bay_Name"] = _norm_text(metadata.get("Bay_Name"))
+    item["Parameter_Physical_Name"] = _norm_text(
+        metadata.get("Physical_Name")
+    )
+    item["Info_Name"] = _norm_text(metadata.get("Info_Name"))
+    for field in ("Info_Index", "Type"):
+        value = metadata.get(field)
+        if value is not None and _norm_text(value):
+            item[field] = value
+
+    # A malformed or cleared Infoname must not leave a stale IEC address from
+    # ListSetting active. The row will be rejected by the normal protocol
+    # validation below until Parameter Setting contains a valid address again.
+    item["ASDU"] = metadata.get("ASDU", "")
+    item["IOA"] = metadata.get("IOA", "")
+
+    for field in ("Coefficient", "Tolerance"):
+        candidate = _to_float(metadata.get(field), float("nan"))
+        if math.isfinite(candidate):
+            item[field] = candidate
+    ctpt = _to_float(metadata.get("CTPT"), float("nan"))
+    if math.isfinite(ctpt):
+        item["CTPT"] = ctpt
+        item["CTPT_Source"] = "Parameter Setting"
+    expression = _norm_text(metadata.get("Formula"))
+    if expression:
+        item["Formula"] = expression
+    item["Parameter_UseFlag"] = metadata.get("UseFlag")
+    return item
 
 
 
@@ -3034,8 +3141,9 @@ def _status_binding_for_bay(bay_name, preferred_physical_names):
         "Reverse": selected.get("Reverse", ""),
     }
 
-# Runtime must use only the existing, operator-approved ListSetting CSV files.
-# Missing files are reported by validation; they are never auto-created here.
+# ListSetting defines the operator-approved Run/TV point set and its fallback
+# formulas. Parameter Setting overlays the current point identity and
+# engineering values; neither source is auto-created by the runtime.
 
 
 def _load_all_settings():
@@ -3077,27 +3185,66 @@ def _load_setting_engine():
     """Build runtime IOA/ASDU registry and dynamically rebuild the 14-card map."""
     global SETTING_REGISTRY, SETTING_BY_IP_TAG, SETTING_IOA_BY_IP, CARD_POINT_MAP, CARD_BAY_BY_INDEX
     rows = _load_all_settings()
-    device_manager_by_info, device_manager_by_address = (
-        _load_device_manager_analog_metadata()
-    )
+    (
+        device_manager_by_info,
+        device_manager_by_address,
+        device_manager_by_point,
+    ) = _load_device_manager_analog_metadata()
     registry = []
     tag_candidates = {}
     by_tag = {}
     by_ioa = {}
 
     for row in rows:
-        ip = _norm_text(row.get("Device_Addr"))
-        physical = _norm_text(row.get("Physical_Name"))
-        if not ip or not physical:
-            continue
-        formula = _norm_formula(row.get("Formula"))
+        preliminary_formula = _norm_formula(row.get("Formula"))
         decoded = _decode_analog_info_name(row.get("Info_Name"))
         if decoded:
-            asdu = int(decoded["Parsed_ASDU"])
-            ioa = int(decoded["Parsed_IOA"])
+            preliminary_asdu = int(decoded["Parsed_ASDU"])
+            preliminary_ioa = int(decoded["Parsed_IOA"])
         else:
             try:
                 ioa_text = _norm_text(row.get("IOA"))
+                if not ioa_text:
+                    preliminary_ioa = None
+                else:
+                    preliminary_ioa = int(float(ioa_text))
+            except Exception:
+                preliminary_ioa = None
+            try:
+                preliminary_asdu = int(
+                    float(_norm_text(row.get("ASDU")) or "1")
+                )
+            except Exception:
+                preliminary_asdu = 1
+
+        metadata = _device_manager_metadata_for_setting(
+            row,
+            preliminary_asdu,
+            preliminary_ioa,
+            device_manager_by_info,
+            device_manager_by_address,
+            device_manager_by_point,
+        )
+        item = _apply_parameter_setting_metadata(row, metadata)
+        if (
+            item.get("Engineering_Source") == "Parameter Setting"
+            and item.get("Parameter_UseFlag") is False
+        ):
+            continue
+        ip = _norm_text(item.get("Device_Addr"))
+        physical = _norm_text(item.get("Physical_Name"))
+        if not ip or not physical:
+            continue
+
+        formula = _norm_formula(item.get("Formula"))
+        decoded = _decode_analog_info_name(item.get("Info_Name"))
+        if decoded:
+            asdu = int(decoded["Parsed_ASDU"])
+            ioa = int(decoded["Parsed_IOA"])
+            item["Info_Name"] = decoded["Info_Name"]
+        else:
+            try:
+                ioa_text = _norm_text(item.get("IOA"))
                 if not ioa_text:
                     # Derived values are valid setting rows but have no protocol IOA.
                     if formula in ("DERIVED_P", "DERIVED_Q", "DERIVED_I"):
@@ -3108,39 +3255,21 @@ def _load_setting_engine():
                     ioa = int(float(ioa_text))
             except Exception:
                 continue
-
             try:
-                asdu = int(float(_norm_text(row.get("ASDU")) or "1"))
+                asdu = int(float(_norm_text(item.get("ASDU")) or "1"))
             except Exception:
                 asdu = 1
 
-        item = dict(row)
         item["Device_Addr"] = ip
         item["Physical_Name"] = physical
-        if decoded:
-            item["Info_Name"] = decoded["Info_Name"]
-        metadata = _device_manager_metadata_for_setting(
-            item,
-            asdu,
-            ioa,
-            device_manager_by_info,
-            device_manager_by_address,
-        )
-        ctpt_value = row.get("CTPT")
-        ctpt_source = "ListSetting"
-        if metadata is not None:
-            candidate = _to_float(metadata.get("CTPT"), float("nan"))
-            if math.isfinite(candidate):
-                ctpt_value = candidate
-                ctpt_source = "Device Manager"
-        item["CTPT"] = ctpt_value
-        item["CTPT_Source"] = ctpt_source
+        item["ASDU"] = asdu
+        item["IOA"] = "" if ioa is None else ioa
         item["IOA_INT"] = ioa
         item["ASDU_INT"] = asdu
-        item["Coefficient_NUM"] = _to_float(row.get("Coefficient"), 1.0)
-        item["CTPT_NUM"] = _to_float(ctpt_value, 1.0)
-        item["Tolerance_NUM"] = _to_float(row.get("Tolerance"), 0.0)
-        item["Add_Offset_NUM"] = _to_float(row.get("Add_Offset"), 0.0)
+        item["Coefficient_NUM"] = _to_float(item.get("Coefficient"), 1.0)
+        item["CTPT_NUM"] = _to_float(item.get("CTPT"), 1.0)
+        item["Tolerance_NUM"] = _to_float(item.get("Tolerance"), 0.0)
+        item["Add_Offset_NUM"] = _to_float(item.get("Add_Offset"), 0.0)
         registry.append(item)
         # Physical tag lookup is authoritative for engineering/UI calculations.
         tag_candidates.setdefault((ip, physical.strip().lower()), []).append(item)
@@ -3420,15 +3549,15 @@ def _safe_formula_eval(expression, variables):
 
 
 def _calculate_formula(raw, setting, values):
-    """Calculate an engineering value exclusively from the CSV setting."""
+    """Calculate an engineering value from the current merged setting."""
     raw = float(raw)
     coef = _to_float(setting.get("Coefficient"), 1.0)
     ctpt = _to_float(setting.get("CTPT"), 1.0)
     add_offset = _to_float(setting.get("Add_Offset"), 0.0)
     formula = _norm_formula(setting.get("Formula"))
 
-    # Legacy names remain supported, but their meaning is now explicit and
-    # configurable through the CSV instead of hard-coded by IP/tag.
+    # Legacy names remain supported, but their meaning stays explicit in the
+    # merged Parameter Setting/ListSetting engineering configuration.
     if formula in ("", "DIRECT", "RAW"):
         return raw
     if formula in ("MULTIPLY", "RAW*COEFFICIENT"):
@@ -5347,8 +5476,10 @@ class SCADAMainUI:
         tk.Label(
             header,
             text=(
-                "Nilai aktual mengikuti tampilan Run Monitor. RAW dan parameter "
-                "engineering dibaca langsung dari ListSetting CSV aktif."
+                "Nilai aktual mengikuti tampilan Run Monitor. Alamat IEC, "
+                "coefficient, tolerance, formula kustom, dan CT/PT mengikuti "
+                "Parameter Setting; Formula/Offset/Unit yang tidak tersedia "
+                "tetap menggunakan ListSetting aktif."
             ),
             bg="#000080",
             fg="#e8e8ff",
@@ -15632,20 +15763,24 @@ class SCADAMainUI:
             return False
 
     def _synchronize_ui_bindings_from_listsettings(self, force=False):
-        """Refresh every SCADA/TV reference from authoritative runtime metadata.
+        """Refresh SCADA/TV references from current engineering metadata.
 
-        The screen/page binding remains the user's choice. IEC addresses and
-        formulas come from ListSetting; CT/PT comes from Device Manager.
+        The screen/page binding remains the user's choice. Parameter Setting
+        supplies the current point identity and engineering values; ListSetting
+        remains the fallback for formula, offset, unit, and derived points.
         """
         with SETTING_LOCK:
             rows = [dict(row) for row in SETTING_REGISTRY]
         with STATUS_LOCK:
             status_rows = [dict(row) for row in STATUS_REGISTRY]
+        signature_fields = (
+            "Bay_Name", "Physical_Name", "Device_Addr", "Info_Name",
+            "Info_Index", "ASDU", "IOA", "Coefficient", "CTPT",
+            "CTPT_Source", "Tolerance", "Formula", "Add_Offset", "Unit",
+            "Engineering_Source",
+        )
         signature = tuple(sorted(
-            (str(row.get("Bay_Name", "")), str(row.get("Physical_Name", "")),
-             str(row.get("Device_Addr", "")), str(row.get("ASDU", "")),
-             str(row.get("IOA", "")), str(row.get("CTPT", "")),
-             str(row.get("CTPT_Source", "")))
+            tuple(str(row.get(field, "")) for field in signature_fields)
             for row in rows
         ))
         status_signature = tuple(sorted(
@@ -15662,8 +15797,12 @@ class SCADAMainUI:
             for row in rows
         }
         changed = False
-        engineering = ("Device_Addr", "Bay_Name", "Physical_Name", "Info_Name", "Info_Index", "ASDU", "IOA",
-                       "Coefficient", "CTPT", "CTPT_Source", "Formula", "Add_Offset", "Unit", "Decimals")
+        engineering = (
+            "Device_Addr", "Bay_Name", "Physical_Name", "Info_Name",
+            "Info_Index", "Type", "ASDU", "IOA", "Coefficient", "CTPT",
+            "CTPT_Source", "Tolerance", "Formula", "Add_Offset", "Unit",
+            "Decimals", "Engineering_Source",
+        )
         # Rectangle status bindings come from the separate StatusSetting CSV
         # and must never be overwritten by analog ListSetting rows.
         for kind in ("variables",):
@@ -15848,7 +15987,7 @@ class SCADAMainUI:
         return {}
 
     def _setting_for_run_binding(self, binding, registry=None):
-        """Resolve one Run binding to its exact active ListSetting row."""
+        """Resolve one Run binding to its current engineering row."""
         if not binding:
             return None
         if registry is None:
@@ -15860,6 +15999,19 @@ class SCADAMainUI:
         physical = _norm_text(binding.get("Physical_Name"))
         asdu_text = _norm_text(binding.get("ASDU"))
         ioa_text = _norm_text(binding.get("IOA"))
+
+        # Bay + physical point is the stable operator selection. Resolve it
+        # before stale saved IEC fields so an address change in Parameter
+        # Setting updates the selected Run mapping instead of orphaning it.
+        if bay and physical:
+            point_matches = [
+                row for row in registry
+                if _norm_text(row.get("Bay_Name")) == bay
+                and _norm_text(row.get("Physical_Name")) == physical
+            ]
+            if len(point_matches) == 1:
+                return point_matches[0]
+
         try:
             asdu = int(float(asdu_text)) if asdu_text else None
         except (TypeError, ValueError):
@@ -15884,7 +16036,7 @@ class SCADAMainUI:
         return None
 
     def _complete_run_binding(self, request, registry=None):
-        """Attach all engineering fields from ListSetting to a Run point request."""
+        """Attach current Parameter Setting/ListSetting data to a Run point."""
         result = dict(request or {})
         setting = self._setting_for_run_binding(result, registry)
         if setting is None:
@@ -15893,13 +16045,14 @@ class SCADAMainUI:
             "Device_Addr", "Bay_Name", "Physical_Name", "Info_Name",
             "Info_Index", "Type", "ASDU", "IOA", "Coefficient", "CTPT",
             "CTPT_Source", "Tolerance", "Add_Offset", "Formula", "Unit",
+            "Engineering_Source",
         )
         for name in fields:
             result[name] = setting.get(name, result.get(name, ""))
         return result
 
     def _default_run_binding(self, key):
-        """Describe the exact ListSetting point currently feeding any Run value."""
+        """Describe the current Parameter Setting/ListSetting Run point."""
         return self._complete_run_binding(
             self._run_monitor_point_request(key),
         )
@@ -15974,9 +16127,6 @@ class SCADAMainUI:
 
     def _run_monitor_mapping_value(self, key, binding, setting):
         """Read the same engineered value used by the corresponding Run widget."""
-        override = self._resolve_ui_binding("variables", f"run:{key}")
-        if override is not None:
-            return override
 
         ip = _norm_text(binding.get("Device_Addr"))
         bay = _norm_text(binding.get("Bay_Name"))
@@ -16148,10 +16298,18 @@ class SCADAMainUI:
                     actual_text = "--"
 
             ctpt_source = _norm_text(binding.get("CTPT_Source")) or "ListSetting"
-            source = (
-                f"ListSetting {bay}.csv ({mode}); CT/PT: {ctpt_source}"
-                if bay else "Mapping tidak ditemukan"
+            engineering_source = (
+                _norm_text(binding.get("Engineering_Source")) or "ListSetting"
             )
+            if bay and engineering_source == "Parameter Setting":
+                source = (
+                    f"Parameter Setting ({mode}); fallback ListSetting "
+                    f"{bay}.csv; CT/PT: {ctpt_source}"
+                )
+            elif bay:
+                source = f"ListSetting {bay}.csv ({mode}); CT/PT: {ctpt_source}"
+            else:
+                source = "Mapping tidak ditemukan"
             rows.append({
                 "key": spec["key"],
                 "group": spec["group"],
@@ -18621,14 +18779,20 @@ def run_engineering_qc():
     if (decoded_example.get("Parsed_ASDU"), decoded_example.get("Parsed_IOA")) != (2561, 16392):
         failures.append("Analog InfoName decoder: 05YC0A01004008 must resolve to ASDU 2561 / IOA 16392")
     if device_manager_current is None:
-        failures.append("Device Manager CT/PT: 11# Circulating Water Pump Ia mapping missing")
+        failures.append(
+            "Parameter Setting CT/PT: 11# Circulating Water Pump Ia mapping missing"
+        )
     else:
         if (
-            device_manager_current.get("CTPT_Source") != "Device Manager"
-            or not math.isclose(_to_float(device_manager_current.get("CTPT"), 0.0), 15.0)
+            device_manager_current.get("CTPT_Source") != "Parameter Setting"
+            or not math.isclose(
+                _to_float(device_manager_current.get("CTPT"), 0.0),
+                15.0,
+            )
         ):
             failures.append(
-                "Device Manager CT/PT: 11# Circulating Water Pump Ia must use CT/PT 15"
+                "Parameter Setting CT/PT: 11# Circulating Water Pump Ia "
+                "must use CT/PT 15"
             )
         elif not math.isclose(
             _calculate_formula(100.0, device_manager_current, {}),
@@ -18637,8 +18801,89 @@ def run_engineering_qc():
             abs_tol=1e-12,
         ):
             failures.append(
-                "Device Manager CT/PT: RAW 100 × 0.000183 × 15 must equal 0.2745"
+                "Parameter Setting CT/PT: RAW 100 × 0.000183 × 15 "
+                "must equal 0.2745"
             )
+    stale_mapping = {
+        "Device_Addr": "10.100.163.1",
+        "Bay_Name": "Test Bay",
+        "Physical_Name": "Ia",
+        "Info_Name": "01YC0101004001",
+        "Info_Index": 1,
+        "ASDU": 257,
+        "IOA": 16385,
+        "Coefficient": 1.0,
+        "Tolerance": 0.0,
+        "Formula": "MULTIPLY_CTPT",
+        "CTPT": 1.0,
+    }
+    changed_parameter = {
+        "Device_Addr": "10.100.163.9",
+        "Bay_Name": "Test Bay",
+        "Physical_Name": "Ia",
+        "Info_Name": "09YC0201004002",
+        "Info_Index": 2,
+        "Type": 1,
+        "ASDU": 513,
+        "IOA": 16386,
+        "Coefficient": 0.25,
+        "Tolerance": 0.1,
+        "Formula": "RAW*COEFFICIENT*CTPT",
+        "CTPT": 40.0,
+        "UseFlag": True,
+        "Protocol_Valid": True,
+    }
+    resolved_parameter = _device_manager_metadata_for_setting(
+        stale_mapping,
+        257,
+        16385,
+        {},
+        {},
+        {("test bay", "ia"): changed_parameter},
+    )
+    refreshed_mapping = _apply_parameter_setting_metadata(
+        stale_mapping,
+        resolved_parameter,
+    )
+    expected_refresh = (
+        "10.100.163.9",
+        "09YC0201004002",
+        513,
+        16386,
+        0.25,
+        40.0,
+    )
+    actual_refresh = (
+        refreshed_mapping.get("Device_Addr"),
+        refreshed_mapping.get("Info_Name"),
+        refreshed_mapping.get("ASDU"),
+        refreshed_mapping.get("IOA"),
+        refreshed_mapping.get("Coefficient"),
+        refreshed_mapping.get("CTPT"),
+    )
+    if actual_refresh != expected_refresh or not math.isclose(
+        _calculate_formula(2.0, refreshed_mapping, {}),
+        20.0,
+        rel_tol=1e-12,
+        abs_tol=1e-12,
+    ):
+        failures.append(
+            "Parameter Setting refresh: IEC address and engineering fields "
+            "must replace stale Run mapping data"
+        )
+    invalid_parameter = dict(changed_parameter, Info_Name="", ASDU="", IOA="")
+    invalid_mapping = _apply_parameter_setting_metadata(
+        stale_mapping,
+        invalid_parameter,
+    )
+    if (
+        invalid_mapping.get("Info_Name") != ""
+        or invalid_mapping.get("ASDU") != ""
+        or invalid_mapping.get("IOA") != ""
+    ):
+        failures.append(
+            "Parameter Setting refresh: invalid Infoname must clear stale IEC data"
+        )
 
     expected_card_asdus = [
         2561, 2817, 3073, 3329, 3585, 3841, 4097,
@@ -18673,7 +18918,7 @@ def run_engineering_qc():
         for failure in failures:
             print(" -", failure)
         return False
-    print("[ENGINEERING QC] PASS - Device Manager CT/PT, InfoName decoding, card routing, and RTU1 scaling verified")
+    print("[ENGINEERING QC] PASS - Parameter Setting refresh, InfoName decoding, card routing, and RTU1 scaling verified")
     return True
 
 

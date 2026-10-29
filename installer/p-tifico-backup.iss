@@ -1,5 +1,5 @@
 #define MyAppName "p-tifico-backup"
-#define MyAppVersion "2.5.9"
+#define MyAppVersion "2.6.0"
 #define MyAppPublisher "TIFICO"
 #define MyAppExeName "p-tifico-backup.exe"
 
