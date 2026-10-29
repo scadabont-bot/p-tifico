@@ -2,7 +2,9 @@ name: Build Windows installer
 
 on:
   workflow_dispatch:
-
+  push:
+    branches: [main, master]
+  pull_request:
 permissions:
   contents: read
 
@@ -20,6 +22,26 @@ jobs:
 
       - name: Install Python build dependencies
         run: python -m pip install "pyinstaller==6.16.0" "pillow==12.3.0"
+
+      - name: Validate source and behavioral tests
+        shell: pwsh
+        run: |
+          $source = "SCADA_BONT_V50_FIELD_MAP (2) - RR FIXNEW01.py"
+          python -m py_compile $source
+          if ($LASTEXITCODE -ne 0) {
+            throw "Python compilation failed."
+          }
+          python -m unittest discover -v
+          if ($LASTEXITCODE -ne 0) {
+            throw "Behavioral tests failed."
+          }
+          $env:SCADA_SELF_TEST = "1"
+          python $source
+          $selfTestExit = $LASTEXITCODE
+          Remove-Item Env:\SCADA_SELF_TEST
+          if ($selfTestExit -ne 0) {
+            throw "Source self-test exited with code $selfTestExit."
+          }
 
       - name: Install Inno Setup
         shell: pwsh
@@ -44,95 +66,114 @@ jobs:
             "/DMyOutputBaseFilename=p-tifico-backup-PC2-Setup" `
             "installer\p-tifico-backup.iss"
 
-      - name: Install and verify packaged application
+      - name: Install and verify both packaged applications
         shell: pwsh
         run: |
-          $installer = Resolve-Path "dist\p-tifico-backup-PC2-Setup.exe"
-          $installDir = Join-Path $env:RUNNER_TEMP "p-tifico-backup-installed"
-          $install = Start-Process `
-            -FilePath $installer `
-            -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$installDir" `
-            -PassThru `
-            -Wait
-          if ($install.ExitCode -ne 0) {
-            throw "Installer exited with code $($install.ExitCode)."
-          }
-
-          $requiredFiles = @(
-            "p-tifico-backup.exe",
-            "SCADA_BONT.ico",
-            "RUNMONITORING FINAL.png",
-            "G1MONITOR.jpg.png",
-            "G2MONITOR.jpg.png",
-            "SYSTEMCONFIG_DARK.png",
-            "AUXILIARY_MATCHED.png",
-            "MANUAL_MAPPING_G1_G2.png",
-            "MANUAL_COMMUNICATION_SETTINGS.png",
-            "MANUAL_PROCESS_TREND.png",
-            "MANUAL_BACKUP_EXPLORER.png",
-            "MANUAL_MONITOR_TV_BREAKER.png",
-            "MONITOR V55.html",
-            "CommunicationConfig.json",
-            "MQTTConfig.json",
-            "UIRealtimeBindings.json",
-            "MonitorTVConfig.json",
-            "CBZ8000AppData.json"
+          $installerNames = @(
+            "p-tifico-backup-Setup.exe",
+            "p-tifico-backup-PC2-Setup.exe"
           )
-          foreach ($file in $requiredFiles) {
-            if (-not (Test-Path (Join-Path $installDir $file))) {
-              throw "Missing installed file: $file"
+          foreach ($installerName in $installerNames) {
+            $installer = Resolve-Path (Join-Path "dist" $installerName)
+            $installDir = Join-Path `
+              $env:RUNNER_TEMP `
+              ([IO.Path]::GetFileNameWithoutExtension($installerName))
+            $install = Start-Process `
+              -FilePath $installer `
+              -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/DIR=$installDir" `
+              -PassThru `
+              -Wait
+            if ($install.ExitCode -ne 0) {
+              throw "$installerName exited with code $($install.ExitCode)."
             }
-          }
 
-          $communication = Get-Content `
-            (Join-Path $installDir "CommunicationConfig.json") `
-            -Raw | ConvertFrom-Json
-          if (
-            $communication.mode -ne "master_slave" -or
-            $communication.master_ip -ne "10.100.163.150" -or
-            $communication.peer_ip -ne "10.100.163.149"
-          ) {
-            throw "PC2 installer communication role is not configured for PC1 .150 / PC2 .149."
-          }
+            $requiredFiles = @(
+              "p-tifico-backup.exe",
+              "SCADA_BONT.ico",
+              "RUNMONITORING FINAL.png",
+              "G1MONITOR.jpg.png",
+              "G2MONITOR.jpg.png",
+              "SYSTEMCONFIG_DARK.png",
+              "AUXILIARY_MATCHED.png",
+              "MANUAL_MAPPING_G1_G2.png",
+              "MANUAL_COMMUNICATION_SETTINGS.png",
+              "MANUAL_PROCESS_TREND.png",
+              "MANUAL_BACKUP_EXPLORER.png",
+              "MANUAL_MONITOR_TV_BREAKER.png",
+              "MONITOR V55.html",
+              "CommunicationConfig.json",
+              "MQTTConfig.json",
+              "UIRealtimeBindings.json",
+              "MonitorTVConfig.json",
+              "CBZ8000AppData.json"
+            )
+            foreach ($file in $requiredFiles) {
+              if (-not (Test-Path (Join-Path $installDir $file))) {
+                throw "$installerName missing installed file: $file"
+              }
+            }
 
-          $listSettings = @(Get-ChildItem $installDir -Filter "ListSetting *.csv")
-          $statusSettings = @(Get-ChildItem $installDir -Filter "StatusSetting *.csv")
-          if ($listSettings.Count -lt 24 -or $statusSettings.Count -lt 24) {
-            throw "Incomplete settings: $($listSettings.Count) ListSetting and $($statusSettings.Count) StatusSetting files."
-          }
+            $communication = Get-Content `
+              (Join-Path $installDir "CommunicationConfig.json") `
+              -Raw | ConvertFrom-Json
+            if (
+              $communication.mode -ne "master_slave" -or
+              $communication.master_ip -ne "10.100.163.150" -or
+              $communication.peer_ip -ne "10.100.163.149" -or
+              [string]::IsNullOrWhiteSpace($communication.relay_token) -or
+              $communication.relay_token.Length -lt 32 -or
+              $communication.relay_token -eq "SCADA-BONT-PARALLEL-149-150"
+            ) {
+              throw "$installerName has an invalid PC1/PC2 communication configuration."
+            }
 
-          $env:SCADA_SELF_TEST = "1"
-          $selfTest = Start-Process `
-            -FilePath (Join-Path $installDir "p-tifico-backup.exe") `
-            -WorkingDirectory $installDir `
-            -PassThru `
-            -Wait
-          Remove-Item Env:\SCADA_SELF_TEST
-          if ($selfTest.ExitCode -ne 0) {
-            throw "Packaged self-test exited with code $($selfTest.ExitCode)."
-          }
+            $listSettings = @(
+              Get-ChildItem $installDir -Filter "ListSetting *.csv"
+            )
+            $statusSettings = @(
+              Get-ChildItem $installDir -Filter "StatusSetting *.csv"
+            )
+            if ($listSettings.Count -lt 24 -or $statusSettings.Count -lt 24) {
+              throw (
+                "$installerName has incomplete settings: " +
+                "$($listSettings.Count) ListSetting and " +
+                "$($statusSettings.Count) StatusSetting files."
+              )
+            }
 
-          $application = Start-Process `
-            -FilePath (Join-Path $installDir "p-tifico-backup.exe") `
-            -WorkingDirectory $installDir `
-            -PassThru
-          Start-Sleep -Seconds 10
-          if ($application.HasExited) {
-            throw "Installed application exited during startup with code $($application.ExitCode)."
-          }
-          Stop-Process -Id $application.Id -Force
+            $env:SCADA_SELF_TEST = "1"
+            $selfTest = Start-Process `
+              -FilePath (Join-Path $installDir "p-tifico-backup.exe") `
+              -WorkingDirectory $installDir `
+              -PassThru `
+              -Wait
+            Remove-Item Env:\SCADA_SELF_TEST
+            if ($selfTest.ExitCode -ne 0) {
+              throw "$installerName self-test exited with code $($selfTest.ExitCode)."
+            }
 
-          $uninstaller = Join-Path $installDir "unins000.exe"
-          if (-not (Test-Path $uninstaller)) {
-            throw "Installer did not create an uninstaller."
-          }
-          $uninstall = Start-Process `
-            -FilePath $uninstaller `
-            -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" `
-            -PassThru `
-            -Wait
-          if ($uninstall.ExitCode -ne 0) {
-            throw "Uninstaller exited with code $($uninstall.ExitCode)."
+            $application = Start-Process `
+              -FilePath (Join-Path $installDir "p-tifico-backup.exe") `
+              -WorkingDirectory $installDir `
+              -PassThru
+            Start-Sleep -Seconds 10
+            if ($application.HasExited) {
+              throw "$installerName application exited during startup with code $($application.ExitCode)."
+            }
+            Stop-Process -Id $application.Id -Force
+
+            $uninstaller = Join-Path $installDir "unins000.exe"
+            if (-not (Test-Path $uninstaller)) {
+              throw "$installerName did not create an uninstaller."
+            }
+            $uninstall = Start-Process `
+              -FilePath $uninstaller `
+              -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART" `
+              -PassThru `
+              -Wait
+            if ($uninstall.ExitCode -ne 0) {
+              throw "$installerName uninstaller exited with code $($uninstall.ExitCode)."
+            }
           }
 
       - name: Create checksums

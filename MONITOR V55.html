@@ -3002,29 +3002,25 @@ window.setJunctionState = function(id, active, activeColor, inactiveColor, flowM
     const el=document.querySelector("." + id);
     if(!el) return;
 
-    const stateClass=active ? "j-on" : "j-off";
-    const flowClass=active && (flowMode==="flow" || flowMode==="blink")
+    const known=typeof active==="boolean";
+    const stateClass=!known ? "j-unknown" : (active ? "j-on" : "j-off");
+    const flowClass=active===true && (flowMode==="flow" || flowMode==="blink")
         ? "j-" + flowMode
         : "";
     const visualKey=stateClass + "|" + flowClass;
 
-    /*
-       Telemetry arrives every second. Re-applying the same classes used to
-       restart CSS animations and force a synchronous layout on every poll.
-       Only change classes when the visual state actually changes.
-    */
     if(el.dataset.junctionVisual!==visualKey){
-        el.classList.remove("j-on", "j-off", "j-flow", "j-blink");
+        el.classList.remove("j-on","j-off","j-unknown","j-flow","j-blink");
         el.classList.add(stateClass);
         if(flowClass) el.classList.add(flowClass);
         el.dataset.junctionVisual=visualKey;
     }
 
-    const color=active ? activeColor : inactiveColor;
+    const color=!known ? "#808080" : (active ? activeColor : inactiveColor);
     if(color && el.dataset.junctionColor!==color){
-        el.style.setProperty("background-color", color, "important");
-        el.style.setProperty("border-color", color, "important");
-        el.style.setProperty("color", "#ffffff", "important");
+        el.style.setProperty("background-color",color,"important");
+        el.style.setProperty("border-color",color,"important");
+        el.style.setProperty("color","#ffffff","important");
         el.dataset.junctionColor=color;
     }
 
@@ -3036,49 +3032,36 @@ window.setJunctionState = function(id, active, activeColor, inactiveColor, flowM
 
 window.updateJunctionStatus = function(p){
     if(!p) return;
-
-    function num(v,fallback=0){
-        if(typeof v==="number") return Number.isFinite(v) ? v : fallback;
-        if(v===null || v===undefined || v==="") return fallback;
-        const n=Number(String(v).trim().replace(/,/g,"."));
-        return Number.isFinite(n) ? n : fallback;
-    }
-
-    const defaults={
-        "j-main":{field:"ct3",operator:">",threshold:1.00},
-        "j-generator":{field:"ll1",operator:">",threshold:1.00},
-        "j-transformer":{field:"rr2",operator:">",threshold:1.00},
-        "j-transformer-bottom":{field:"rr3",operator:">",threshold:0.00}
-    };
     const configured=p.rectangles||{};
-    const liveValues=p.rectangle_values||{};
-
-    Object.entries(defaults).forEach(([id,fallback])=>{
-        const rule={...fallback,...(configured[id]||{})};
-        const hasLiveValue=Object.prototype.hasOwnProperty.call(liveValues,id);
-        const candidate=hasLiveValue ? liveValues[id] : p[rule.field];
-        const available=candidate!==null&&candidate!==undefined&&candidate!=="";
-        const value=num(candidate);
-        const threshold=num(rule.threshold);
-        const operator=rule.operator==="<" ? "<" : ">";
-        const active=available&&(
-            operator==="<" ? value<threshold : value>threshold
-        );
+    const states=p.rectangle_states||{};
+    ["j-main","j-generator","j-transformer","j-transformer-bottom"].forEach(id=>{
+        const rule=configured[id]||{};
+        const state=states[id]||{};
+        const active=typeof state.active==="boolean" ? state.active : null;
         window.setJunctionState(
             id,
             active,
             rule.true_color||rule.active_color||"#ff2020",
             rule.false_color||rule.inactive_color||"#14d84a",
             rule.flow||"none",
-            ""
+            active===null ? "?" : ""
         );
+        const el=document.querySelector("." + id);
+        if(el){
+            el.title=[
+                rule.label||id,
+                state.condition||"UNKNOWN",
+                state.quality||"NO DATA",
+                state.info_name||""
+            ].filter(Boolean).join(" • ");
+        }
     });
 };
 
-// Sebelum telemetry diterima, nilai tampilan adalah 0.00 sehingga breaker hijau.
-document.addEventListener("DOMContentLoaded", function(){
-    ["j-main","j-generator","j-transformer","j-transformer-bottom"].forEach((id)=>{
-        window.setJunctionState(id,false,"#ff2020","#14d84a","none","");
+// No telemetry must never look like an open breaker.
+document.addEventListener("DOMContentLoaded",function(){
+    ["j-main","j-generator","j-transformer","j-transformer-bottom"].forEach(id=>{
+        window.setJunctionState(id,null,"#ff2020","#14d84a","none","?");
     });
 });
 </script>
@@ -4164,9 +4147,6 @@ const TV_PREVIEW_INPUT_IDS=[
     "tv-device","tv-asdu","tv-ioa","tv-coefficient","tv-ctpt",
     "tv-formula","tv-offset","tv-unit","tv-decimal"
 ];
-const TV_DIGITAL_ONLY_KEYS=[
-    "SetStr","ResetStr","Reverse","Jian_Ge_Id"
-];
 let tvConfig=null,tvEditTarget=null,tvBindingDraft={};
 let tvSettingOptions=[],tvActiveOptions=[];
 let tvPreviewTimer=null,tvPreviewRequest=0;
@@ -4234,22 +4214,21 @@ function ensureEditor(){
         </section>
 
         <section class="tv-rect-only tv-editor-section">
-          <div class="tv-section-title">Logika breaker berdasarkan nilai aktual</div>
+          <div class="tv-section-title">Status digital breaker dari StatusSetting</div>
           <div class="tv-input-grid tv-breaker-grid">
             <label>
               <span>Nama indikator</span>
               <input id="tv-rectangle-label" autocomplete="off">
             </label>
             <label>
-              <span>Operator</span>
+              <span>Logika posisi</span>
               <select id="tv-operator">
-                <option value=">">Lebih besar dari (&gt;)</option>
-                <option value="<">Lebih kecil dari (&lt;)</option>
+                <option value="=">Effective YX = 1 (CLOSED)</option>
               </select>
             </label>
             <label>
-              <span>Nilai threshold</span>
-              <input id="tv-threshold" type="number" step="any">
+              <span>Nilai CLOSED</span>
+              <input id="tv-threshold" type="number" value="1" readonly>
             </label>
             <label>
               <span>Kondisi benar / Aktif</span>
@@ -4269,7 +4248,7 @@ function ensureEditor(){
             </label>
           </div>
           <div class="tv-breaker-rule" id="tv-breaker-rule">
-            Aktif jika nilai aktual lebih besar atau lebih kecil dari threshold.
+            CLOSED merah, OPEN hijau, data tidak valid atau offline abu-abu.
           </div>
         </section>
 
@@ -4351,11 +4330,10 @@ function updateTvSourceSummary(binding){
 
 function updateBreakerRule(){
     if(!tvEditTarget||tvEditTarget.kind!=="rectangle")return;
-    const operator=document.getElementById("tv-operator").value==="<" ? "<" : ">";
-    const threshold=document.getElementById("tv-threshold").value.trim()||"0";
     document.getElementById("tv-breaker-rule").textContent=
-        `Kondisi aktif jika nilai aktual ${operator} ${threshold}. `+
-        "TRUE memakai warna aktif; FALSE memakai warna tidak aktif.";
+        "Status berasal dari YX: CLOSED merah, OPEN hijau. " +
+        "Jika tersedia, kontak close dan trip divalidasi sebagai pasangan; " +
+        "konflik kontak atau RTU offline tidak dianggap OPEN.";
 }
 
 function fillVariableInputs(binding){
@@ -4378,8 +4356,10 @@ function collectTvAddress(){
     binding.source=source;
     binding.key=inferTvKey(binding,source);
     if(tvEditTarget&&tvEditTarget.kind==="rectangle"){
-        binding.Source_Kind="";
-        TV_DIGITAL_ONLY_KEYS.forEach(key=>delete binding[key]);
+        binding.Source_Kind="rectangle_status_csv";
+        binding.operator="=";
+        binding.threshold=1;
+        binding.state_mode="digital";
         return binding;
     }
     return {
@@ -4492,7 +4472,9 @@ function applySelectedSetting(){
     if(selectedValue==="")return;
     const row=tvActiveOptions[Number(selectedValue)];
     if(!row)return;
-    tvBindingDraft={...tvBindingDraft,...row};
+    tvBindingDraft=tvEditTarget.kind==="rectangle"
+        ?{...row}
+        :{...tvBindingDraft,...row};
     tvBindingDraft.source=inferTvSource(tvBindingDraft);
     tvBindingDraft.key=inferTvKey(tvBindingDraft,tvBindingDraft.source);
     updateTvSourceSummary(tvBindingDraft);
@@ -4526,23 +4508,25 @@ async function openTvEditor(kind,name){
             key:TV_DEFAULTS[name][1]
         }
         :section.rectangles[name]||{
-            field:"",
             label:name,
-            operator:">",
+            operator:"=",
             threshold:1,
             true_color:"#ff2020",
             false_color:"#14d84a",
             flow:"none",
-            Source_Kind:""
+            state_mode:"digital",
+            Source_Kind:"rectangle_status_csv"
         };
     tvBindingDraft={...cfg};
-    tvActiveOptions=tvSettingOptions.filter(
-        row=>row.Source_Kind!=="rectangle_status_csv"
+    tvActiveOptions=tvSettingOptions.filter(row=>
+        kind==="rectangle"
+            ?row.Source_Kind==="rectangle_status_csv"&&row.Breaker_Eligible===true
+            :row.Source_Kind!=="rectangle_status_csv"
     );
     const option=document.getElementById("tv-setting-option");
     option.replaceChildren(new Option(
         kind==="rectangle"
-            ?"— Pilih sumber nilai pembanding —"
+            ?"— Pilih StatusSetting breaker —"
             :"— Pilih sumber nilai aktual —",
         ""
     ));
@@ -4568,7 +4552,7 @@ async function openTvEditor(kind,name){
     document.getElementById("tv-editor-heading").textContent=
         kind==="rectangle"?"MAPPING BREAKER MONITOR TV":"MAPPING NILAI AKTUAL";
     document.getElementById("tv-setting-label").textContent=
-        kind==="rectangle"?"Sumber nilai pembanding":"Sumber nilai";
+        kind==="rectangle"?"Sumber status digital":"Sumber nilai";
     document.getElementById("tv-editor-target").textContent=
         monitorId+" // "+name;
     document.getElementById("tv-true-color").value=
@@ -4577,10 +4561,8 @@ async function openTvEditor(kind,name){
         cfg.false_color||cfg.inactive_color||"#14d84a";
     document.getElementById("tv-flow").value=cfg.flow||"none";
     document.getElementById("tv-rectangle-label").value=cfg.label||name;
-    document.getElementById("tv-operator").value=
-        cfg.operator==="<" ? "<" : ">";
-    document.getElementById("tv-threshold").value=
-        Number.isFinite(Number(cfg.threshold)) ? cfg.threshold : 0;
+    document.getElementById("tv-operator").value="=";
+    document.getElementById("tv-threshold").value=1;
     if(kind==="variable")fillVariableInputs(cfg);
     updateTvSourceSummary(cfg);
 
@@ -4592,7 +4574,7 @@ async function openTvEditor(kind,name){
     );
     document.getElementById("tv-editor-message").textContent=
         kind==="rectangle"
-            ?"Pilih nilai aktual, operator > / <, dan threshold kondisi breaker."
+            ?"Pilih point breaker position atau breaker close dari StatusSetting."
             :"Alamat IEC-104 dan parameter yang memengaruhi hasil ditampilkan.";
     setEditorDisabled(false);
     document.getElementById("tv-editor").classList.add("open");
@@ -4612,11 +4594,11 @@ async function saveTvEditor(){
         const falseColor=document.getElementById("tv-false-color").value;
         section.rectangles[tvEditTarget.name]={
             ...address,
-            field:address.field||tvBindingDraft.field||"",
             label:document.getElementById("tv-rectangle-label").value.trim()||
                 tvEditTarget.name,
-            operator:document.getElementById("tv-operator").value==="<"?"<":">",
-            threshold:editorNumber("tv-threshold",0),
+            operator:"=",
+            threshold:1,
+            state_mode:"digital",
             true_color:trueColor,
             false_color:falseColor,
             flow:document.getElementById("tv-flow").value,

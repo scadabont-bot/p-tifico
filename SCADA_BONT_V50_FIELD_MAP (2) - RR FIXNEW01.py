@@ -1,6 +1,7 @@
 import os
 import base64
 import hashlib
+import hmac
 import sys
 import time
 import math
@@ -28,6 +29,7 @@ from concurrent.futures import ThreadPoolExecutor
 from tkinter import ttk, messagebox, filedialog, font as tkfont
 from PIL import Image, ImageTk, ImageOps, ImageGrab
 import cbz8000_device_data as cbz_device_data
+from soe_alarm import EventStore, parse_cp24_time2a, parse_cp56_time2a, quality_text
 
 
 def _set_macos_application_menu_title(name):
@@ -184,6 +186,10 @@ ENGINE_UPDATE_INTERVAL = 1.0
 REPORT_LOG_INTERVAL = 60.0
 REPORT_LOGGER_STARTED = False
 REPORT_LOGGER_LOCK = threading.RLock()
+REPORT_RETENTION_DAYS = 30
+REPORT_MAX_FILE_BYTES = 128 * 1024 * 1024
+REPORT_LAST_RETENTION_DATE = None
+REPORT_ERROR_LOG_TIMES = {}
 COMM_LOG_LOCK = threading.RLock()
 
 RTU_LIST = [
@@ -191,9 +197,9 @@ RTU_LIST = [
         "name": "RTU 1", "ip": "10.100.163.1", "port": VINCI_PORT,
         "tags": [
             ("W1_Uab", "kV"), ("W1_Ubc", "kV"), ("W1_Uca", "kV"),
-            ("W1_Ia", "A"), ("W1_P", "kW"), ("W1_Q", "kVar"),
+            ("W1_f", "Hz"), ("W1_Ia", "A"), ("W1_P", "kW"), ("W1_Q", "kVar"),
             ("W2_Uab", "kV"), ("W2_Ubc", "kV"), ("W2_Uca", "kV"),
-            ("W2_Ia", "A"), ("W2_P", "kW"), ("W2_Q", "kVar")
+            ("W2_f", "Hz"), ("W2_Ia", "A"), ("W2_P", "kW"), ("W2_Q", "kVar")
         ]
     },
     {
@@ -217,10 +223,10 @@ RTU_LIST = [
 
 DEFAULT_DATA = {
     "W1_Uab": 0.0, "W1_Ubc": 0.0, "W1_Uca": 0.0,
-    "W1_Ia": 0.0, "W1_Ib": 0.0, "W1_Ic": 0.0,
+    "W1_f": 0.0, "W1_Ia": 0.0, "W1_Ib": 0.0, "W1_Ic": 0.0,
     "W1_P": 0.0, "W1_Q": 0.0,
     "W2_Uab": 0.0, "W2_Ubc": 0.0, "W2_Uca": 0.0,
-    "W2_Ia": 0.0, "W2_Ib": 0.0, "W2_Ic": 0.0,
+    "W2_f": 0.0, "W2_Ia": 0.0, "W2_Ib": 0.0, "W2_Ic": 0.0,
     "W2_P": 0.0, "W2_Q": 0.0,
     "Uan": 0.0, "Ubn": 0.0, "Ucn": 0.0, "In": 0.0,
     "P_tot": 0.0, "Uab": 0.0, "Ubc": 0.0, "Uca": 0.0,
@@ -344,9 +350,232 @@ APP_DIR = (
     if getattr(sys, "frozen", False)
     else os.path.dirname(os.path.abspath(__file__))
 )
+SOE_DATABASE_PATH = os.environ.get(
+    "SCADA_EVENT_DB_PATH", os.path.join(APP_DIR, "SCADAEvents.db")
+)
+ALARM_HISTORY_PATH = os.environ.get(
+    "SCADA_ALARM_HISTORY_PATH", os.path.join(APP_DIR, "AlarmHistory.csv")
+)
+ALARM_ACTIVE_PATH = os.environ.get(
+    "SCADA_ALARM_ACTIVE_PATH", os.path.join(APP_DIR, "Alarm.csv")
+)
+EVENT_STORE = EventStore(SOE_DATABASE_PATH)
+ALARM_FILE_LOCK = threading.RLock()
+
+
+def _append_alarm_history_row(device, description, status, event_time=None):
+    """Append one alarm lifecycle transition without depending on the Tk UI."""
+    now = (
+        event_time
+        if isinstance(event_time, datetime.datetime)
+        else datetime.datetime.now()
+    )
+    try:
+        if isinstance(event_time, str):
+            now = datetime.datetime.fromisoformat(event_time)
+    except ValueError:
+        now = datetime.datetime.now()
+    try:
+        with ALARM_FILE_LOCK:
+            new_file = (
+                not os.path.exists(ALARM_HISTORY_PATH)
+                or os.path.getsize(ALARM_HISTORY_PATH) == 0
+            )
+            with open(
+                ALARM_HISTORY_PATH, "a", newline="", encoding="utf-8"
+            ) as handle:
+                writer = csv.writer(handle)
+                if new_file:
+                    writer.writerow(
+                        ["Date", "Time", "Device", "Description", "Status"]
+                    )
+                writer.writerow([
+                    now.strftime("%Y-%m-%d"),
+                    now.strftime("%H:%M:%S.%f")[:-3],
+                    str(device),
+                    str(description),
+                    str(status).upper(),
+                ])
+    except Exception as exc:
+        logger = globals().get("_communication_log")
+        if callable(logger):
+            logger("LOCAL", "ALARM_HISTORY_WRITE_ERROR", str(exc))
+
 CBZ8000_DEVICE_DATA_PATH = os.path.join(APP_DIR, "CBZ8000AppData.json")
 COMMUNICATION_CONFIG_PATH = os.path.join(APP_DIR, "CommunicationConfig.json")
 MQTT_CONFIG_PATH = os.path.join(APP_DIR, "MQTTConfig.json")
+AUTH_ACCOUNTS_PATH = os.environ.get(
+    "SCADA_AUTH_ACCOUNTS_PATH",
+    os.path.join(APP_DIR, "UserAccounts.json"),
+)
+AUTH_ACCOUNT_SCHEMA = "SCADA-BONT-AUTH-1"
+AUTH_ROLES = ("Operator", "Admin", "Developer")
+AUTH_MIN_PASSWORD_LENGTH = 12
+AUTH_PBKDF2_ITERATIONS = 600_000
+AUTH_ACCOUNT_LOCK = threading.RLock()
+
+
+def _auth_empty_accounts():
+    return {
+        "schema": AUTH_ACCOUNT_SCHEMA,
+        "roles": {},
+    }
+
+
+def _auth_load_accounts():
+    """Load local role credentials without accepting malformed records."""
+    with AUTH_ACCOUNT_LOCK:
+        try:
+            with open(AUTH_ACCOUNTS_PATH, "r", encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except FileNotFoundError:
+            return _auth_empty_accounts()
+        except (OSError, ValueError, TypeError) as exc:
+            raise RuntimeError(
+                f"Credential store cannot be read: {exc}"
+            ) from exc
+        if (
+            not isinstance(payload, dict)
+            or payload.get("schema") != AUTH_ACCOUNT_SCHEMA
+            or not isinstance(payload.get("roles"), dict)
+        ):
+            raise RuntimeError(
+                "Credential store has an invalid schema; access is locked."
+            )
+        roles = {}
+        for role in AUTH_ROLES:
+            record = payload["roles"].get(role)
+            if record is None:
+                continue
+            if not isinstance(record, dict):
+                raise RuntimeError(
+                    f"Credential record for {role} is malformed."
+                )
+            try:
+                iterations = int(record.get("iterations", 0))
+                salt = base64.b64decode(
+                    str(record.get("salt", "")), validate=True,
+                )
+                digest = base64.b64decode(
+                    str(record.get("hash", "")), validate=True,
+                )
+            except (TypeError, ValueError) as exc:
+                raise RuntimeError(
+                    f"Credential record for {role} is malformed."
+                ) from exc
+            if (
+                iterations < 100_000
+                or len(salt) < 16
+                or len(digest) != hashlib.sha256().digest_size
+            ):
+                raise RuntimeError(
+                    f"Credential record for {role} is incomplete."
+                )
+            roles[role] = {
+                "algorithm": "PBKDF2-HMAC-SHA256",
+                "iterations": iterations,
+                "salt": base64.b64encode(salt).decode("ascii"),
+                "hash": base64.b64encode(digest).decode("ascii"),
+                "updated_at": str(record.get("updated_at", "")),
+            }
+        return {
+            "schema": AUTH_ACCOUNT_SCHEMA,
+            "roles": roles,
+        }
+
+
+def _auth_write_accounts(payload):
+    """Atomically persist password hashes with owner-only POSIX permissions."""
+    directory = os.path.dirname(os.path.abspath(AUTH_ACCOUNTS_PATH))
+    os.makedirs(directory, exist_ok=True)
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=".UserAccounts-", suffix=".tmp", dir=directory,
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.chmod(temporary, 0o600)
+        except OSError:
+            pass
+        os.replace(temporary, AUTH_ACCOUNTS_PATH)
+    finally:
+        if os.path.exists(temporary):
+            os.remove(temporary)
+
+
+def _auth_role_configured(role):
+    return str(role) in _auth_load_accounts()["roles"]
+
+
+def _auth_configured_roles():
+    return frozenset(_auth_load_accounts()["roles"])
+
+
+def _auth_set_password(role, password):
+    """Create or replace one role password using a salted adaptive hash."""
+    role = str(role)
+    password = str(password)
+    if role not in AUTH_ROLES:
+        raise ValueError("Unknown SCADA role.")
+    if len(password) < AUTH_MIN_PASSWORD_LENGTH:
+        raise ValueError(
+            f"Password must contain at least {AUTH_MIN_PASSWORD_LENGTH} characters."
+        )
+    character_classes = sum((
+        any(char.islower() for char in password),
+        any(char.isupper() for char in password),
+        any(char.isdigit() for char in password),
+        any(not char.isalnum() for char in password),
+    ))
+    if character_classes < 3:
+        raise ValueError(
+            "Password must use at least three of: uppercase, lowercase, "
+            "number, and symbol."
+        )
+    salt = os.urandom(16)
+    digest = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt,
+        AUTH_PBKDF2_ITERATIONS,
+    )
+    with AUTH_ACCOUNT_LOCK:
+        payload = _auth_load_accounts()
+        payload["roles"][role] = {
+            "algorithm": "PBKDF2-HMAC-SHA256",
+            "iterations": AUTH_PBKDF2_ITERATIONS,
+            "salt": base64.b64encode(salt).decode("ascii"),
+            "hash": base64.b64encode(digest).decode("ascii"),
+            "updated_at": datetime.datetime.now().isoformat(
+                timespec="seconds",
+            ),
+        }
+        _auth_write_accounts(payload)
+
+
+def _auth_verify_password(role, password):
+    """Verify a role password in constant time."""
+    record = _auth_load_accounts()["roles"].get(str(role))
+    if not record:
+        return False
+    try:
+        salt = base64.b64decode(record["salt"], validate=True)
+        expected = base64.b64decode(record["hash"], validate=True)
+        actual = hashlib.pbkdf2_hmac(
+            "sha256",
+            str(password).encode("utf-8"),
+            salt,
+            int(record["iterations"]),
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+    return hmac.compare_digest(actual, expected)
+
+
 TREND_HISTORY_DB = os.path.join(APP_DIR, "TrendHistory.sqlite3")
 TREND_HISTORY_INTERVAL = 60.0
 TREND_HISTORY_STARTED = False
@@ -532,6 +761,13 @@ def _mqtt_runtime_snapshot(local_ip):
             for key, value in STATUS_VALUE_STORE.items()
             if isinstance(key, tuple) and len(key) == 3
         ]
+    event_ips = _owned_rtu_ips() or set(data_store)
+    recent_events = EVENT_STORE.recent_events(200, event_ips)
+    digital_alarms = [
+        alarm
+        for alarm in EVENT_STORE.active_status_alarms()
+        if str(alarm.get("source_ip", "")) in event_ips
+    ]
     return {
         "schema": "SCADA-BONT-MQTT-1",
         "generated_at": datetime.datetime.now().isoformat(timespec="milliseconds"),
@@ -543,6 +779,8 @@ def _mqtt_runtime_snapshot(local_ip):
         },
         "bay": bay_store,
         "status_points": status_store,
+        "soe_events": recent_events,
+        "digital_alarms": digital_alarms,
     }
 
 
@@ -572,6 +810,22 @@ def _mqtt_publish_runtime(publisher, config, snapshot):
     publisher.publish(
         f"{root}/status",
         json.dumps(snapshot.get("status_points", []), ensure_ascii=False, separators=(",", ":")).encode("utf-8"),
+    )
+    publisher.publish(
+        f"{root}/soe/recent",
+        json.dumps(
+            snapshot.get("soe_events", []),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8"),
+    )
+    publisher.publish(
+        f"{root}/alarm/digital",
+        json.dumps(
+            snapshot.get("digital_alarms", []),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8"),
     )
 
 
@@ -650,7 +904,7 @@ def _communication_config():
     defaults = {
         "mode": "parallel_direct", "master_ip": "10.100.163.149",
         "peer_ip": "10.100.163.150", "relay_port": 5001,
-        "relay_token": "SCADA-BONT-PARALLEL-149-150",
+        "relay_token": "",
         "node_149_rtus": ["10.100.163.1", "10.100.163.2", "10.100.163.5", "10.100.163.7"],
         "node_150_rtus": ["10.100.163.3", "10.100.163.4", "10.100.163.6", "10.100.163.8"],
     }
@@ -662,6 +916,116 @@ def _communication_config():
     except Exception:
         pass
     return defaults
+
+
+RELAY_AUTH_WINDOW_SECONDS = 60
+RELAY_NONCE_LOCK = threading.RLock()
+RELAY_SEEN_NONCES = {}
+
+
+def _relay_request_signature(method, path, timestamp, nonce, token):
+    message = "\n".join((
+        str(method).upper(),
+        str(path),
+        str(timestamp),
+        str(nonce),
+    )).encode("utf-8")
+    return hmac.new(
+        str(token).encode("utf-8"),
+        message,
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _relay_auth_headers(
+    path,
+    token,
+    method="GET",
+    timestamp=None,
+    nonce=None,
+):
+    """Create a short-lived HMAC request proof without sending the secret."""
+    if not token:
+        raise ValueError("Relay token is not configured.")
+    timestamp = str(
+        int(time.time() if timestamp is None else timestamp)
+    )
+    nonce = str(nonce or os.urandom(16).hex())
+    return {
+        "X-SCADA-Auth-Version": "1",
+        "X-SCADA-Auth-Timestamp": timestamp,
+        "X-SCADA-Auth-Nonce": nonce,
+        "X-SCADA-Auth-Signature": _relay_request_signature(
+            method, path, timestamp, nonce, token,
+        ),
+    }
+
+
+def _relay_auth_valid(
+    method,
+    path,
+    token,
+    headers,
+    now=None,
+    consume_nonce=False,
+):
+    """Validate HMAC freshness and optionally consume its anti-replay nonce."""
+    if not token or str(headers.get("X-SCADA-Auth-Version", "")) != "1":
+        return False
+    timestamp_text = str(headers.get("X-SCADA-Auth-Timestamp", ""))
+    nonce = str(headers.get("X-SCADA-Auth-Nonce", ""))
+    supplied = str(headers.get("X-SCADA-Auth-Signature", ""))
+    if not re.fullmatch(r"[0-9a-f]{32}", nonce):
+        return False
+    try:
+        timestamp = int(timestamp_text)
+    except ValueError:
+        return False
+    now = int(time.time() if now is None else now)
+    if abs(now - timestamp) > RELAY_AUTH_WINDOW_SECONDS:
+        return False
+    expected = _relay_request_signature(
+        method, path, timestamp_text, nonce, token,
+    )
+    if not hmac.compare_digest(supplied, expected):
+        return False
+    if not consume_nonce:
+        return True
+    with RELAY_NONCE_LOCK:
+        cutoff = now - RELAY_AUTH_WINDOW_SECONDS
+        for used_nonce, used_at in list(RELAY_SEEN_NONCES.items()):
+            if used_at < cutoff:
+                RELAY_SEEN_NONCES.pop(used_nonce, None)
+        if nonce in RELAY_SEEN_NONCES:
+            return False
+        RELAY_SEEN_NONCES[nonce] = timestamp
+    return True
+
+
+def _relay_response_signature(path, request_nonce, body, token):
+    body_digest = hashlib.sha256(bytes(body)).hexdigest()
+    message = "\n".join((
+        "RESPONSE",
+        str(path),
+        str(request_nonce),
+        body_digest,
+    )).encode("utf-8")
+    return hmac.new(
+        str(token).encode("utf-8"),
+        message,
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _relay_decode_json_response(response, path, token, request_headers):
+    """Authenticate the response body before decoding peer JSON."""
+    body = response.read()
+    supplied = str(response.headers.get("X-SCADA-Response-Signature", ""))
+    nonce = str(request_headers.get("X-SCADA-Auth-Nonce", ""))
+    expected = _relay_response_signature(path, nonce, body, token)
+    if not supplied or not hmac.compare_digest(supplied, expected):
+        raise ValueError("relay response authentication failed")
+    return json.loads(body.decode("utf-8"))
 
 COMMUNICATION_MODES = (
     "master_slave",
@@ -721,8 +1085,8 @@ def _validate_communication_config(config):
     if not 1 <= relay_port <= 65535:
         raise ValueError("Relay port must be between 1 and 65535.")
     relay_token = str(normalized.get("relay_token", "")).strip()
-    if not relay_token:
-        raise ValueError("Relay token cannot be empty.")
+    if len(relay_token) < 32:
+        raise ValueError("Relay token must contain at least 32 characters.")
 
     node_149 = _validated_ipv4_list(
         normalized.get("node_149_rtus", []), "Node .149 RTU list"
@@ -937,6 +1301,8 @@ def _reload_synced_configuration(changed_names):
         _load_setting_engine()
     if any(name.lower().startswith("statussetting ") for name in changed_names):
         _load_status_settings()
+    if parameter_settings_changed:
+        _load_soe_settings()
 
     app = globals().get("scada_app_instance")
     if app is None or not hasattr(app, "root"):
@@ -1044,16 +1410,22 @@ def _config_sync_worker():
     remote_ip = _parallel_peer_ip()
     port = int(config.get("relay_port", 5001))
     token = str(config.get("relay_token", ""))
-    headers = {"X-SCADA-Relay-Token": token}
-    manifest_url = f"http://{remote_ip}:{port}/ConfigSyncManifest.json"
-    snapshot_url = f"http://{remote_ip}:{port}/ConfigSync.json"
+    manifest_path = "/ConfigSyncManifest.json"
+    snapshot_path = "/ConfigSync.json"
+    manifest_url = f"http://{remote_ip}:{port}{manifest_path}"
+    snapshot_url = f"http://{remote_ip}:{port}{snapshot_path}"
     last_error_log = 0.0
     while True:
         try:
             local_state = _config_sync_refresh_local_state()
-            request = Request(manifest_url, headers=headers)
+            request_headers = _relay_auth_headers(
+                manifest_path, token,
+            )
+            request = Request(manifest_url, headers=request_headers)
             with urlopen(request, timeout=2.0) as response:
-                manifest = json.loads(response.read().decode("utf-8"))
+                manifest = _relay_decode_json_response(
+                    response, manifest_path, token, request_headers,
+                )
             remote_files = manifest.get("files", {}) if isinstance(manifest, dict) else {}
             local_files = local_state.get("files", {})
             has_newer = any(
@@ -1061,9 +1433,14 @@ def _config_sync_worker():
                 for name, entry in remote_files.items() if isinstance(entry, dict)
             )
             if has_newer and not is_authoritative_master:
-                request = Request(snapshot_url, headers=headers)
+                request_headers = _relay_auth_headers(
+                    snapshot_path, token,
+                )
+                request = Request(snapshot_url, headers=request_headers)
                 with urlopen(request, timeout=4.0) as response:
-                    snapshot = json.loads(response.read().decode("utf-8"))
+                    snapshot = _relay_decode_json_response(
+                        response, snapshot_path, token, request_headers,
+                    )
                 _apply_config_sync_snapshot(snapshot)
         except Exception as exc:
             if time.monotonic() - last_error_log >= 30.0:
@@ -1173,6 +1550,54 @@ def _apply_relay_snapshot(payload):
                     last_rx_epoch=now_epoch,
                 )
 
+    remote_ips = {
+        str(ip)
+        for ip in payload.get("data_store", {})
+        if str(ip) not in owned
+    }
+    for item in reversed(payload.get("soe_events", [])):
+        if (
+            not isinstance(item, dict)
+            or str(item.get("source_ip", "")) not in remote_ips
+        ):
+            continue
+        stored = EVENT_STORE.insert_remote_event(item)
+        if stored is None:
+            continue
+        point_key = str(stored.get("point_key", ""))
+        alarm_key = (
+            f"DIGITAL:{stored['source_ip']}:{stored['asdu']}:"
+            f"{stored['ioa']}:{point_key}"
+        )
+        action, alarm = EVENT_STORE.apply_status_alarm(
+            stored, alarm_key
+        )
+        description = (
+            f"{stored.get('physical_name') or stored.get('info_name') or point_key} "
+            f"{stored.get('state_text', '')} "
+            f"(ASDU {stored['asdu']}, IOA {stored['ioa']})"
+        )
+        if action in {"ACTIVE", "UPDATED"}:
+            _append_alarm_history_row(
+                stored.get("bay_name") or stored["source_ip"],
+                description,
+                stored.get("severity", "WARNING"),
+                stored.get("source_time"),
+            )
+        elif action == "CLEARED" and alarm is not None:
+            _append_alarm_history_row(
+                alarm.get("device", stored["source_ip"]),
+                (
+                    "RETURN TO NORMAL: "
+                    f"{alarm.get('description', description)}"
+                ),
+                "NORMAL",
+                stored.get("source_time"),
+            )
+    EVENT_STORE.sync_remote_status_alarms(
+        payload.get("status_alarms", []), remote_ips
+    )
+
 
 def _relay_peer_worker():
     """Read realtime data from PC2 master without opening any RTU socket."""
@@ -1181,14 +1606,18 @@ def _relay_peer_worker():
     remote_ip = _parallel_peer_ip()
     port = int(config.get("relay_port", 5001))
     token = str(config.get("relay_token", ""))
-    url = f"http://{remote_ip}:{port}/RealtimeSnapshot.json"
+    path = "/RealtimeSnapshot.json"
+    url = f"http://{remote_ip}:{port}{path}"
     last_ok = 0.0
     while True:
         try:
             from urllib.request import Request
-            request = Request(url, headers={"X-SCADA-Relay-Token": token})
+            request_headers = _relay_auth_headers(path, token)
+            request = Request(url, headers=request_headers)
             with urlopen(request, timeout=2.0) as response:
-                payload = json.loads(response.read().decode("utf-8"))
+                payload = _relay_decode_json_response(
+                    response, path, token, request_headers,
+                )
             _apply_relay_snapshot(payload)
             if time.monotonic() - last_ok > 10.0:
                 _communication_log(remote_ip, "RELAY_CONNECTED", url)
@@ -1285,6 +1714,8 @@ STATUS_SETTING_KEYS = [
 STATUS_LOCK = threading.RLock()
 STATUS_REGISTRY = []
 STATUS_VALUE_STORE = {}
+SOE_LOCK = threading.RLock()
+SOE_REGISTRY = []
 STATUS_BAY_JIAN_IDS = {
     "Connection Wire I": "1",
     "Connection Wire II": "2",
@@ -1314,9 +1745,9 @@ STATUS_BAY_JIAN_IDS = {
 }
 STATUS_BAYS = tuple(STATUS_BAY_JIAN_IDS)
 
-# Every red breaker body in SYSTEMCONFIG_DARK.png / AUXILIARY_MATCHED.png.
-# Coordinates are native 1536x1024 pixels. Sources follow the CBZ8000
-# StatusSetting YX rows documented in Documents/SCADA TIFICO.
+# Breaker bodies in SYSTEMCONFIG_DARK.png, using native 1536x1024
+# coordinates. AUXILIARY_MATCHED.png omits the two outer generator breakers,
+# so that screen uses the filtered geometry below.
 SLD_BREAKER_SPECS = (
     ("wire_1", "Connection Wire I breaker", "Connection Wire I",
      ("breaker position",), 657.0, 256.0),
@@ -1365,6 +1796,11 @@ SLD_BREAKER_SPECS = (
      ("UV breaker close",), 176.0, 664.5),
     ("aux_2_lv", "Auxiliary Transformer 2 LV breaker", "2# Auxiliary Transformer",
      ("UV breaker close",), 1395.0, 664.5),
+)
+AUXILIARY_BREAKER_SPECS = tuple(
+    spec
+    for spec in SLD_BREAKER_SPECS
+    if spec[0] not in {"generator_1", "generator_2"}
 )
 SLD_BREAKER_SOURCE_BY_KEY = {
     key: (bay, physical_names)
@@ -1430,10 +1866,12 @@ SETTING_BAY_IP = {
 TREND_DEVICES = tuple(SETTING_BAY_IP)
 TREND_VALUE_KEYS = ("U", "I", "P", "Q", "f")
 TREND_RANGE_PRESETS = {
+    "1 Minute": datetime.timedelta(minutes=1),
+    "30 Minutes": datetime.timedelta(minutes=30),
     "1 Hour": datetime.timedelta(hours=1),
     "6 Hours": datetime.timedelta(hours=6),
     "12 Hours": datetime.timedelta(hours=12),
-    "Daily": datetime.timedelta(days=1),
+    "24 Hours": datetime.timedelta(hours=24),
     "Weekly": datetime.timedelta(days=7),
     "Monthly": datetime.timedelta(days=30),
 }
@@ -3050,6 +3488,86 @@ def _decode_status_info_name(info_name):
         return {}
 
 
+def _decode_soe_info_name(info_name):
+    """Decode DDSEAAAAIIIIII into RTU IP, ASDU, and the full 24-bit IOA."""
+    text = _norm_text(info_name).upper()
+    match = re.fullmatch(
+        r"([0-9A-F]{2})SE([0-9A-F]{4})([0-9A-F]{6})", text
+    )
+    if not match:
+        return {}
+    try:
+        device_hex, asdu_hex, ioa_hex = match.groups()
+        return {
+            "Device_Addr": f"10.100.163.{int(device_hex, 16)}",
+            "Parsed_ASDU": int(asdu_hex, 16),
+            "Parsed_IOA": int(ioa_hex, 16),
+            "Device_Hex": device_hex,
+            "ASDU_Hex": asdu_hex,
+            "IOA_Hex": ioa_hex,
+        }
+    except (TypeError, ValueError):
+        return {}
+
+
+def _decode_parameter_info_name(info_name):
+    """Decode the IEC address shown beside InfoName in Parameter Setting."""
+    text = _norm_text(info_name).upper()
+    marker = text[2:4] if len(text) >= 4 else ""
+    if marker == "YC":
+        return _decode_analog_info_name(text)
+    if marker == "YX":
+        return _decode_status_info_name(text)
+    if marker == "SE":
+        return _decode_soe_info_name(text)
+    match = re.fullmatch(
+        r"([0-9A-F]{2})YM([0-9A-F]{4})([0-9A-F]{6})", text
+    )
+    if not match:
+        return {}
+    try:
+        device_hex, asdu_hex, ioa_hex = match.groups()
+        return {
+            "Info_Name": text,
+            "Device_Addr": f"10.100.163.{int(device_hex, 16)}",
+            "Parsed_ASDU": int(asdu_hex, 16),
+            "Parsed_IOA": int(ioa_hex, 16),
+            "Device_Hex": device_hex,
+            "ASDU_Hex": asdu_hex,
+            "IOA_Hex": ioa_hex,
+        }
+    except (TypeError, ValueError):
+        return {}
+
+
+def _flag_enabled(value):
+    text = _norm_text(value).lower()
+    if not text:
+        return False
+    try:
+        return int(float(text)) != 0
+    except (TypeError, ValueError):
+        return text in {"true", "yes", "on", "enabled"}
+
+
+def _alert_severity(value, default="WARNING"):
+    try:
+        level = int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return str(default).upper()
+    return {
+        1: "WARNING", 2: "URGENT", 3: "CRITICAL",
+    }.get(level, str(default).upper())
+
+
+def _configured_sound_path(value):
+    path = _norm_text(value)
+    if not path or path.isdigit():
+        return ""
+    candidate = path if os.path.isabs(path) else os.path.join(APP_DIR, path)
+    return candidate if os.path.isfile(candidate) else ""
+
+
 def _load_status_settings():
     """Load rectangle-only status rows without touching the analog registry."""
     rows = []
@@ -3106,6 +3624,45 @@ def _load_status_settings():
     return rows
 
 
+def _load_soe_settings():
+    """Load Device Manager SOE points into the live IEC address registry."""
+    rows = []
+    try:
+        config = cbz_device_data.load_config(CBZ8000_DEVICE_DATA_PATH)
+        for device in cbz_device_data.devices(config):
+            bay_name = _norm_text(
+                device.get("bay", {}).get("Jiange_name")
+            )
+            for source in device.get("sections", {}).get("soe", []):
+                info_name = _norm_text(source.get("Infoname"))
+                decoded = _decode_soe_info_name(info_name)
+                if not decoded:
+                    continue
+                row = dict(source)
+                row.update({
+                    "Device_Addr": decoded["Device_Addr"],
+                    "Bay_Name": bay_name,
+                    "Physical_Name": _norm_text(
+                        source.get("Physicalname")
+                    ),
+                    "Info_Name": info_name,
+                    "Info_Index": _norm_text(source.get("Info_index")),
+                    "Jian_Ge_Id": source.get("JianGe_id", ""),
+                    "Parsed_ASDU": decoded["Parsed_ASDU"],
+                    "Parsed_IOA": decoded["Parsed_IOA"],
+                    "Source_Kind": "soe_config",
+                    "AlertLevel": 3,
+                })
+                rows.append(row)
+    except Exception as exc:
+        logger = globals().get("_communication_log")
+        if callable(logger):
+            logger("LOCAL", "SOE_CONFIG_LOAD_ERROR", str(exc))
+    with SOE_LOCK:
+        SOE_REGISTRY[:] = rows
+    return rows
+
+
 def _status_binding_for_bay(bay_name, preferred_physical_names):
     """Return a UI binding backed by one authoritative StatusSetting row."""
     with STATUS_LOCK:
@@ -3140,6 +3697,306 @@ def _status_binding_for_bay(bay_name, preferred_physical_names):
         "ResetStr": selected.get("ResetStr", ""),
         "Reverse": selected.get("Reverse", ""),
     }
+
+
+def _status_binding_from_row(row):
+    """Return the stable UI fields for one normalized StatusSetting row."""
+    return {
+        "Device_Addr": row.get("Device_Addr", ""),
+        "Bay_Name": row.get("Bay_Name", ""),
+        "Physical_Name": row.get(
+            "Physical_Name", row.get("PhysicalName", "")
+        ),
+        "Info_Name": row.get("Info_Name", row.get("InfoName", "")),
+        "Info_Index": row.get("Info_Index", ""),
+        "Jian_Ge_Id": row.get("Jian_Ge_Id", ""),
+        "ASDU": row.get("Parsed_ASDU", row.get("ASDU", "")),
+        "IOA": row.get("Parsed_IOA", row.get("IOA", "")),
+        "Source_Kind": "rectangle_status_csv",
+        "SetStr": row.get("SetStr", ""),
+        "ResetStr": row.get("ResetStr", ""),
+        "Reverse": row.get("Reverse", ""),
+    }
+
+
+GENERATOR_BREAKER_SPECS = {
+    "G1": {
+        "j-main": {
+            "label": "MAIN / WIRE I",
+            "bay": "Connection Wire I",
+            "close": ("breaker position",),
+            "open": (),
+        },
+        "j-generator": {
+            "label": "GENERATOR 1",
+            "bay": "1# Measure Control Box",
+            "close": ("1# G circuit breaker close position",),
+            "open": ("1# G circuit breaker trip position",),
+        },
+        "j-transformer": {
+            "label": "AUX TRANSFORMER 1 HV",
+            "bay": "1# Auxiliary Transformer",
+            "close": ("hv breaker close",),
+            "open": ("hv breaker trip position",),
+        },
+        "j-transformer-bottom": {
+            "label": "AUX TRANSFORMER 1 LV",
+            "bay": "1# Auxiliary Transformer",
+            "close": ("UV breaker close",),
+            "open": ("UV breaker trip position",),
+        },
+    },
+    "G2": {
+        "j-main": {
+            "label": "MAIN / WIRE II",
+            "bay": "Connection Wire II",
+            "close": ("breaker position",),
+            "open": (),
+        },
+        "j-generator": {
+            "label": "GENERATOR 2",
+            "bay": "2# Measure Control Box",
+            "close": ("1# G circuit breaker close position",),
+            "open": ("1# G circuit breaker trip position",),
+        },
+        "j-transformer": {
+            "label": "AUX TRANSFORMER 2 HV",
+            "bay": "2# Auxiliary Transformer",
+            "close": ("hv breaker close",),
+            "open": ("hv breaker trip position",),
+        },
+        "j-transformer-bottom": {
+            "label": "AUX TRANSFORMER 2 LV",
+            "bay": "2# Auxiliary Transformer",
+            "close": ("UV breaker close",),
+            "open": ("UV breaker trip position",),
+        },
+    },
+}
+
+
+def _generator_breaker_defaults(monitor_id):
+    """Resolve all fixed G1/G2 breakers from authoritative StatusSetting rows."""
+    result = {}
+    for rectangle_id, spec in GENERATOR_BREAKER_SPECS.get(
+            str(monitor_id), {}).items():
+        binding = _status_binding_for_bay(spec["bay"], spec["close"])
+        binding.update({
+            "mode": "selected",
+            "source": "status",
+            "key": binding.get("Physical_Name", ""),
+            "label": spec["label"],
+            "operator": "=",
+            "threshold": 1,
+            "true_color": "#ff2020",
+            "false_color": "#14d84a",
+            "active_color": "#ff2020",
+            "inactive_color": "#14d84a",
+            "on_color": "#ff2020",
+            "off_color": "#14d84a",
+            "unknown_color": "#808080",
+            "invalid_color": "#ffb020",
+            "flow": "none",
+            "state_mode": "digital",
+            "Source_Kind": "rectangle_status_csv",
+        })
+        if spec["open"]:
+            open_binding = _status_binding_for_bay(
+                spec["bay"], spec["open"]
+            )
+            if open_binding:
+                binding["open_binding"] = open_binding
+        result[rectangle_id] = binding
+    return result
+
+
+def _companion_open_status_binding(binding):
+    """Find the trip/open contact paired with a selected close contact."""
+    existing = binding.get("open_binding")
+    if isinstance(existing, dict) and existing.get("Device_Addr"):
+        return dict(existing)
+    bay = _norm_text(binding.get("Bay_Name"))
+    physical = _norm_text(binding.get("Physical_Name"))
+    lowered = physical.casefold()
+    candidates = []
+    if "close position" in lowered:
+        candidates.append(lowered.replace("close position", "trip position"))
+    if lowered.endswith(" breaker close"):
+        candidates.append(lowered[:-len("close")] + "trip position")
+    if not candidates:
+        return {}
+    with STATUS_LOCK:
+        rows = [dict(row) for row in STATUS_REGISTRY]
+    for row in rows:
+        if _norm_text(row.get("Bay_Name")).casefold() != bay.casefold():
+            continue
+        row_physical = _norm_text(
+            row.get("Physical_Name", row.get("PhysicalName"))
+        ).casefold()
+        if row_physical in candidates:
+            return _status_binding_from_row(row)
+    return {}
+
+
+def _status_point_snapshot(binding):
+    """Read one YX point without exposing a stale value while its RTU is offline."""
+    source = binding if isinstance(binding, dict) else {}
+    ip = _norm_text(source.get("Device_Addr"))
+    info_name = _norm_text(source.get("Info_Name", source.get("InfoName")))
+    physical = _norm_text(source.get("Physical_Name"))
+    info_index = _norm_text(source.get("Info_Index"))
+    if not ip:
+        return {
+            "raw": None, "effective": None, "online": False,
+            "quality": "CONFIG INVALID",
+        }
+    with DATA_LOCK:
+        online = bool(VINCI_STATUS.get(ip, False))
+        raw_value = None
+        if online:
+            if info_name:
+                raw_value = STATUS_VALUE_STORE.get((ip, "info", info_name))
+            if raw_value is None and physical:
+                raw_value = STATUS_VALUE_STORE.get(
+                    (ip, "physical", physical)
+                )
+            if raw_value is None and info_index:
+                raw_value = STATUS_VALUE_STORE.get(
+                    (ip, "index", info_index)
+                )
+    if not online:
+        return {
+            "raw": None, "effective": None, "online": False,
+            "quality": "RTU OFFLINE",
+        }
+    if raw_value is None:
+        return {
+            "raw": None, "effective": None, "online": True,
+            "quality": "POINT NOT RECEIVED",
+        }
+    try:
+        raw_yx = int(float(raw_value))
+    except (TypeError, ValueError, OverflowError):
+        return {
+            "raw": None, "effective": None, "online": True,
+            "quality": "INVALID VALUE",
+        }
+    return {
+        "raw": raw_yx,
+        "effective": _cbz_breaker_state(raw_yx, source.get("Reverse", 0)),
+        "online": True,
+        "quality": "GOOD",
+    }
+
+
+def _digital_breaker_snapshot(binding):
+    """Resolve CLOSED/OPEN/INVALID from a position point or contact pair."""
+    source = binding if isinstance(binding, dict) else {}
+    close_point = _status_point_snapshot(source)
+    open_binding = _companion_open_status_binding(source)
+    open_point = (
+        _status_point_snapshot(open_binding) if open_binding else None
+    )
+    base = {
+        "device_addr": _norm_text(source.get("Device_Addr")),
+        "bay_name": _norm_text(source.get("Bay_Name")),
+        "physical_name": _norm_text(source.get("Physical_Name")),
+        "info_name": _norm_text(
+            source.get("Info_Name", source.get("InfoName"))
+        ),
+        "asdu": source.get("ASDU", ""),
+        "ioa": source.get("IOA", ""),
+        "raw_yx": close_point["raw"],
+        "effective_yx": close_point["effective"],
+        "open_raw_yx": open_point["raw"] if open_point else None,
+        "open_effective_yx": (
+            open_point["effective"] if open_point else None
+        ),
+        "open_binding": open_binding,
+        "rtu_online": close_point["online"],
+    }
+    if close_point["quality"] != "GOOD":
+        base.update({
+            "state": "UNKNOWN",
+            "condition": "UNKNOWN",
+            "active": None,
+            "color": source.get("unknown_color", "#808080"),
+            "quality": close_point["quality"],
+        })
+        return base
+    if open_point and open_point["quality"] != "GOOD":
+        base.update({
+            "state": "UNKNOWN",
+            "condition": "UNKNOWN",
+            "active": None,
+            "color": source.get("unknown_color", "#808080"),
+            "quality": f"OPEN CONTACT: {open_point['quality']}",
+        })
+        return base
+
+    closed = close_point["effective"]
+    opened = open_point["effective"] if open_point else None
+    if open_point and closed == opened:
+        base.update({
+            "state": "INVALID",
+            "condition": "CONTACT CONFLICT",
+            "active": None,
+            "color": source.get("invalid_color", "#ffb020"),
+            "quality": "CONTACT CONFLICT",
+        })
+    elif closed == 1:
+        base.update({
+            "state": "CLOSED",
+            "condition": "CLOSED / ON",
+            "active": True,
+            "color": source.get(
+                "true_color", source.get("active_color", "#ff2020")
+            ),
+            "quality": "GOOD",
+        })
+    else:
+        base.update({
+            "state": "OPEN",
+            "condition": "OPEN / OFF",
+            "active": False,
+            "color": source.get(
+                "false_color", source.get("inactive_color", "#14d84a")
+            ),
+            "quality": "GOOD",
+        })
+    return base
+
+
+def _normalize_monitor_breaker_binding(binding, fallback):
+    """Keep one Monitor-TV breaker digital and attach its open contact."""
+    selected = binding if isinstance(binding, dict) else {}
+    normalized = dict(fallback)
+    if selected.get("Source_Kind") == "rectangle_status_csv":
+        normalized.update(selected)
+    normalized.update({
+        "mode": "selected",
+        "source": "status",
+        "key": normalized.get("Physical_Name", ""),
+        "operator": "=",
+        "threshold": 1,
+        "state_mode": "digital",
+        "Source_Kind": "rectangle_status_csv",
+    })
+    normalized.setdefault("true_color", "#ff2020")
+    normalized.setdefault("false_color", "#14d84a")
+    normalized.setdefault("active_color", normalized["true_color"])
+    normalized.setdefault("inactive_color", normalized["false_color"])
+    normalized.setdefault("on_color", normalized["true_color"])
+    normalized.setdefault("off_color", normalized["false_color"])
+    normalized.setdefault("unknown_color", "#808080")
+    normalized.setdefault("invalid_color", "#ffb020")
+    normalized.setdefault("flow", "none")
+    open_binding = _companion_open_status_binding(normalized)
+    if open_binding:
+        normalized["open_binding"] = open_binding
+    else:
+        normalized.pop("open_binding", None)
+    return normalized
 
 # ListSetting defines the operator-approved Run/TV point set and its fallback
 # formulas. Parameter Setting overlays the current point identity and
@@ -3346,6 +4203,7 @@ def _load_setting_engine():
 # compatibility fallback only when a particular IOA has no CSV definition.
 _load_setting_engine()
 _load_status_settings()
+_load_soe_settings()
 
 
 def get_ioa_map(ip):
@@ -3717,37 +4575,174 @@ def _report_unique_columns(rows):
     return result
 
 
-def _ensure_report_file(bay_name, rows):
-    """Create a report CSV with Date/Time plus the Bay's configured variables."""
+def _report_log_event(event, detail, throttle_key=None):
+    """Record report failures without flooding CommunicationLog.csv."""
+    if throttle_key:
+        now = time.monotonic()
+        previous = REPORT_ERROR_LOG_TIMES.get(throttle_key, 0.0)
+        if now - previous < 60.0:
+            return
+        REPORT_ERROR_LOG_TIMES[throttle_key] = now
+    logger = globals().get("_communication_log")
+    if callable(logger):
+        logger("LOCAL", event, detail)
+    else:
+        print(f"[{event}] {detail}")
+
+
+def _report_archive_date(filename):
+    match = re.search(
+        r"\.(\d{4}-\d{2}-\d{2})(?:-\d{6}(?:-\d+)?)?\.csv$",
+        str(filename),
+    )
+    if not match:
+        return None
+    try:
+        return datetime.datetime.strptime(
+            match.group(1), "%Y-%m-%d",
+        ).date()
+    except ValueError:
+        return None
+
+
+def _report_archive_file(path, now, reason):
+    """Move one active report to an immutable dated archive."""
+    base, extension = os.path.splitext(path)
+    file_date = datetime.datetime.fromtimestamp(
+        os.path.getmtime(path),
+    ).date()
+    date_text = file_date.strftime("%Y-%m-%d")
+    archive = f"{base}.{date_text}{extension}"
+    if os.path.exists(archive):
+        clock = now.strftime("%H%M%S")
+        archive = f"{base}.{date_text}-{clock}{extension}"
+        sequence = 2
+        while os.path.exists(archive):
+            archive = (
+                f"{base}.{date_text}-{clock}-{sequence}{extension}"
+            )
+            sequence += 1
+    os.replace(path, archive)
+    _report_log_event(
+        "REPORT_ROTATED",
+        f"{os.path.basename(path)} -> {os.path.basename(archive)}; {reason}",
+    )
+    return archive
+
+
+def _report_enforce_retention(now=None):
+    """Delete dated report archives beyond the rolling retention window."""
+    global REPORT_LAST_RETENTION_DATE
+    now = now or datetime.datetime.now()
+    today = now.date()
+    if REPORT_LAST_RETENTION_DATE == today:
+        return []
+    REPORT_LAST_RETENTION_DATE = today
+    cutoff = today - datetime.timedelta(
+        days=REPORT_RETENTION_DAYS - 1,
+    )
+    deleted = []
+    try:
+        names = os.listdir(APP_DIR)
+    except OSError as exc:
+        _report_log_event(
+            "REPORT_RETENTION_ERROR",
+            str(exc),
+            "retention-list",
+        )
+        return deleted
+    for name in names:
+        if not name.startswith("Report_") or not name.endswith(".csv"):
+            continue
+        archive_date = _report_archive_date(name)
+        if archive_date is None or archive_date >= cutoff:
+            continue
+        path = os.path.join(APP_DIR, name)
+        try:
+            os.remove(path)
+            deleted.append(path)
+        except OSError as exc:
+            _report_log_event(
+                "REPORT_RETENTION_ERROR",
+                f"{name}: {exc}",
+                f"retention:{name}",
+            )
+    if deleted:
+        _report_log_event(
+            "REPORT_RETENTION",
+            f"deleted={len(deleted)} cutoff={cutoff.isoformat()}",
+        )
+    return deleted
+
+
+def _report_prepare_file(path, header, now=None):
+    """Rotate oversized/daily reports and create a writable active file."""
+    now = now or datetime.datetime.now()
+    with REPORT_LOGGER_LOCK:
+        if os.path.exists(path) and os.path.getsize(path):
+            file_date = datetime.datetime.fromtimestamp(
+                os.path.getmtime(path),
+            ).date()
+            file_size = os.path.getsize(path)
+            reason = None
+            if file_date != now.date():
+                reason = "daily rotation"
+            elif file_size >= REPORT_MAX_FILE_BYTES:
+                reason = (
+                    f"size rotation at {REPORT_MAX_FILE_BYTES} bytes"
+                )
+            if reason:
+                _report_archive_file(path, now, reason)
+
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            with open(
+                path, "w", newline="", encoding="utf-8-sig",
+            ) as handle:
+                csv.writer(handle).writerow(header)
+        else:
+            with open(
+                path, "r", newline="", encoding="utf-8-sig",
+            ) as handle:
+                old_header = next(csv.reader(handle), [])
+            if old_header != list(header):
+                _report_archive_file(path, now, "schema change")
+                with open(
+                    path, "w", newline="", encoding="utf-8-sig",
+                ) as handle:
+                    csv.writer(handle).writerow(header)
+    _report_enforce_retention(now)
+
+
+def _report_history_paths(path):
+    """Return the active report followed by newest dated archives."""
+    path = os.path.abspath(path)
+    directory = os.path.dirname(path)
+    base, extension = os.path.splitext(os.path.basename(path))
+    prefix = base + "."
+    archives = []
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        names = []
+    for name in names:
+        if (
+            name.startswith(prefix)
+            and name.endswith(extension)
+            and _report_archive_date(name) is not None
+        ):
+            archives.append(os.path.join(directory, name))
+    archives.sort(reverse=True)
+    result = [path] if os.path.exists(path) else []
+    result.extend(archives)
+    return result
+
+
+def _ensure_report_file(bay_name, rows, now=None):
+    """Create the active Bay report and retain its dated archives."""
     path = _report_safe_filename(bay_name)
     columns = _report_unique_columns(rows)
-    header = ["Date", "Time"] + [c[0] for c in columns]
-    try:
-        if not os.path.exists(path) or os.path.getsize(path) == 0:
-            with open(path, "w", newline="", encoding="utf-8-sig") as f:
-                csv.writer(f).writerow(header)
-        else:
-            # Keep existing history. If the current CSV header differs because the
-            # setting file changed, do not destroy historical records.
-            with open(path, "r", newline="", encoding="utf-8-sig") as f:
-                old_header = next(csv.reader(f), [])
-            if old_header != header:
-                migrated = path + ".new"
-                with open(migrated, "w", newline="", encoding="utf-8-sig") as f:
-                    csv.writer(f).writerow(header)
-                    try:
-                        with open(path, "r", newline="", encoding="utf-8-sig") as oldf:
-                            old_reader = csv.DictReader(oldf)
-                            for old_row in old_reader:
-                                out = [old_row.get("Date", ""), old_row.get("Time", "")]
-                                for col in header[2:]:
-                                    out.append(old_row.get(col, ""))
-                                csv.writer(f).writerow(out)
-                    except Exception:
-                        pass
-                os.replace(migrated, path)
-    except Exception:
-        pass
+    header = ["Date", "Time"] + [column[0] for column in columns]
+    _report_prepare_file(path, header, now)
     return path, columns
 
 
@@ -3760,72 +4755,114 @@ def _report_log_once():
     date_text = now.strftime("%Y-%m-%d")
     time_text = now.strftime("%H:%M:%S")
     with DATA_LOCK:
-        snapshot = {ip: dict(values) for ip, values in DATA_STORE.items()}
-        bay_snapshot = {bay: dict(values) for bay, values in BAY_VALUE_STORE.items()}
+        snapshot = {
+            ip: dict(values) for ip, values in DATA_STORE.items()
+        }
+        bay_snapshot = {
+            bay: dict(values) for bay, values in BAY_VALUE_STORE.items()
+        }
     for bay_name, rows in groups.items():
-        path, columns = _ensure_report_file(bay_name, rows)
-        if not columns:
-            continue
-        values = [date_text, time_text]
-        for _label, physical, ip in columns:
-            # Multiple bays share one RTU IP and reuse Uab/Ia/P/Q. Prefer the
-            # exact bay store so one pump cannot overwrite another pump's log.
-            values.append(
-                bay_snapshot.get(bay_name, {}).get(
-                    physical,
-                    snapshot.get(ip, {}).get(physical, "")
-                )
-            )
         try:
+            path, columns = _ensure_report_file(
+                bay_name, rows, now,
+            )
+            if not columns:
+                continue
+            values = [date_text, time_text]
+            for _label, physical, ip in columns:
+                values.append(
+                    bay_snapshot.get(bay_name, {}).get(
+                        physical,
+                        snapshot.get(ip, {}).get(physical, ""),
+                    )
+                )
             with REPORT_LOGGER_LOCK:
-                with open(path, "a", newline="", encoding="utf-8-sig") as f:
-                    csv.writer(f).writerow(values)
-        except Exception:
-            continue
+                with open(
+                    path, "a", newline="", encoding="utf-8-sig",
+                ) as handle:
+                    csv.writer(handle).writerow(values)
+        except Exception as exc:
+            _report_log_event(
+                "REPORT_WRITE_ERROR",
+                f"{bay_name}: {type(exc).__name__}: {exc}",
+                f"bay:{bay_name}",
+            )
 
 
 def _report_all_variables_once():
-    """One explicit row for every active ListSetting point, every minute."""
-    path = os.path.join(APP_DIR, "Report_All_Realtime_Variables.csv")
+    """Record every active ListSetting point in the rotated detail report."""
+    path = os.path.join(
+        APP_DIR, "Report_All_Realtime_Variables.csv",
+    )
     with SETTING_LOCK:
         rows = [dict(row) for row in SETTING_REGISTRY]
     if not rows:
         return
     now = datetime.datetime.now()
     with DATA_LOCK:
-        snapshot = {ip: dict(values) for ip, values in DATA_STORE.items()}
-        bay_snapshot = {bay: dict(values) for bay, values in BAY_VALUE_STORE.items()}
-    header = ["Date", "Time", "Device_Addr", "Bay_Name", "Physical_Name", "Info_Name", "Type", "ASDU", "IOA", "Unit", "Value"]
+        snapshot = {
+            ip: dict(values) for ip, values in DATA_STORE.items()
+        }
+        bay_snapshot = {
+            bay: dict(values) for bay, values in BAY_VALUE_STORE.items()
+        }
+    header = [
+        "Date", "Time", "Device_Addr", "Bay_Name", "Physical_Name",
+        "Info_Name", "Type", "ASDU", "IOA", "Unit", "Value",
+    ]
     try:
-        new_file = not os.path.exists(path) or os.path.getsize(path) == 0
+        _report_prepare_file(path, header, now)
         output = []
+        date_text = now.strftime("%Y-%m-%d")
+        time_text = now.strftime("%H:%M:%S")
         for row in rows:
             ip = str(row.get("Device_Addr", ""))
             bay = str(row.get("Bay_Name", ""))
             physical = str(row.get("Physical_Name", ""))
-            value = bay_snapshot.get(bay, {}).get(physical, snapshot.get(ip, {}).get(physical, ""))
-            output.append([now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S"), ip, bay, physical,
-                           row.get("Info_Name", ""), row.get("Type", ""), row.get("ASDU", ""),
-                           row.get("IOA", ""), row.get("Unit", ""), value])
-        with REPORT_LOGGER_LOCK, open(path, "a", newline="", encoding="utf-8-sig") as handle:
-            writer = csv.writer(handle)
-            if new_file:
-                writer.writerow(header)
-            writer.writerows(output)
-    except Exception:
-        pass
+            value = bay_snapshot.get(bay, {}).get(
+                physical,
+                snapshot.get(ip, {}).get(physical, ""),
+            )
+            output.append([
+                date_text,
+                time_text,
+                ip,
+                bay,
+                physical,
+                row.get("Info_Name", ""),
+                row.get("Type", ""),
+                row.get("ASDU", ""),
+                row.get("IOA", ""),
+                row.get("Unit", ""),
+                value,
+            ])
+        with REPORT_LOGGER_LOCK:
+            with open(
+                path, "a", newline="", encoding="utf-8-sig",
+            ) as handle:
+                csv.writer(handle).writerows(output)
+    except Exception as exc:
+        _report_log_event(
+            "REPORT_WRITE_ERROR",
+            f"all variables: {type(exc).__name__}: {exc}",
+            "all-variables",
+        )
 
 
 def _report_logger_worker():
-    """Background logger: exactly one engineering snapshot every two seconds."""
+    """Record one engineering snapshot every 60 seconds."""
     while True:
         started = time.monotonic()
         try:
             _load_setting_engine()
             _report_log_once()
             _report_all_variables_once()
-        except Exception:
-            pass
+        except Exception as exc:
+            _report_log_event(
+                "REPORT_LOGGER_ERROR",
+                f"{type(exc).__name__}: {exc}",
+                "logger",
+            )
         elapsed = time.monotonic() - started
         time.sleep(max(0.05, REPORT_LOG_INTERVAL - elapsed))
 
@@ -3876,81 +4913,323 @@ def _communication_log(ip, event, detail=""):
         pass
 
 
-def _set_status_raw_value(ip, asdu, ioa, raw):
-    """Store one digital IEC value for rectangle-only status bindings."""
-    with STATUS_LOCK:
-        rows = list(STATUS_REGISTRY)
+def _matching_digital_rows(rows, ip, asdu, ioa):
+    """Return configured digital points matching one IEC source address."""
     matches = []
     for row in rows:
         if _norm_text(row.get("Device_Addr")) != _norm_text(ip):
             continue
-        parsed_asdu = row.get("Parsed_ASDU")
-        parsed_ioa = row.get("Parsed_IOA")
-        if parsed_asdu is not None and parsed_ioa is not None:
-            try:
-                if int(parsed_asdu) == int(asdu) and int(parsed_ioa) == int(ioa):
-                    matches.append(row)
-            except Exception:
-                pass
-            continue
-
-        # Legacy fallback for manually entered rows whose InfoName does not
-        # follow the DDYXAAAAIIIIII hexadecimal convention.
+        try:
+            if (
+                int(row.get("Parsed_ASDU")) == int(asdu)
+                and int(row.get("Parsed_IOA")) == int(ioa)
+            ):
+                matches.append(row)
+                continue
+        except (TypeError, ValueError):
+            pass
         candidates = set()
-        for value in (row.get("Status_IOA"), row.get("Info_Index")):
+        for candidate in (row.get("Status_IOA"), row.get("Info_Index")):
             try:
-                candidates.add(int(float(value)))
-            except Exception:
+                candidates.add(int(float(candidate)))
+            except (TypeError, ValueError):
                 pass
         if int(ioa) not in candidates:
             continue
         try:
-            if int(float(row.get("Jian_Ge_Id"))) == int(asdu):
-                matches.append(row)
-        except Exception:
-            matches.append(row)
-    if not matches:
-        return
-    with DATA_LOCK:
-        for row in matches:
-            info_name = _norm_text(row.get("InfoName"))
-            physical = _norm_text(row.get("PhysicalName"))
-            index = _norm_text(row.get("Info_Index"))
-            # Status IEC-104 bersifat diskret. Simpan sebagai integer agar
-            # snapshot/relay mengirim 0, 1 (atau 2/3 untuk double point),
-            # bukan angka rekayasa seperti 0.0.
-            status_raw = int(raw)
-            if info_name:
-                STATUS_VALUE_STORE[(str(ip), "info", info_name)] = status_raw
-            if physical:
-                STATUS_VALUE_STORE[(str(ip), "physical", physical)] = status_raw
-            if index:
-                STATUS_VALUE_STORE[(str(ip), "index", index)] = status_raw
+            if int(float(row.get("Jian_Ge_Id"))) != int(asdu):
+                continue
+        except (TypeError, ValueError):
+            pass
+        matches.append(row)
+    return matches
+
+
+def _set_status_raw_value(
+    ip, asdu, ioa, value, *, raw_value=None, quality=0, type_id=1,
+    cause=0, source_time=None, receive_time=None,
+    source_timestamp_valid=False,
+):
+    """Update current YX state and persist each direct IEC transition as SOE."""
+    with STATUS_LOCK:
+        status_rows = list(STATUS_REGISTRY)
+    with SOE_LOCK:
+        soe_rows = list(SOE_REGISTRY)
+    status_matches = _matching_digital_rows(
+        status_rows, ip, asdu, ioa
+    )
+    soe_matches = _matching_digital_rows(soe_rows, ip, asdu, ioa)
+
+    if value is not None and not (int(quality) & 0x80):
+        with DATA_LOCK:
+            for row in status_matches:
+                info_name = _norm_text(
+                    row.get("InfoName") or row.get("Info_Name")
+                )
+                physical = _norm_text(
+                    row.get("PhysicalName") or row.get("Physical_Name")
+                )
+                index = _norm_text(row.get("Info_Index"))
+                status_value = int(value)
+                if info_name:
+                    STATUS_VALUE_STORE[
+                        (str(ip), "info", info_name)
+                    ] = status_value
+                if physical:
+                    STATUS_VALUE_STORE[
+                        (str(ip), "physical", physical)
+                    ] = status_value
+                if index:
+                    STATUS_VALUE_STORE[
+                        (str(ip), "index", index)
+                    ] = status_value
+
+    configs = [(row, "STATUS") for row in status_matches]
+    configs.extend((row, "SOE") for row in soe_matches)
+    if not configs:
+        configs = [({
+            "Device_Addr": ip,
+            "Bay_Name": ip,
+            "Physical_Name": f"Unmapped digital point {asdu}/{ioa}",
+            "Info_Name": "",
+            "Source_Kind": "unmapped_iec104",
+        }, "UNMAPPED")]
+
+    received = (
+        receive_time
+        or datetime.datetime.now().isoformat(timespec="milliseconds")
+    )
+    source = source_time or received
+    stored_events = []
+    for row, category in configs:
+        info_name = _norm_text(
+            row.get("InfoName") or row.get("Info_Name")
+        )
+        physical = _norm_text(
+            row.get("PhysicalName") or row.get("Physical_Name")
+        )
+        bay_name = _norm_text(row.get("Bay_Name")) or str(ip)
+        reverse = row.get("Reverse", 0) if category == "STATUS" else 0
+        effective_value = (
+            None
+            if value is None
+            else int(_cbz_breaker_state(value, reverse))
+        )
+        state_text = (
+            "INDETERMINATE"
+            if effective_value is None
+            else "CLOSE/ON"
+            if effective_value == 1
+            else "OPEN/OFF"
+        )
+        if category == "SOE":
+            open_alert = _flag_enabled(row.get("OpenAlertFlag"))
+            close_alert = _flag_enabled(row.get("CloseAlertFlag"))
+            ring = _flag_enabled(row.get("Ring"))
+            flute = _flag_enabled(row.get("Flute"))
+            voice = _flag_enabled(
+                row.get("CloseVoiceFlag")
+                if effective_value == 1
+                else row.get("OpenVoiceFlag")
+            )
+            sound_path = _configured_sound_path(
+                row.get("CloseSoundFile")
+                if effective_value == 1
+                else row.get("OpenSoundFile")
+            )
+        elif category == "STATUS":
+            open_alert = _flag_enabled(row.get("OpenAlertEnable"))
+            close_alert = _flag_enabled(row.get("CloseAlertEnable"))
+            ring = _flag_enabled(
+                row.get("CloseRingEnable")
+                if effective_value == 1
+                else row.get("OpenRingEnable")
+            )
+            flute = _flag_enabled(
+                row.get("CloseFluteEnable")
+                if effective_value == 1
+                else row.get("OpenFluteEnable")
+            )
+            voice = _flag_enabled(
+                row.get("SetVoice")
+                if effective_value == 1
+                else row.get("ResetVoice")
+            )
+            sound_path = _configured_sound_path(
+                row.get("SetVoiceFile")
+                if effective_value == 1
+                else row.get("ResetVoiceFile")
+            )
+        else:
+            open_alert = close_alert = ring = flute = voice = False
+            sound_path = ""
+
+        point_key = (
+            f"{category}:{info_name}"
+            if info_name
+            else f"{category}:{ip}:{int(asdu)}:{int(ioa)}"
+        )
+        severity = _alert_severity(
+            row.get("AlertLevel"),
+            "CRITICAL" if category == "SOE" else "WARNING",
+        )
+        alarm_enabled = (
+            bool(close_alert if effective_value == 1 else open_alert)
+            if effective_value in (0, 1)
+            else False
+        )
+        event = {
+            "source_time": source,
+            "receive_time": received,
+            "source_timestamp_valid": bool(source_timestamp_valid),
+            "source_ip": str(ip),
+            "asdu": int(asdu),
+            "ioa": int(ioa),
+            "type_id": int(type_id),
+            "cause": int(cause),
+            "point_key": point_key,
+            "info_name": info_name,
+            "physical_name": physical,
+            "bay_name": bay_name,
+            "value": effective_value,
+            "raw_value": int(
+                raw_value if raw_value is not None else value or 0
+            ),
+            "quality": int(quality) & 0xF0,
+            "quality_text": quality_text(quality),
+            "state_text": state_text,
+            "severity": severity if alarm_enabled else "NORMAL",
+            "alarm_enabled": alarm_enabled,
+            "open_alert_enabled": open_alert,
+            "close_alert_enabled": close_alert,
+            "annunciate": bool(ring or flute or voice),
+            "sound_path": sound_path,
+            "origin": "LOCAL",
+            "alarm_description": (
+                f"{physical or info_name or point_key} {state_text} "
+                f"(ASDU {int(asdu)}, IOA {int(ioa)})"
+            ),
+        }
+        stored = EVENT_STORE.record_observation(
+            event, force_event=int(type_id) in (2, 4, 30, 31)
+        )
+        if stored is None:
+            continue
+        stored_events.append(stored)
+        alarm_key = (
+            f"DIGITAL:{ip}:{int(asdu)}:{int(ioa)}:{point_key}"
+        )
+        action, alarm = EVENT_STORE.apply_status_alarm(
+            stored, alarm_key
+        )
+        if action in {"ACTIVE", "UPDATED"} and alarm is not None:
+            _append_alarm_history_row(
+                bay_name,
+                stored["alarm_description"],
+                stored["severity"],
+                stored["source_time"],
+            )
+        elif action == "CLEARED" and alarm is not None:
+            _append_alarm_history_row(
+                alarm.get("device", bay_name),
+                (
+                    "RETURN TO NORMAL: "
+                    f"{alarm.get('description', physical)}"
+                ),
+                "NORMAL",
+                stored["source_time"],
+            )
+    return stored_events
 
 
 def _parse_status_iec104_objects(ip, asdu_addr, type_id, vsq, frame):
-    """Decode IEC-104 single/double-point information for rectangle status."""
+    """Decode single/double points, quality, and CP24/CP56 source time."""
     is_sequence = bool(vsq & 0x80)
     count = vsq & 0x7F
     if count <= 0:
         return
-    timed = type_id in (30, 31)
-    payload_size = 8 if timed else 1  # SIQ/DIQ plus optional CP56Time2a.
+    cp24_timed = type_id in (2, 4)
+    cp56_timed = type_id in (30, 31)
+    payload_size = 4 if cp24_timed else 8 if cp56_timed else 1
+    double_point = type_id in (3, 4, 31)
+    cause = int(frame[8]) & 0x3F if len(frame) > 8 else 0
 
-    def status_value(byte_value):
-        if type_id in (3, 31):
-            return int(byte_value) & 0x03
-        return int(byte_value) & 0x01
+    def decode_object(status_byte, time_payload):
+        raw_state = int(status_byte) & (
+            0x03 if double_point else 0x01
+        )
+        if double_point:
+            logical_value = (
+                0
+                if raw_state == 1
+                else 1
+                if raw_state == 2
+                else None
+            )
+        else:
+            logical_value = raw_state
+        quality = int(status_byte) & 0xF0
+        received_at = datetime.datetime.now()
+        if cp56_timed:
+            source_at, timestamp_valid = parse_cp56_time2a(
+                time_payload, received_at
+            )
+        elif cp24_timed:
+            source_at, timestamp_valid = parse_cp24_time2a(
+                time_payload, received_at
+            )
+        else:
+            source_at = received_at.isoformat(timespec="milliseconds")
+            timestamp_valid = False
+        return (
+            logical_value,
+            raw_state,
+            quality,
+            source_at,
+            received_at.isoformat(timespec="milliseconds"),
+            timestamp_valid,
+        )
+
+    def consume(ioa, status_offset):
+        if status_offset + payload_size > len(frame):
+            return False
+        status_byte = frame[status_offset]
+        time_payload = bytes(
+            frame[status_offset + 1:status_offset + payload_size]
+        )
+        (
+            value,
+            raw_state,
+            quality,
+            source_at,
+            received_at,
+            timestamp_valid,
+        ) = decode_object(status_byte, time_payload)
+        _set_status_raw_value(
+            ip,
+            asdu_addr,
+            ioa,
+            value,
+            raw_value=raw_state,
+            quality=quality,
+            type_id=type_id,
+            cause=cause,
+            source_time=source_at,
+            receive_time=received_at,
+            source_timestamp_valid=timestamp_valid,
+        )
+        return True
 
     if is_sequence:
         if len(frame) < 15:
             return
-        ioa_start = frame[12] | (frame[13] << 8) | (frame[14] << 16)
+        ioa_start = (
+            frame[12] | (frame[13] << 8) | (frame[14] << 16)
+        )
         offset = 15
         for index in range(count):
-            if offset + payload_size > len(frame):
+            if not consume(ioa_start + index, offset):
                 break
-            _set_status_raw_value(ip, asdu_addr, ioa_start + index, status_value(frame[offset]))
             offset += payload_size
         return
 
@@ -3958,8 +5237,13 @@ def _parse_status_iec104_objects(ip, asdu_addr, type_id, vsq, frame):
     for _ in range(count):
         if offset + 3 + payload_size > len(frame):
             break
-        ioa = frame[offset] | (frame[offset + 1] << 8) | (frame[offset + 2] << 16)
-        _set_status_raw_value(ip, asdu_addr, ioa, status_value(frame[offset + 3]))
+        ioa = (
+            frame[offset]
+            | (frame[offset + 1] << 8)
+            | (frame[offset + 2] << 16)
+        )
+        if not consume(ioa, offset + 3):
+            break
         offset += 3 + payload_size
 
 
@@ -4019,7 +5303,7 @@ def _parse_iec104_frame(ip, frame, sock, rx_state):
 
     # Digital status types feed only rectangle bindings.  They never enter
     # the analog scaling/report/alarm registries.
-    if type_id in (1, 3, 30, 31):
+    if type_id in (1, 2, 3, 4, 30, 31):
         _parse_status_iec104_objects(ip, asdu_addr, type_id, vsq, frame)
         return
 
@@ -4396,8 +5680,7 @@ def get_network_screen_config(viewport_width):
 # <<< END NETWORK MASTER EDITABLE BLOCK >>>
 
 class SCADAMainUI:
-    ROLE_PASSWORD = "password"
-    ROLE_ORDER = ("Operator", "Admin", "Developer")
+    ROLE_ORDER = AUTH_ROLES
     ROLE_PERMISSIONS = {
         "Operator": frozenset({"view"}),
         "Admin": frozenset({"view", "crud", "configure"}),
@@ -4471,6 +5754,8 @@ class SCADAMainUI:
         self._shutting_down = False
         self.user_switch_button = None
         self.vinci_threads_started = False
+        self._auth_failure_count = 0
+        self._auth_locked_until = 0.0
 
         # ------------------------------------------------------------------
         # ALARM ENGINE STATE
@@ -4481,10 +5766,14 @@ class SCADAMainUI:
         self.alarm_states = {}
         self.alarm_offline_since = {}
         self.alarm_engine_lock = threading.RLock()
-        self.alarm_history_file = os.path.join(APP_DIR, "AlarmHistory.csv")
-        self.alarm_active_file = os.path.join(APP_DIR, "Alarm.csv")
+        self.alarm_history_file = ALARM_HISTORY_PATH
+        self.alarm_active_file = ALARM_ACTIVE_PATH
         self.alarm_engine_started = False
         self.alarm_last_scan = 0.0
+        self.alarm_silenced = False
+        self.alarm_flash_phase = False
+        self.annunciated_alarm_cycles = set()
+        self.real_time_alarm_key_maps = {}
 
         self.root.title('SCADA BONT')
         try:
@@ -4574,16 +5863,67 @@ class SCADAMainUI:
         return tk.Button(parent, **kwargs)
 
     def _bind_mousewheel(self, widget):
-        """Scroll Treeview/Paned content with the mouse wheel without showing a scrollbar."""
+        """Scroll Tk widgets with native wheel deltas and pointer-based routing."""
         def _wheel(event):
             try:
-                widget.yview_scroll(int(-1 * (event.delta / 120)), "units")
-            except Exception:
+                delta = int(event.delta)
+                if delta == 0:
+                    return "break"
+                # Windows reports multiples of 120; macOS reports small deltas
+                # such as +/-1. Dividing every platform by 120 made macOS a no-op.
+                units = int(-delta / 120) if abs(delta) >= 120 else -delta
+                widget.yview_scroll(units, "units")
+            except (AttributeError, TypeError, ValueError, tk.TclError):
                 pass
             return "break"
+
+        def _x11_wheel(units):
+            def _scroll(_event):
+                try:
+                    widget.yview_scroll(units, "units")
+                except tk.TclError:
+                    pass
+                return "break"
+            return _scroll
+
+        def _pointer_is_inside():
+            try:
+                pointed = widget.winfo_containing(*widget.winfo_pointerxy())
+                while pointed is not None:
+                    if pointed == widget:
+                        return True
+                    pointed = getattr(pointed, "master", None)
+            except tk.TclError:
+                pass
+            return False
+
+        def _route_from_toplevel(handler):
+            def _routed(event):
+                if not _pointer_is_inside():
+                    return None
+                return handler(event)
+            return _routed
+
+        x11_up = _x11_wheel(-3)
+        x11_down = _x11_wheel(3)
         widget.bind("<MouseWheel>", _wheel, add="+")
-        widget.bind("<Button-4>", lambda e: (widget.yview_scroll(-3, "units"), "break")[1], add="+")
-        widget.bind("<Button-5>", lambda e: (widget.yview_scroll(3, "units"), "break")[1], add="+")
+        widget.bind("<Button-4>", x11_up, add="+")
+        widget.bind("<Button-5>", x11_down, add="+")
+
+        # Tk can send wheel events to the focused Entry instead of the widget
+        # under the pointer. Route them from the containing window when the
+        # pointer is actually over this scrollable widget.
+        toplevel = widget.winfo_toplevel()
+        if toplevel != widget:
+            toplevel.bind(
+                "<MouseWheel>", _route_from_toplevel(_wheel), add="+",
+            )
+            toplevel.bind(
+                "<Button-4>", _route_from_toplevel(x11_up), add="+",
+            )
+            toplevel.bind(
+                "<Button-5>", _route_from_toplevel(x11_down), add="+",
+            )
 
     def _fit_tree_columns(self, tree, columns, minimums=None, weights=None):
         """Make Treeview columns fill the available width; no horizontal scrollbar."""
@@ -4809,6 +6149,11 @@ class SCADAMainUI:
         graph_menu.add_command(
             label="Alarm History Explorer",
             command=self.action_his_alarm,
+            state=authenticated_state,
+        )
+        graph_menu.add_command(
+            label="SOE Timeline",
+            command=self.action_soe,
             state=authenticated_state,
         )
         menubar.add_cascade(label="Graph", menu=graph_menu)
@@ -5528,8 +6873,8 @@ class SCADAMainUI:
 
         columns = (
             "group", "name", "symbol", "unit", "actual", "quality", "raw",
-            "source", "ip", "asdu", "ioa", "coefficient", "ctpt", "offset",
-            "formula", "calculation",
+            "source", "ip", "infoname", "asdu", "ioa", "coefficient", "ctpt",
+            "offset", "formula", "calculation",
         )
         headings = {
             "group": ("Area / Bay", 190, "w"),
@@ -5540,6 +6885,7 @@ class SCADAMainUI:
             "raw": ("Nilai RAW", 105, "e"),
             "source": ("Sumber Konfigurasi", 245, "w"),
             "ip": ("IP RTU", 125, "center"),
+            "infoname": ("InfoName", 170, "center"),
             "asdu": ("ASDU", 75, "e"),
             "ioa": ("IOA", 85, "e"),
             "coefficient": ("Coefficient", 105, "e"),
@@ -5618,6 +6964,7 @@ class SCADAMainUI:
                         continue
                     visible.append(row)
 
+                scroll_position = tree.yview()
                 existing_items = set(tree.get_children())
                 wanted_items = set()
                 for index, row in enumerate(visible):
@@ -5633,13 +6980,16 @@ class SCADAMainUI:
                     values = tuple(row.get(column, "") for column in columns)
                     if item_id in existing_items:
                         tree.item(item_id, values=values, tags=(tag,))
-                        tree.move(item_id, "", index)
+                        if tree.index(item_id) != index:
+                            tree.move(item_id, "", index)
                     else:
                         tree.insert(
                             "", "end", iid=item_id, values=values, tags=(tag,),
                         )
                 for item_id in existing_items - wanted_items:
                     tree.delete(item_id)
+                if scroll_position:
+                    tree.yview_moveto(scroll_position[0])
 
                 status_var.set(
                     f"{len(visible)} dari {len(rows)} mapping | "
@@ -5773,8 +7123,8 @@ class SCADAMainUI:
         table_host.pack(fill="both", expand=True, padx=12, pady=(0, 8))
         columns = (
             "monitor", "kind", "element", "point", "actual", "raw", "quality",
-            "source", "ip", "asdu", "ioa", "formula", "coefficient", "ctpt",
-            "offset", "unit", "rule",
+            "source", "ip", "infoname", "asdu", "ioa", "formula",
+            "coefficient", "ctpt", "offset", "unit", "rule",
         )
         headings = {
             "monitor": ("Monitor", 70, "center"),
@@ -5786,6 +7136,7 @@ class SCADAMainUI:
             "quality": ("Kualitas", 105, "center"),
             "source": ("Sumber Konfigurasi", 245, "w"),
             "ip": ("IP RTU", 125, "center"),
+            "infoname": ("InfoName", 170, "center"),
             "asdu": ("ASDU", 75, "e"),
             "ioa": ("IOA", 85, "e"),
             "formula": ("Formula / Logika", 165, "w"),
@@ -5827,8 +7178,8 @@ class SCADAMainUI:
         tk.Label(
             footer,
             text=(
-                "Nilai aktual sama dengan tampilan G1/G2. Breaker aktif jika "
-                "nilai pembanding memenuhi operator > / < terhadap threshold."
+                "Nilai aktual tetap memakai ListSetting. Posisi breaker memakai "
+                "StatusSetting YX: CLOSED merah, OPEN hijau, unknown abu-abu."
             ),
             bg="#d4d0c8",
             fg="#555555",
@@ -5858,6 +7209,7 @@ class SCADAMainUI:
                         continue
                     visible.append(row)
 
+                scroll_position = tree.yview()
                 existing_items = set(tree.get_children())
                 wanted_items = set()
                 for index, row in enumerate(visible):
@@ -5873,13 +7225,16 @@ class SCADAMainUI:
                     values = tuple(row.get(column, "") for column in columns)
                     if item_id in existing_items:
                         tree.item(item_id, values=values, tags=(tag,))
-                        tree.move(item_id, "", index)
+                        if tree.index(item_id) != index:
+                            tree.move(item_id, "", index)
                     else:
                         tree.insert(
                             "", "end", iid=item_id, values=values, tags=(tag,),
                         )
                 for item_id in existing_items - wanted_items:
                     tree.delete(item_id)
+                if scroll_position:
+                    tree.yview_moveto(scroll_position[0])
                 status_var.set(
                     f"{len(visible)} dari {len(rows)} mapping | "
                     f"Refresh {datetime.datetime.now():%H:%M:%S}"
@@ -6407,8 +7762,31 @@ class SCADAMainUI:
                     data_frame.pack(fill="both", expand=True)
                 active["view"] = "data"
 
+        def parameter_display_fields(category):
+            fields = list(cbz_device_data.field_names(self.cbz_config, category))
+            if "Infoname" in fields:
+                info_index = fields.index("Infoname") + 1
+                fields[info_index:info_index] = ["ASDU", "IOA"]
+            return tuple(fields)
+
+        def parameter_record_values(category, record):
+            values = []
+            for field in cbz_device_data.field_names(self.cbz_config, category):
+                values.append(cbz_device_data.format_value(record.get(field)))
+                if field == "Infoname":
+                    decoded = _decode_parameter_info_name(record.get(field))
+                    values.extend((
+                        cbz_device_data.format_value(
+                            decoded.get("Parsed_ASDU")
+                        ),
+                        cbz_device_data.format_value(
+                            decoded.get("Parsed_IOA")
+                        ),
+                    ))
+            return tuple(values)
+
         def configure_columns(category):
-            fields = cbz_device_data.field_names(self.cbz_config, category)
+            fields = parameter_display_fields(category)
             identifiers = tuple(f"column_{index}" for index in range(len(fields)))
             table.configure(columns=identifiers, displaycolumns=identifiers)
             for identifier, field in zip(identifiers, fields):
@@ -6516,11 +7894,7 @@ class SCADAMainUI:
             query = record_search_var.get().strip().casefold()
             prepared_rows = []
             for original_index, record in enumerate(rows):
-                values = cbz_device_data.record_values(
-                    self.cbz_config,
-                    category,
-                    record,
-                )
+                values = parameter_record_values(category, record)
                 if query and query not in " ".join(values).casefold():
                     continue
                 prepared_rows.append((original_index, values))
@@ -6798,14 +8172,41 @@ class SCADAMainUI:
                     pady=8,
                 ).grid(row=0, column=0, columnspan=4, sticky="ew")
                 variables = {}
+                derived_variables = {}
                 section_vars[category] = variables
-                for field_index, field in enumerate(definition["fields"]):
+                field_definitions = list(definition["fields"])
+                info_position = next(
+                    (
+                        index + 1
+                        for index, field in enumerate(field_definitions)
+                        if field["name"] == "Infoname"
+                    ),
+                    None,
+                )
+                if info_position is not None:
+                    field_definitions[info_position:info_position] = [
+                        {
+                            "name": "ASDU",
+                            "sql_type": "derived from Infoname",
+                            "derived_key": "Parsed_ASDU",
+                        },
+                        {
+                            "name": "IOA",
+                            "sql_type": "derived from Infoname",
+                            "derived_key": "Parsed_IOA",
+                        },
+                    ]
+                decoded_info = _decode_parameter_info_name(
+                    record.get("Infoname")
+                )
+                for field_index, field in enumerate(field_definitions):
                     row_number = field_index // 2 + 1
                     pair = field_index % 2
                     label_column = pair * 2
                     value_column = label_column + 1
                     name = field["name"]
                     sql_type = field["sql_type"]
+                    derived_key = field.get("derived_key")
                     tk.Label(
                         box,
                         text=f"{name}\n{sql_type}",
@@ -6821,32 +8222,63 @@ class SCADAMainUI:
                         padx=(12 if pair == 0 else 20, 8),
                         pady=7,
                     )
-                    variable = tk.StringVar(
-                        value=cbz_device_data.format_value(record.get(name))
-                    )
-                    variables[name] = variable
-                    if sql_type == "bit":
-                        widget = ttk.Combobox(
-                            box,
-                            textvariable=variable,
-                            values=("", "0", "1"),
-                            state="readonly",
-                            style="DM.TCombobox",
+                    if derived_key:
+                        variable = tk.StringVar(
+                            value=cbz_device_data.format_value(
+                                decoded_info.get(derived_key)
+                            )
                         )
-                    else:
+                        derived_variables[derived_key] = variable
                         widget = ttk.Entry(
                             box,
                             textvariable=variable,
                             style="DM.TEntry",
+                            state="readonly",
                         )
-                        if name in locked:
-                            widget.configure(state="readonly")
+                    else:
+                        variable = tk.StringVar(
+                            value=cbz_device_data.format_value(record.get(name))
+                        )
+                        variables[name] = variable
+                        if sql_type == "bit":
+                            widget = ttk.Combobox(
+                                box,
+                                textvariable=variable,
+                                values=("", "0", "1"),
+                                state="readonly",
+                                style="DM.TCombobox",
+                            )
+                        else:
+                            widget = ttk.Entry(
+                                box,
+                                textvariable=variable,
+                                style="DM.TEntry",
+                            )
+                            if name in locked:
+                                widget.configure(state="readonly")
                     widget.grid(
                         row=row_number,
                         column=value_column,
                         sticky="ew",
                         padx=(0, 12),
                         pady=7,
+                    )
+                if derived_variables and "Infoname" in variables:
+                    def refresh_derived_address(
+                        *_args,
+                        info_variable=variables["Infoname"],
+                        targets=derived_variables,
+                    ):
+                        decoded = _decode_parameter_info_name(
+                            info_variable.get()
+                        )
+                        for key, variable in targets.items():
+                            variable.set(
+                                cbz_device_data.format_value(decoded.get(key))
+                            )
+
+                    variables["Infoname"].trace_add(
+                        "write", refresh_derived_address
                     )
                 box.grid_columnconfigure(1, weight=1)
                 box.grid_columnconfigure(3, weight=1)
@@ -6901,6 +8333,7 @@ class SCADAMainUI:
                 CBZ8000_DEVICE_DATA_PATH,
             )
             _load_setting_engine()
+            _load_soe_settings()
             self._synchronize_ui_bindings_from_listsettings(force=True)
 
         def default_record(category):
@@ -8087,6 +9520,7 @@ class SCADAMainUI:
         self._refresh_user_display()
 
     def action_switch_user(self, required=False):
+        """Authenticate a configured role or enroll credentials during commissioning."""
         existing = self._login_window
         if existing is not None:
             try:
@@ -8110,6 +9544,16 @@ class SCADAMainUI:
             "danger": "#ff6b6b",
             "success": "#73e2a7",
         }
+        try:
+            configured_roles = set(_auth_configured_roles())
+        except RuntimeError as exc:
+            messagebox.showerror(
+                "Credential Store Error",
+                f"{exc}\n\nSCADA access remains locked.",
+                parent=self.root,
+            )
+            return False
+        initial_commissioning = not configured_roles
         result = {"authenticated": False}
         login_win = tk.Toplevel(self.root)
         self._login_window = login_win
@@ -8119,8 +9563,8 @@ class SCADAMainUI:
 
         screen_width = login_win.winfo_screenwidth()
         screen_height = login_win.winfo_screenheight()
-        win_width = min(640, max(560, int(screen_width * 0.38)))
-        win_height = min(530, max(480, int(screen_height * 0.48)))
+        win_width = min(660, max(580, int(screen_width * 0.40)))
+        win_height = min(660, max(610, int(screen_height * 0.62)))
         center_x = max((screen_width - win_width) // 2, 0)
         center_y = max((screen_height - win_height) // 2, 0)
         login_win.geometry(
@@ -8148,7 +9592,7 @@ class SCADAMainUI:
             selectforeground=[("readonly", colors["text"])],
         )
 
-        header = tk.Frame(login_win, bg="#072b46", height=112)
+        header = tk.Frame(login_win, bg="#072b46", height=104)
         header.pack(fill="x")
         header.pack_propagate(False)
         tk.Frame(header, bg=colors["accent"], height=4).pack(fill="x")
@@ -8159,13 +9603,17 @@ class SCADAMainUI:
             fg=colors["text"],
             font=("Segoe UI", 21, "bold"),
             anchor="w",
-        ).pack(fill="x", padx=28, pady=(18, 0))
+        ).pack(fill="x", padx=28, pady=(16, 0))
         tk.Label(
             header,
             text=(
-                "SECURE STARTUP LOGIN"
-                if required
-                else "SWITCH ACTIVE USER"
+                "INITIAL ADMIN COMMISSIONING"
+                if initial_commissioning
+                else (
+                    "SECURE STARTUP LOGIN"
+                    if required
+                    else "SWITCH ACTIVE USER"
+                )
             ),
             bg="#072b46",
             fg=colors["accent"],
@@ -8173,7 +9621,7 @@ class SCADAMainUI:
             anchor="w",
         ).pack(fill="x", padx=29, pady=(2, 0))
 
-        body = tk.Frame(login_win, bg=colors["bg"], padx=28, pady=22)
+        body = tk.Frame(login_win, bg=colors["bg"], padx=28, pady=18)
         body.pack(fill="both", expand=True)
         card = tk.Frame(
             body,
@@ -8181,14 +9629,18 @@ class SCADAMainUI:
             highlightbackground=colors["border"],
             highlightthickness=1,
             padx=22,
-            pady=18,
+            pady=15,
         )
         card.pack(fill="both", expand=True)
 
         session_text = (
             f"Current session: {self.current_user}"
             if self.current_user
-            else "Authentication is required before SCADA can be used."
+            else (
+                "No credentials exist. Create the initial Admin password."
+                if initial_commissioning
+                else "Authentication is required before SCADA can be used."
+            )
         )
         tk.Label(
             card,
@@ -8199,7 +9651,7 @@ class SCADAMainUI:
             anchor="w",
             padx=12,
             pady=8,
-        ).pack(fill="x", pady=(0, 15))
+        ).pack(fill="x", pady=(0, 12))
 
         tk.Label(
             card,
@@ -8209,13 +9661,18 @@ class SCADAMainUI:
             font=("Segoe UI", 9, "bold"),
             anchor="w",
         ).pack(fill="x")
-        role_var = tk.StringVar(
-            value=(
-                self.current_user
-                if self.current_user in self.ROLE_ORDER
-                else "Operator"
+        default_role = (
+            self.current_user
+            if self.current_user in self.ROLE_ORDER
+            else next(
+                (
+                    role for role in self.ROLE_ORDER
+                    if role in configured_roles
+                ),
+                "Admin",
             )
         )
+        role_var = tk.StringVar(value=default_role)
         role_combo = ttk.Combobox(
             card,
             textvariable=role_var,
@@ -8223,7 +9680,7 @@ class SCADAMainUI:
             state="readonly",
             style="Auth.TCombobox",
         )
-        role_combo.pack(fill="x", pady=(5, 11))
+        role_combo.pack(fill="x", pady=(5, 9))
 
         permission_var = tk.StringVar()
         permission_label = tk.Label(
@@ -8237,21 +9694,7 @@ class SCADAMainUI:
             padx=12,
             pady=8,
         )
-        permission_label.pack(fill="x", pady=(0, 13))
-
-        def update_role_summary(_event=None):
-            editable = self.role_has_permission(role_var.get(), "crud")
-            permission_var.set(
-                "Access: View monitoring and configuration"
-                + (" + full data CRUD" if editable else " only (read-only)")
-                + "\nRole shortcut: Ctrl+1 Operator  •  Ctrl+2 Admin  •  Ctrl+3 Developer"
-            )
-            permission_label.configure(
-                fg=colors["success"] if editable else colors["muted"]
-            )
-
-        role_combo.bind("<<ComboboxSelected>>", update_role_summary)
-        update_role_summary()
+        permission_label.pack(fill="x", pady=(0, 10))
 
         tk.Label(
             card,
@@ -8286,14 +9729,49 @@ class SCADAMainUI:
             fill="both",
             expand=True,
             padx=(12, 6),
-            pady=10,
+            pady=9,
         )
         show_password = tk.BooleanVar(value=False)
 
+        tk.Label(
+            card,
+            text="CONFIRM NEW PASSWORD",
+            bg=colors["surface"],
+            fg=colors["muted"],
+            font=("Segoe UI", 9, "bold"),
+            anchor="w",
+        ).pack(fill="x", pady=(3, 0))
+        confirm_row = tk.Frame(
+            card,
+            bg="#163750",
+            highlightbackground=colors["border"],
+            highlightthickness=1,
+        )
+        confirm_row.pack(fill="x", pady=(5, 6))
+        confirm_var = tk.StringVar()
+        confirm_entry = tk.Entry(
+            confirm_row,
+            textvariable=confirm_var,
+            show="•",
+            bg="#163750",
+            fg=colors["text"],
+            insertbackground=colors["text"],
+            selectbackground=colors["primary"],
+            relief="flat",
+            bd=0,
+            font=("Segoe UI", 12),
+        )
+        confirm_entry.pack(
+            fill="both",
+            expand=True,
+            padx=12,
+            pady=9,
+        )
+
         def toggle_password():
-            password_entry.configure(
-                show="" if show_password.get() else "•"
-            )
+            mask = "" if show_password.get() else "•"
+            password_entry.configure(show=mask)
+            confirm_entry.configure(show=mask)
 
         tk.Checkbutton(
             password_row,
@@ -8310,8 +9788,64 @@ class SCADAMainUI:
             highlightthickness=0,
         ).pack(side="right", padx=(4, 10))
 
+        status_var = tk.StringVar()
+        status_label = tk.Label(
+            card,
+            textvariable=status_var,
+            bg=colors["surface"],
+            fg=colors["danger"],
+            font=("Segoe UI", 9, "bold"),
+            anchor="w",
+            justify="left",
+            wraplength=540,
+        )
+        status_label.pack(fill="x", pady=(0, 2))
+
+        footer = tk.Frame(body, bg=colors["bg"])
+        footer.pack(fill="x", pady=(12, 0))
+        controls = {}
+
+        def can_enroll(role):
+            if configured_roles:
+                return self.current_user in {"Admin", "Developer"}
+            return role == "Admin"
+
+        def update_role_summary(_event=None):
+            role = role_var.get()
+            editable = self.role_has_permission(role, "crud")
+            configured = role in configured_roles
+            permission_var.set(
+                "Access: View monitoring and configuration"
+                + (" + full data CRUD" if editable else " only (read-only)")
+                + (
+                    "\nCredential status: CONFIGURED"
+                    if configured
+                    else (
+                        f"\nCredential status: ENROLLMENT — minimum "
+                        f"{AUTH_MIN_PASSWORD_LENGTH} characters and three "
+                        "character classes"
+                    )
+                )
+            )
+            permission_label.configure(
+                fg=colors["success"] if configured else colors["accent"]
+            )
+            confirm_entry.configure(
+                state="disabled" if configured else "normal",
+            )
+            if configured:
+                confirm_var.set("")
+            primary = controls.get("primary")
+            if primary is not None:
+                primary.configure(
+                    text="Login" if configured else "Enroll & Login",
+                )
+            status_var.set("")
+
         def select_role(role):
             role_var.set(role)
+            password_var.set("")
+            confirm_var.set("")
             update_role_summary()
             password_entry.focus_set()
 
@@ -8324,35 +9858,77 @@ class SCADAMainUI:
                 shortcut,
                 lambda _event, selected=role: select_role(selected),
             )
-
-        status_var = tk.StringVar()
-        status_label = tk.Label(
-            card,
-            textvariable=status_var,
-            bg=colors["surface"],
-            fg=colors["danger"],
-            font=("Segoe UI", 9, "bold"),
-            anchor="w",
-        )
-        status_label.pack(fill="x", pady=(0, 4))
-
-        footer = tk.Frame(body, bg=colors["bg"])
-        footer.pack(fill="x", pady=(14, 0))
+        role_combo.bind("<<ComboboxSelected>>", update_role_summary)
 
         def cancel_login():
             self._login_window = None
             login_win.destroy()
+
+        def record_auth_failure():
+            self._auth_failure_count += 1
+            if self._auth_failure_count >= 5:
+                self._auth_failure_count = 0
+                self._auth_locked_until = time.monotonic() + 30.0
+                status_var.set(
+                    "Too many failed attempts. Login is locked for 30 seconds."
+                )
+            else:
+                remaining = 5 - self._auth_failure_count
+                status_var.set(
+                    f"Password is incorrect. {remaining} attempt(s) remain "
+                    "before a 30-second lock."
+                )
+            password_var.set("")
+            password_entry.focus_set()
 
         def validate_login():
             selected_role = role_var.get()
             if selected_role not in self.ROLE_ORDER:
                 status_var.set("Select a valid user role.")
                 return
-            if password_var.get() != self.ROLE_PASSWORD:
-                status_var.set("Password is incorrect. Access was not changed.")
-                password_var.set("")
-                password_entry.focus_set()
+            lock_remaining = int(
+                math.ceil(self._auth_locked_until - time.monotonic())
+            )
+            if lock_remaining > 0:
+                status_var.set(
+                    f"Login is locked. Try again in {lock_remaining} seconds."
+                )
                 return
+
+            configured = selected_role in configured_roles
+            password = password_var.get()
+            if configured:
+                try:
+                    password_valid = _auth_verify_password(
+                        selected_role, password,
+                    )
+                except RuntimeError as exc:
+                    status_var.set(str(exc))
+                    return
+                if not password_valid:
+                    record_auth_failure()
+                    return
+            else:
+                if not can_enroll(selected_role):
+                    status_var.set(
+                        "Only an active Admin or Developer may enroll this role. "
+                        "For first commissioning, create the Admin credential."
+                    )
+                    return
+                if password != confirm_var.get():
+                    status_var.set("Password confirmation does not match.")
+                    confirm_var.set("")
+                    confirm_entry.focus_set()
+                    return
+                try:
+                    _auth_set_password(selected_role, password)
+                except (OSError, RuntimeError, ValueError) as exc:
+                    status_var.set(str(exc))
+                    return
+                configured_roles.add(selected_role)
+
+            self._auth_failure_count = 0
+            self._auth_locked_until = 0.0
             previous_role = self.current_user
             self.current_user = selected_role
             result["authenticated"] = True
@@ -8387,12 +9963,13 @@ class SCADAMainUI:
             return control
 
         primary_button = footer_action(
-            "Login" if required else "Switch User",
+            "Login",
             validate_login,
             colors["primary"],
             colors["text"],
             colors["primary_active"],
         )
+        controls["primary"] = primary_button
         primary_button.pack(side="right")
         footer_action(
             "Exit Application" if required else "Cancel",
@@ -8401,10 +9978,12 @@ class SCADAMainUI:
             colors["text"],
             colors["border"],
         ).pack(side="right", padx=(0, 10))
+        update_role_summary()
 
         login_win.protocol("WM_DELETE_WINDOW", cancel_login)
         login_win.bind("<Escape>", lambda _event: cancel_login())
         password_entry.bind("<Return>", lambda _event: validate_login())
+        confirm_entry.bind("<Return>", lambda _event: validate_login())
         role_combo.bind(
             "<Return>",
             lambda _event: password_entry.focus_set(),
@@ -9370,8 +10949,9 @@ class SCADAMainUI:
                     "Run Monitor menampilkan single-line diagram utama, nilai analog, "
                     "dan status breaker dari seluruh bay.\n\n"
                     "Nilai U, I, P, Q, frekuensi, dan parameter lainnya mengikuti "
-                    "ListSetting CSV aktif. Status breaker mengikuti StatusSetting "
-                    "digital YX:\n"
+                    "ListSetting CSV aktif. Tabel Connection Wire I/II menampilkan "
+                    "UAB, f, IA, P, dan Q; baris f memakai point frekuensi Connection "
+                    "Wire terkait. Status breaker mengikuti StatusSetting digital YX:\n"
                     "• 1 / SET / Closed = merah.\n"
                     "• 0 / RESET / Open = hijau.\n"
                     "• Data tidak valid atau RTU offline = abu-abu dengan tanda ?.\n\n"
@@ -9407,20 +10987,29 @@ class SCADAMainUI:
                 (
                     "Auxiliary System menampilkan Connection Wire I/II, dua Auxiliary "
                     "Transformer, 14 feeder motor, dan No.3 Feed Water Pump.\n\n"
-                    "Tabel nilai memperlihatkan Uab/Ubc/Uca, Ia, P, dan Q berdasarkan "
-                    "ListSetting masing-masing bay. Setiap breaker mengambil status "
-                    "digital YX dari StatusSetting; status tidak diperkirakan dari "
-                    "besar arus."
+                    "Diagram memuat 21 indikator breaker/status digital untuk sistem "
+                    "auxiliary. Setiap indikator mengambil YX dari StatusSetting terkait: "
+                    "CLOSED merah, OPEN hijau, dan tanda ? abu-abu ketika point belum "
+                    "diterima, kualitas tidak valid, atau RTU offline. Nilai Uab/Ubc/Uca, "
+                    "Ia, P, dan Q tetap dihitung dari ListSetting masing-masing bay; "
+                    "posisi breaker tidak pernah disimpulkan dari besar arus."
                 ),
             ),
             (
                 "9. Generator Monitor",
                 (
-                    "Halaman 1# dan 2# Generator Monitor menampilkan nilai generator, "
-                    "status breaker, Generator Protection, dan Protection of Generator.\n\n"
-                    "Lampu proteksi berasal dari StatusSetting generator terkait. "
-                    "Gunakan nilai, warna, dan status komunikasi secara bersamaan "
-                    "sebelum mengambil keputusan operasi."
+                    "Halaman 1# dan 2# Generator Monitor memakai susunan yang sama: "
+                    "single-line diagram di kiri, tabel nilai realtime berukuran besar "
+                    "di tengah, dan status Generator Protection di kanan.\n\n"
+                    "Tabel menampilkan 12 parameter Uab/Ubc/Uca, Ia/Ib/Ic, P, Q, "
+                    "frekuensi, COS φ, tegangan rotor, dan arus rotor. Nama parameter "
+                    "menampilkan fungsi yang mudah dibaca, InfoName konfigurasi, serta "
+                    "unit. Nilai online tampil hijau; data offline atau tidak valid "
+                    "ditampilkan sebagai NO DATA berwarna amber dan tidak boleh dianggap "
+                    "sebagai nilai nol.\n\n"
+                    "Empat breaker dan lampu proteksi berasal dari StatusSetting terkait. "
+                    "Merah berarti CLOSED, hijau OPEN, abu-abu tidak valid/offline, dan "
+                    "kuning menandai konflik pasangan kontak close/trip."
                 ),
             ),
             (
@@ -9434,15 +11023,22 @@ class SCADAMainUI:
                     "Hanya Admin/Developer.\n\n"
                     "Parameter Settings\n"
                     "Membuka Device Manager untuk melihat atau mengubah database "
-                    "peralatan dan point. Operator bersifat read-only.\n\n"
+                    "peralatan dan point. Pada tabel point, InfoName diikuti ASDU dan "
+                    "IOA hasil pemecahan heksadesimal; kedua alamat tersebut bersifat "
+                    "read-only. Operator bersifat read-only.\n\n"
                     "Mapping Run Monitoring\n"
-                    "Menampilkan sumber ListSetting, nilai RAW, rumus, dan nilai aktual "
-                    "setiap objek pada Run Monitor.\n\n"
+                    "Menampilkan sumber ListSetting, nilai RAW, rumus, coefficient, CT/PT, "
+                    "offset, unit, nilai aktual, quality, InfoName, ASDU, dan IOA setiap "
+                    "objek Run Monitor. Gunakan tabel ini untuk memastikan nilai layar "
+                    "berasal dari point IEC-104 yang benar.\n\n"
                     "Mapping G1 dan G2\n"
-                    "Menampilkan sumber IEC-104, rumus, nilai aktual, serta evaluasi "
-                    "breaker berbasis operator > / < dan threshold yang dipakai Monitor "
-                    "TV G1/G2. Tabel diperbarui otomatis ketika konfigurasi disimpan "
-                    "dari modal Monitor TV."
+                    "Menampilkan mapping live untuk seluruh elemen Monitor TV G1/G2. "
+                    "Filter Monitor, Jenis, dan Cari dapat digunakan untuk menemukan "
+                    "elemen tertentu. Baris Nilai Aktual memperlihatkan RAW, hasil rumus, "
+                    "coefficient, CT/PT, offset, unit, quality, IP, ASDU, dan IOA. Baris "
+                    "Breaker memperlihatkan StatusSetting, pasangan close/trip, Effective "
+                    "YX, dan quality. Tabel diperbarui otomatis setelah konfigurasi dari "
+                    "editor Monitor TV disimpan."
                 ),
             ),
             (
@@ -9461,12 +11057,28 @@ class SCADAMainUI:
                 "12. Menu Graph dan Report",
                 (
                     "Process Trend Explorer\n"
-                    "Menampilkan histori U, I, P, Q, dan frekuensi dengan sampling "
-                    "60 detik. Pilih peralatan dan rentang waktu, lalu gunakan Export "
-                    "Excel jika dibutuhkan.\n\n"
+                    "Menampilkan histori U, I, P, Q, dan frekuensi sebagai garis "
+                    "kontinu dalam satu grafik perbandingan relatif 0–100%. Skala ini "
+                    "dipakai untuk membandingkan pola, bukan sebagai nilai engineering. "
+                    "Sumbu waktu menampilkan tanggal/jam historian, sedangkan panel "
+                    "analisis menunjukkan nilai engineering asli beserta unitnya. Pada "
+                    "Graph Full Screen tersedia interval 1 menit, 30 menit, 1 jam, "
+                    "12 jam, dan 24 jam serta tombol ALL/U/I/P/Q/f untuk memilih kurva. "
+                    "Arahkan kursor untuk membandingkan timestamp yang sama, lalu klik "
+                    "grafik untuk mengunci atau melepas kursor. Pause View hanya "
+                    "menghentikan pembaruan tampilan; historian dan data IEC-104 tetap "
+                    "berjalan. Escape/F11 mengembalikan Process Trend Explorer; gunakan "
+                    "Export Excel jika dibutuhkan.\n\n"
                     "Alarm History Explorer\n"
                     "Menampilkan histori alarm berdasarkan rentang waktu dan dapat "
                     "diekspor ke Excel.\n\n"
+                    "SOE Timeline\n"
+                    "Buka melalui Graph > SOE Timeline untuk melihat setiap perubahan "
+                    "status digital IEC-104 berdasarkan source time RTU dan receive time "
+                    "SCADA. Tabel juga menampilkan bay, point, state, severity, alarm, "
+                    "ASDU/IOA, dan Event ID. Data diperbarui otomatis setiap 2 detik. "
+                    "Gunakan filter tanggal, bay, state, severity, dan pencarian point; "
+                    "Export CSV mengekspor hasil sesuai filter aktif.\n\n"
                     "Toolbar Report\n"
                     "Menampilkan laporan per bay, seluruh variabel realtime, dan event "
                     "status rectangle. Logger laporan berjalan setiap 60 detik."
@@ -9475,11 +11087,17 @@ class SCADAMainUI:
             (
                 "13. Alarm",
                 (
-                    "Real-Time Alarm menampilkan alarm aktif dan diperbarui setiap "
-                    "detik. Alarm History menyimpan perubahan keadaan agar event yang "
-                    "sama tidak ditulis berulang-ulang.\n\n"
-                    "Periksa Description, Device, Status, dan waktu event. Hilangnya "
-                    "alarm dari daftar aktif tidak menghapus histori alarm."
+                    "Real-Time Alarm menampilkan alarm komunikasi, batas analog, dan "
+                    "alarm digital SOE aktif dalam satu daftar yang diperbarui setiap "
+                    "detik. Acknowledge Selected mengakui baris terpilih; Acknowledge All "
+                    "mengakui seluruh alarm aktif. Acknowledge hanya mencatat penerimaan "
+                    "operator dan tidak mengubah kondisi lapangan atau menghapus alarm.\n\n"
+                    "Silence Audio menghentikan annunciator pada siklus alarm saat ini, "
+                    "tetapi indikasi visual dan status aktif tetap dipertahankan. Alarm "
+                    "hanya clear setelah kondisi sumber benar-benar kembali normal. "
+                    "Alarm History menyimpan setiap transisi dan acknowledgement tanpa "
+                    "duplikasi berulang; hilangnya alarm dari daftar aktif tidak menghapus "
+                    "histori alarm atau SOE yang tersimpan di SQLite."
                 ),
             ),
             (
@@ -9513,6 +11131,7 @@ class SCADAMainUI:
                     "Report: membuka Report Explorer.\n"
                     "Process Trend: membuka histori proses.\n"
                     "Alarm History: membuka histori alarm.\n"
+                    "SOE: membuka Sequence of Events digital IEC-104.\n"
                     "Real-Time Alarm: membuka alarm aktif.\n"
                     "Previous / Next: berpindah halaman.\n"
                     "Home: kembali ke Run Monitor.\n"
@@ -9529,9 +11148,9 @@ class SCADAMainUI:
                     "ListSetting CSV berisi alamat perangkat, Bay, nama point, ASDU, "
                     "IOA, coefficient, CT/PT, formula, offset, unit, dan limit alarm.\n\n"
                     "StatusSetting CSV khusus untuk status digital seperti breaker dan "
-                    "proteksi pada Run Monitor, System Configuration, dan Auxiliary "
-                    "System. Breaker khusus Monitor TV G1/G2 memakai perbandingan nilai "
-                    "aktual ListSetting terhadap threshold, bukan status YX.\n\n"
+                    "proteksi pada Run Monitor, System Configuration, Auxiliary System, "
+                    "Generator Monitor, serta Monitor TV G1/G2. Nilai analog ListSetting "
+                    "tidak digunakan untuk menyimpulkan posisi breaker.\n\n"
                     "Setelah perubahan parameter, gunakan Reload pada Device Manager "
                     "dan verifikasi nilai pada layar terkait. Backup manual dianjurkan "
                     "sebelum import atau perubahan besar."
@@ -9540,24 +11159,29 @@ class SCADAMainUI:
             (
                 "17. Monitor TV",
                 (
-                    "Monitor TV mempublikasikan tampilan monitoring melalui file JSON "
-                    "dan halaman HTML pada port lokal yang dikonfigurasi. Nilai numerik "
-                    "mengikuti ListSetting. Empat indikator breaker pada setiap layar "
-                    "membandingkan nilai aktual hasil formula dengan threshold.\n\n"
-                    "Editor konfigurasi hanya tersedia ketika aplikasi desktop sedang "
-                    "login sebagai Admin atau Developer; password kedua tidak diperlukan. "
-                    "Modal nilai hanya menampilkan sumber IEC-104, Device IP, ASDU, IOA, "
-                    "formula, coefficient, CT/PT, offset, unit, decimal, dan preview "
-                    "hasil aktual. Perubahan input langsung memperbarui preview sebelum "
-                    "Save.\n\n"
-                    "Modal breaker menampilkan sumber nilai pembanding dari ListSetting, "
-                    "operator lebih besar (>) atau lebih kecil (<), nilai threshold, "
-                    "warna kondisi benar/salah, dan efek kondisi aktif. Contoh: ACTUAL "
-                    "> 1 berarti breaker aktif ketika hasil perhitungan sumber lebih "
-                    "besar dari 1. Kedua modal menyesuaikan ukuran layar desktop, tablet, "
-                    "dan ponsel.\n\n"
-                    "Perubahan editor Monitor TV tetap dibatasi oleh daftar alamat IP yang "
-                    "diizinkan pada Communication Settings."
+                    "Monitor TV mempublikasikan tampilan monitoring G1/G2 melalui file "
+                    "JSON dan halaman HTML pada port lokal yang dikonfigurasi. Nilai "
+                    "numerik menggunakan perhitungan ListSetting, sedangkan empat "
+                    "indikator breaker setiap layar menggunakan StatusSetting YX.\n\n"
+                    "Editor hanya tersedia ketika aplikasi desktop login sebagai Admin "
+                    "atau Developer dan alamat browser termasuk TV Editor Allowed IPs. "
+                    "Klik nilai pada layar Monitor TV untuk membuka MAPPING NILAI AKTUAL. "
+                    "Pilih sumber ListSetting, lalu periksa Device IP, ASDU, IOA, formula, "
+                    "coefficient, CT/PT, offset, unit, dan decimal. Preview menampilkan "
+                    "RAW terbaru, hasil rumus, status RTU, serta alamat yang benar-benar "
+                    "dibaca. Perubahan input langsung dihitung ulang sebelum Save; status "
+                    "OFFLINE atau hasil NO DATA tidak boleh dianggap sebagai nol.\n\n"
+                    "Klik indikator breaker untuk membuka MAPPING BREAKER MONITOR TV. "
+                    "Sumber yang dapat dipilih dibatasi pada point breaker position atau "
+                    "breaker close dari StatusSetting. Effective YX 1 berarti CLOSED/"
+                    "merah dan 0 berarti OPEN/hijau. Jika kontak trip tersedia, close dan "
+                    "trip divalidasi sebagai pasangan; konflik berwarna kuning, sedangkan "
+                    "point belum diterima atau RTU offline berwarna abu-abu.\n\n"
+                    "Tekan Save setelah alamat dan preview benar. Perubahan langsung "
+                    "memperbarui Mapping G1 dan G2 serta layar Monitor TV yang melakukan "
+                    "refresh. Kedua modal bersifat responsif untuk desktop, tablet, dan "
+                    "ponsel. Jangan mengubah ASDU, IOA, coefficient, atau CT/PT tanpa "
+                    "mencocokkannya dengan ListSetting peralatan sumber."
                 ),
             ),
             (
@@ -9569,11 +11193,20 @@ class SCADAMainUI:
                     "3. Periksa System Configuration dan Network.\n"
                     "4. Pastikan timestamp dan kualitas data valid.\n\n"
                     "Jika nilai tidak tampil:\n"
-                    "• Periksa status RTU dan Network.\n"
-                    "• Periksa ASDU/IOA di ListSetting.\n"
-                    "• Gunakan System Diagnostics.\n"
-                    "• Jangan menganggap nilai 0 sebagai komunikasi normal tanpa "
-                    "melihat quality.\n\n"
+                    "• Periksa status RTU dan Network; NO DATA berarti sumber offline/"
+                    "invalid, bukan nilai nol.\n"
+                    "• Cocokkan Device IP, ASDU, IOA, coefficient, CT/PT, dan formula "
+                    "dengan ListSetting.\n"
+                    "• Gunakan Maintenance > Mapping Run Monitoring atau Mapping G1 dan "
+                    "G2 untuk melihat RAW, quality, sumber konfigurasi, dan hasil rumus.\n"
+                    "• Pada Monitor TV, buka editor nilai dan periksa Preview sebelum "
+                    "menyimpan perubahan.\n"
+                    "• Gunakan System Diagnostics untuk counter komunikasi dan error "
+                    "terakhir.\n\n"
+                    "Jika editor Monitor TV tidak dapat menyimpan:\n"
+                    "• Pastikan desktop login sebagai Admin/Developer.\n"
+                    "• Pastikan IP browser tercantum pada TV Editor Allowed IPs di "
+                    "Communication Settings.\n\n"
                     "Jika backup gagal:\n"
                     "• Periksa ruang disk dan akses folder backup.\n"
                     "• Buka BackupLog.csv untuk detail.\n"
@@ -9591,7 +11224,8 @@ class SCADAMainUI:
                         "Keterangan gambar:\n"
                         "• Busbar 6KV I berada di sisi kiri dan 6KV II di sisi kanan.\n"
                         "• Connection Wire One dan Connection Wire Two berada di atas "
-                        "busbar; feeder motor dan plant transformer berada di bawahnya.\n"
+                        "busbar. Tabelnya menampilkan UAB, f, IA, P, dan Q; feeder motor "
+                        "dan plant transformer berada di bawahnya.\n"
                         "• 001G, 002G, dan feeder No.3 Feed Water Pump berada di bagian "
                         "tengah sebagai orientasi posisi peralatan.\n"
                         "• Nilai dan warna yang muncul saat aplikasi berjalan adalah "
@@ -9671,10 +11305,10 @@ class SCADAMainUI:
                         "atau breaker; kotak Cari menyaring semua kolom.\n"
                         "• Baris Nilai Aktual menampilkan RAW, formula, coefficient, CT/PT, "
                         "offset, unit, dan nilai yang dikirim ke Monitor TV.\n"
-                        "• Baris Breaker menampilkan sumber ListSetting serta logika "
-                        "ACTUAL > / < threshold.\n"
-                        "• Kualitas OFFLINE atau NO DATA harus diselesaikan sebelum nilai "
-                        "dipakai untuk keputusan operasi."
+                        "• Baris Breaker menampilkan sumber StatusSetting, pasangan kontak "
+                        "close/trip, quality, dan logika Effective YX.\n"
+                        "• Kualitas OFFLINE, POINT NOT RECEIVED, atau CONTACT CONFLICT "
+                        "harus diselesaikan sebelum status dipakai untuk keputusan operasi."
                     ),
                 ),
             ),
@@ -9696,14 +11330,27 @@ class SCADAMainUI:
             "12. Menu Graph dan Report": (
                 (
                     "MANUAL_PROCESS_TREND.png",
-                    "Gambar 12-1 — Process Trend Explorer dan histori IEC-104.",
+                    "Gambar 12-1 — Grafik Process Trend dalam Graph Full Screen.",
                     (
                         "Keterangan gambar:\n"
                         "• Pilih rentang waktu dan peralatan pada panel kiri, lalu Apply.\n"
                         "• Tabel Curve Values memperlihatkan tag, unit, limit, nilai "
-                        "terpilih, dan nilai terkini.\n"
-                        "• Grafik memisahkan tegangan/arus dari daya/frekuensi agar skala "
-                        "tetap terbaca.\n"
+                        "pada kursor, dan nilai terkini.\n"
+                        "• Skala vertikal relatif 0–100% hanya membandingkan pola dan "
+                        "bukan nilai engineering sebenarnya.\n"
+                        "• Panel analisis kanan selalu menampilkan timestamp, quality, "
+                        "dan nilai asli U, I, P, Q, serta f lengkap dengan unit.\n"
+                        "• Hover menggerakkan cursor sinkron. Klik grafik untuk mengunci "
+                        "cursor; klik kembali untuk melepaskannya.\n"
+                        "• Visible Signals menyediakan ALL/U/I/P/Q/f untuk menyembunyikan "
+                        "atau menampilkan kurva. Minimal satu kurva selalu aktif.\n"
+                        "• Sumbu X menunjukkan tanggal dan jam historian. Toolbar Graph "
+                        "Interval menyediakan 1 MIN, 30 MIN, 1 HOUR, 12 HOURS, dan "
+                        "24 HOURS; grafik langsung mengikuti pilihan.\n"
+                        "• Pause View hanya membekukan tampilan; historian dan data "
+                        "IEC-104 tetap berjalan.\n"
+                        "• Graph Full Screen/F11 menampilkan grafik dan kontrol analisis; "
+                        "tekan Escape untuk kembali ke Process Trend Explorer.\n"
                         "• Status OFFLINE berarti histori pada periode tersebut tidak "
                         "memiliki nilai valid; gunakan Export Excel untuk data terpilih."
                     ),
@@ -9729,15 +11376,15 @@ class SCADAMainUI:
             "17. Monitor TV": (
                 (
                     "MANUAL_MONITOR_TV_BREAKER.png",
-                    "Gambar 17-1 — Editor breaker berbasis nilai dan threshold.",
+                    "Gambar 17-1 — Editor status digital breaker.",
                     (
                         "Keterangan gambar:\n"
-                        "• Sumber nilai pembanding berasal dari ListSetting dan memakai "
-                        "alamat serta formula engineering point yang dipilih.\n"
-                        "• Operator > mengaktifkan indikator saat actual melewati threshold; "
-                        "operator < mengaktifkannya saat actual berada di bawah threshold.\n"
-                        "• Warna kondisi benar/salah dan efek aktif hanya mengubah tampilan, "
-                        "bukan nilai IEC-104.\n"
+                        "• Sumber status berasal dari StatusSetting dan memakai point "
+                        "breaker position atau breaker close yang dipilih.\n"
+                        "• Effective YX 1 menampilkan CLOSED/merah; YX 0 menampilkan "
+                        "OPEN/hijau.\n"
+                        "• Pasangan kontak close/trip mendeteksi konflik; data invalid atau "
+                        "RTU offline tidak pernah ditampilkan sebagai OPEN.\n"
                         "• Save langsung memperbarui Mapping G1 dan G2 serta layar Monitor "
                         "TV yang sedang melakukan refresh."
                     ),
@@ -10121,6 +11768,7 @@ class SCADAMainUI:
             ("📊", 'Report', self.action_report),
             ("📈", 'Process Trend', self.action_curve),
             ("📜", 'Alarm History', self.action_his_alarm),
+            ("🕒", 'SOE', self.action_soe),
             ("🚨", 'Real-Time Alarm', self.action_alarm),
             ("◀️", 'Previous', self.action_prev_tab),
             ("▶️", 'Next', self.action_next_tab),
@@ -10516,12 +12164,16 @@ class SCADAMainUI:
             self._bind_mousewheel(tree_data)
             selected["headings"] = names
         def read_recent_rows(path, start_dt, end_dt, limit=5000):
-            """Read newest matching CSV rows without scanning a large log from its start."""
+            """Read newest rows across the active file and retained archives."""
             header = list(selected["headings"])
-            if not os.path.exists(path) or not os.path.getsize(path):
+            source_paths = [
+                source for source in _report_history_paths(path)
+                if os.path.getsize(source)
+            ]
+            if not source_paths:
                 return header, [], False
             with open(
-                path,
+                source_paths[0],
                 "r",
                 newline="",
                 encoding="utf-8-sig",
@@ -10529,49 +12181,51 @@ class SCADAMainUI:
                 header = next(csv.reader(handle), header)
 
             rows = []
-            truncated = False
             block_size = 1024 * 1024
-            with open(path, "rb") as handle:
-                handle.seek(0, os.SEEK_END)
-                position = handle.tell()
-                remainder = b""
-                while position > 0:
-                    read_size = min(block_size, position)
-                    position -= read_size
-                    handle.seek(position)
-                    data = handle.read(read_size) + remainder
-                    lines = data.split(b"\n")
-                    if position > 0:
-                        remainder = lines.pop(0)
-                    else:
-                        remainder = b""
-                    for raw_line in reversed(lines):
-                        if not raw_line.strip():
-                            continue
-                        try:
-                            row = next(csv.reader([
-                                raw_line.decode("utf-8-sig", errors="replace")
-                            ]))
-                        except (csv.Error, StopIteration):
-                            continue
-                        if len(row) < 2:
-                            continue
-                        try:
-                            row_date = datetime.datetime.strptime(
-                                row[0],
-                                "%Y-%m-%d",
-                            ).date()
-                        except ValueError:
-                            continue
-                        if row_date > end_dt:
-                            continue
-                        if row_date < start_dt:
-                            return header, rows, truncated
-                        rows.append(row)
-                        if len(rows) >= limit:
-                            truncated = True
-                            return header, rows, truncated
-            return header, rows, truncated
+            for source_path in source_paths:
+                with open(source_path, "rb") as handle:
+                    handle.seek(0, os.SEEK_END)
+                    position = handle.tell()
+                    remainder = b""
+                    while position > 0:
+                        read_size = min(block_size, position)
+                        position -= read_size
+                        handle.seek(position)
+                        data = handle.read(read_size) + remainder
+                        lines = data.split(b"\n")
+                        if position > 0:
+                            remainder = lines.pop(0)
+                        else:
+                            remainder = b""
+                        for raw_line in reversed(lines):
+                            if not raw_line.strip():
+                                continue
+                            try:
+                                row = next(csv.reader([
+                                    raw_line.decode(
+                                        "utf-8-sig",
+                                        errors="replace",
+                                    )
+                                ]))
+                            except (csv.Error, StopIteration):
+                                continue
+                            if len(row) < 2:
+                                continue
+                            try:
+                                row_date = datetime.datetime.strptime(
+                                    row[0],
+                                    "%Y-%m-%d",
+                                ).date()
+                            except ValueError:
+                                continue
+                            if row_date > end_dt:
+                                continue
+                            if row_date < start_dt:
+                                return header, rows, False
+                            rows.append(row)
+                            if len(rows) >= limit:
+                                return header, rows, True
+            return header, rows, False
 
 
         def load_selected():
@@ -10779,6 +12433,486 @@ class SCADAMainUI:
             tree_menu.focus(children[0])
             select_bay()
 
+    def action_soe(self):
+        """Open the durable, source-timestamped IEC-104 SOE timeline."""
+        existing = getattr(self, "_soe_window", None)
+        if existing is not None:
+            try:
+                if existing.winfo_exists():
+                    existing.deiconify()
+                    existing.lift()
+                    existing.focus_force()
+                    return
+            except tk.TclError:
+                pass
+
+        palette = {
+            "navy": "#16324f",
+            "navy_dark": "#10263c",
+            "toolbar": "#e7ebf0",
+            "workspace": "#cfd5dc",
+            "panel": "#ffffff",
+            "border": "#9aa7b4",
+            "text": "#17212b",
+            "muted": "#5f6b76",
+            "green": "#20834e",
+            "red": "#b32929",
+        }
+        soe_window = tk.Toplevel(self.root)
+        self._soe_window = soe_window
+        self._make_toplevel_responsive(
+            soe_window, "Sequence of Events", fullscreen=False
+        )
+        soe_window.configure(bg=palette["workspace"])
+
+        def close_soe():
+            self._soe_window = None
+            soe_window.destroy()
+
+        soe_window.bind("<Escape>", lambda _event: close_soe())
+        soe_window.protocol("WM_DELETE_WINDOW", close_soe)
+
+        title_bar = tk.Frame(
+            soe_window, bg=palette["navy"], height=58
+        )
+        title_bar.pack(fill="x")
+        title_group = tk.Frame(title_bar, bg=palette["navy"])
+        title_group.pack(side="left", padx=18, pady=8)
+        tk.Label(
+            title_group,
+            text="SEQUENCE OF EVENTS — IEC-104",
+            bg=palette["navy"],
+            fg="#ffffff",
+            font=("Segoe UI", 16, "bold"),
+            anchor="w",
+        ).pack(fill="x")
+        tk.Label(
+            title_group,
+            text=(
+                "Durable digital transitions • RTU source time and "
+                "SCADA receive time"
+            ),
+            bg=palette["navy"],
+            fg="#c8d7e6",
+            font=("Segoe UI", 9),
+            anchor="w",
+        ).pack(fill="x")
+        summary = tk.Label(
+            title_bar,
+            text="0 events",
+            bg=palette["navy"],
+            fg="#c8d7e6",
+            font=("Segoe UI", 10, "bold"),
+        )
+        summary.pack(side="right", padx=(10, 8), pady=16)
+        tk.Button(
+            title_bar,
+            text="Close",
+            command=close_soe,
+            font=("Segoe UI", 10, "bold"),
+            bg="#f4f6f8",
+            fg=palette["text"],
+            relief="raised",
+            bd=1,
+            padx=18,
+            pady=5,
+            cursor="hand2",
+        ).pack(side="right", padx=(8, 18), pady=13)
+
+        filters = tk.Frame(
+            soe_window,
+            bg=palette["toolbar"],
+            bd=1,
+            relief="raised",
+        )
+        filters.pack(fill="x", padx=10, pady=(8, 4))
+        end_date = DateEntry(
+            filters,
+            width=11,
+            date_pattern="yyyy-mm-dd",
+            background=palette["navy"],
+            foreground="white",
+        )
+        start_date = DateEntry(
+            filters,
+            width=11,
+            date_pattern="yyyy-mm-dd",
+            background=palette["navy"],
+            foreground="white",
+        )
+        try:
+            end_date.set_date(datetime.date.today())
+            start_date.set_date(
+                datetime.date.today() - datetime.timedelta(days=7)
+            )
+        except Exception:
+            pass
+
+        with STATUS_LOCK:
+            status_bays = {
+                _norm_text(row.get("Bay_Name"))
+                for row in STATUS_REGISTRY
+            }
+        with SOE_LOCK:
+            soe_bays = {
+                _norm_text(row.get("Bay_Name"))
+                for row in SOE_REGISTRY
+            }
+        device_values = ["ALL"] + sorted(
+            bay for bay in status_bays | soe_bays if bay
+        )
+        device_filter = ttk.Combobox(
+            filters,
+            state="readonly",
+            width=22,
+            values=device_values,
+        )
+        device_filter.set("ALL")
+        state_filter = ttk.Combobox(
+            filters,
+            state="readonly",
+            width=14,
+            values=(
+                "ALL", "OPEN/OFF", "CLOSE/ON", "INDETERMINATE",
+            ),
+        )
+        state_filter.set("ALL")
+        severity_filter = ttk.Combobox(
+            filters,
+            state="readonly",
+            width=11,
+            values=(
+                "ALL", "NORMAL", "WARNING", "URGENT", "CRITICAL",
+            ),
+        )
+        severity_filter.set("ALL")
+        search_value = tk.StringVar()
+        search_entry = ttk.Entry(
+            filters, textvariable=search_value, width=22
+        )
+
+        for label, widget in (
+            ("Start", start_date),
+            ("End", end_date),
+            ("Device/Bay", device_filter),
+            ("State", state_filter),
+            ("Severity", severity_filter),
+            ("Search", search_entry),
+        ):
+            tk.Label(
+                filters,
+                text=label,
+                bg=palette["toolbar"],
+                fg=palette["text"],
+                font=("Segoe UI", 9, "bold"),
+            ).pack(side="left", padx=(8, 3), pady=9)
+            widget.pack(side="left", padx=(0, 3), pady=9)
+
+        table_panel = tk.Frame(
+            soe_window,
+            bg=palette["panel"],
+            bd=1,
+            relief="solid",
+        )
+        table_panel.pack(
+            fill="both", expand=True, padx=10, pady=(2, 8)
+        )
+        table_frame = tk.Frame(table_panel, bg=palette["panel"])
+        table_frame.pack(
+            fill="both", expand=True, padx=8, pady=8
+        )
+        style = ttk.Style(soe_window)
+        style.configure(
+            "SOE.Treeview.Heading",
+            background=palette["navy_dark"],
+            foreground="#ffffff",
+            font=("Segoe UI", 9, "bold"),
+            padding=(7, 7),
+            relief="raised",
+        )
+        style.configure(
+            "SOE.Treeview",
+            background=palette["panel"],
+            foreground=palette["text"],
+            fieldbackground=palette["panel"],
+            rowheight=29,
+            font=("Segoe UI", 9),
+        )
+        style.map(
+            "SOE.Treeview",
+            background=[("selected", "#c8def1")],
+            foreground=[("selected", palette["text"])],
+        )
+        columns = (
+            "source",
+            "received",
+            "device",
+            "point",
+            "transition",
+            "kind",
+            "quality",
+            "severity",
+            "alarm",
+            "address",
+            "event_id",
+        )
+        tree = ttk.Treeview(
+            table_frame,
+            columns=columns,
+            show="headings",
+            style="SOE.Treeview",
+        )
+        headings = {
+            "source": "SOURCE TIME",
+            "received": "RECEIVE TIME",
+            "device": "DEVICE / BAY",
+            "point": "POINT",
+            "transition": "TRANSITION",
+            "kind": "EVENT",
+            "quality": "QUALITY",
+            "severity": "SEVERITY",
+            "alarm": "ALARM",
+            "address": "ASDU / IOA",
+            "event_id": "EVENT ID",
+        }
+        widths = {
+            "source": 175,
+            "received": 175,
+            "device": 170,
+            "point": 250,
+            "transition": 130,
+            "kind": 75,
+            "quality": 115,
+            "severity": 90,
+            "alarm": 65,
+            "address": 105,
+            "event_id": 220,
+        }
+        for column in columns:
+            tree.heading(column, text=headings[column])
+            tree.column(
+                column,
+                width=widths[column],
+                minwidth=60,
+                anchor=(
+                    "w"
+                    if column in {"device", "point", "event_id"}
+                    else "center"
+                ),
+                stretch=False,
+            )
+        vertical = ttk.Scrollbar(
+            table_frame, orient="vertical", command=tree.yview
+        )
+        horizontal = ttk.Scrollbar(
+            table_frame, orient="horizontal", command=tree.xview
+        )
+        tree.configure(
+            yscrollcommand=vertical.set,
+            xscrollcommand=horizontal.set,
+        )
+        tree.grid(row=0, column=0, sticky="nsew")
+        vertical.grid(row=0, column=1, sticky="ns")
+        horizontal.grid(row=1, column=0, sticky="ew")
+        table_frame.grid_rowconfigure(0, weight=1)
+        table_frame.grid_columnconfigure(0, weight=1)
+        self._bind_mousewheel(tree)
+        tree.tag_configure(
+            "CRITICAL", background="#f7d8d8", foreground="#8f1f1f"
+        )
+        tree.tag_configure(
+            "URGENT", background="#f9dfca", foreground="#8e4408"
+        )
+        tree.tag_configure(
+            "WARNING", background="#fff0b8", foreground="#735300"
+        )
+        tree.tag_configure(
+            "BAD", background="#eee5ff", foreground="#4c1d95"
+        )
+        tree.tag_configure(
+            "NORMAL", background="#ffffff", foreground=palette["text"]
+        )
+
+        view_state = {"rows": []}
+
+        def state_name(value):
+            if value is None:
+                return "?"
+            return "CLOSE/ON" if int(value) == 1 else "OPEN/OFF"
+
+        def load_events(show_error=False):
+            try:
+                rows = EVENT_STORE.query_events(
+                    start_date=str(start_date.get_date()),
+                    end_date=str(end_date.get_date()),
+                    device=(
+                        ""
+                        if device_filter.get() == "ALL"
+                        else device_filter.get()
+                    ),
+                    state=(
+                        ""
+                        if state_filter.get() == "ALL"
+                        else state_filter.get()
+                    ),
+                    severity=(
+                        ""
+                        if severity_filter.get() == "ALL"
+                        else severity_filter.get()
+                    ),
+                    search=search_value.get().strip(),
+                    limit=10000,
+                )
+                view_state["rows"] = rows
+                for item in tree.get_children():
+                    tree.delete(item)
+                for row in rows:
+                    transition = (
+                        f"{state_name(row['previous_value'])} "
+                        f"→ {state_name(row['value'])}"
+                    )
+                    severity = str(row["severity"]).upper()
+                    tag = (
+                        "BAD"
+                        if row["quality_text"] != "GOOD"
+                        else severity
+                        if severity in {
+                            "CRITICAL", "URGENT", "WARNING",
+                        }
+                        else "NORMAL"
+                    )
+                    tree.insert(
+                        "",
+                        "end",
+                        values=(
+                            row["source_time"],
+                            row["receive_time"],
+                            row["bay_name"] or row["source_ip"],
+                            (
+                                row["physical_name"]
+                                or row["info_name"]
+                            ),
+                            transition,
+                            row["event_kind"],
+                            row["quality_text"],
+                            severity,
+                            "YES" if row["alarm_enabled"] else "NO",
+                            f"{row['asdu']} / {row['ioa']}",
+                            row["event_id"],
+                        ),
+                        tags=(tag,),
+                    )
+                summary.configure(
+                    text=(
+                        f"{len(rows):,} events • SQLite • "
+                        "auto-refresh 2s"
+                    )
+                )
+            except Exception as exc:
+                if show_error:
+                    messagebox.showerror(
+                        "SOE Timeline", str(exc), parent=soe_window
+                    )
+
+        def export_events():
+            rows = view_state["rows"]
+            if not rows:
+                messagebox.showwarning(
+                    "SOE Export",
+                    "No events in the selected filter.",
+                    parent=soe_window,
+                )
+                return
+            destination = filedialog.asksaveasfilename(
+                parent=soe_window,
+                title="Export SOE Timeline",
+                defaultextension=".csv",
+                filetypes=(("CSV Files", "*.csv"),),
+                initialfile=(
+                    f"SOE_{start_date.get_date()}_to_"
+                    f"{end_date.get_date()}.csv"
+                ),
+            )
+            if not destination:
+                return
+            fields = [
+                "event_id",
+                "source_time",
+                "receive_time",
+                "source_ip",
+                "bay_name",
+                "physical_name",
+                "info_name",
+                "asdu",
+                "ioa",
+                "type_id",
+                "cause",
+                "event_kind",
+                "previous_value",
+                "value",
+                "raw_value",
+                "state_text",
+                "quality",
+                "quality_text",
+                "severity",
+                "alarm_enabled",
+                "origin",
+            ]
+            try:
+                with open(
+                    destination, "w", newline="", encoding="utf-8-sig"
+                ) as handle:
+                    writer = csv.DictWriter(
+                        handle, fieldnames=fields
+                    )
+                    writer.writeheader()
+                    writer.writerows(
+                        {
+                            field: row.get(field, "")
+                            for field in fields
+                        }
+                        for row in rows
+                    )
+                messagebox.showinfo(
+                    "SOE Export",
+                    f"Exported to:\n{destination}",
+                    parent=soe_window,
+                )
+            except Exception as exc:
+                messagebox.showerror(
+                    "SOE Export", str(exc), parent=soe_window
+                )
+
+        tk.Button(
+            filters,
+            text="Apply",
+            command=lambda: load_events(True),
+            bg="#d8e8f5",
+            fg=palette["text"],
+            font=("Segoe UI", 9, "bold"),
+            padx=12,
+            pady=4,
+        ).pack(side="left", padx=(8, 3), pady=7)
+        tk.Button(
+            filters,
+            text="Export",
+            command=export_events,
+            bg="#dcefe3",
+            fg=palette["text"],
+            font=("Segoe UI", 9, "bold"),
+            padx=12,
+            pady=4,
+        ).pack(side="left", padx=3, pady=7)
+
+        def auto_refresh():
+            if not soe_window.winfo_exists():
+                return
+            load_events(False)
+            soe_window.after(2000, auto_refresh)
+
+        load_events(True)
+        soe_window.after(2000, auto_refresh)
+
     def action_curve(self):
         """Open the persistent IEC-104 process-trend historian."""
         existing = getattr(self, "_curve_window", None)
@@ -10811,12 +12945,246 @@ class SCADAMainUI:
             curve_win, "Process Trend Explorer", fullscreen=False,
         )
         curve_win.configure(bg=palette["workspace"])
+        view_state = {
+            "paused": False,
+            "fullscreen": False,
+            "fullscreen_window": None,
+            "active_canvas": None,
+            "cursor_epoch": None,
+            "cursor_locked": False,
+            "visible_series": set(TREND_VALUE_KEYS),
+            "signal_buttons": {},
+            "cursor_status_label": None,
+        }
 
         def close_curve():
             self._curve_window = None
             curve_win.destroy()
 
-        curve_win.bind("<Escape>", lambda _event: close_curve())
+        def set_fullscreen(enabled):
+            enabled = bool(enabled)
+            graph_window = view_state.get("fullscreen_window")
+            if enabled:
+                if (
+                    graph_window is not None
+                    and graph_window.winfo_exists()
+                ):
+                    graph_window.lift()
+                    graph_window.focus_force()
+                    return
+                graph_window = tk.Toplevel(curve_win)
+                graph_window.title("Process Trend Graph")
+                graph_window.configure(bg=palette["panel"])
+                interval_bar = tk.Frame(
+                    graph_window,
+                    bg=palette["navy_dark"],
+                    height=46,
+                )
+                interval_bar.pack(fill="x")
+                interval_bar.pack_propagate(False)
+                tk.Label(
+                    interval_bar,
+                    text="GRAPH INTERVAL",
+                    bg=palette["navy_dark"],
+                    fg="#ffffff",
+                    font=("Segoe UI", 10, "bold"),
+                ).pack(side="left", padx=(18, 10), pady=8)
+                interval_buttons = {}
+
+                def select_fullscreen_interval(label):
+                    range_var.set(label)
+                    for choice, button in interval_buttons.items():
+                        selected = choice == label
+                        button.configure(
+                            bg=palette["blue"] if selected else "#f4f6f8",
+                            fg="#ffffff" if selected else palette["text"],
+                            relief="sunken" if selected else "raised",
+                        )
+                    load_history(show_error=True)
+
+                for label, button_text in (
+                    ("1 Minute", "1 MIN"),
+                    ("30 Minutes", "30 MIN"),
+                    ("1 Hour", "1 HOUR"),
+                    ("12 Hours", "12 HOURS"),
+                    ("24 Hours", "24 HOURS"),
+                ):
+                    selected = range_var.get() == label
+                    button = tk.Label(
+                        interval_bar,
+                        text=button_text,
+                        bg=palette["blue"] if selected else "#f4f6f8",
+                        fg="#ffffff" if selected else palette["text"],
+                        font=("Segoe UI", 9, "bold"),
+                        relief="sunken" if selected else "raised",
+                        bd=1,
+                        width=10,
+                        padx=8,
+                        pady=5,
+                        cursor="hand2",
+                    )
+                    button.bind(
+                        "<Button-1>",
+                        lambda _event, value=label: (
+                            select_fullscreen_interval(value)
+                        ),
+                    )
+                    button.pack(side="left", padx=3, pady=7)
+                    interval_buttons[label] = button
+                tk.Label(
+                    interval_bar,
+                    text="Esc / F11  Back to Process Trend",
+                    bg=palette["navy_dark"],
+                    fg="#c8d7e6",
+                    font=("Segoe UI", 9, "bold"),
+                ).pack(side="right", padx=18)
+                signal_bar = tk.Frame(
+                    graph_window,
+                    bg="#e8edf2",
+                    height=46,
+                )
+                signal_bar.pack(fill="x")
+                signal_bar.pack_propagate(False)
+                tk.Label(
+                    signal_bar,
+                    text="VISIBLE SIGNALS",
+                    bg="#e8edf2",
+                    fg=palette["navy_dark"],
+                    font=("Segoe UI", 10, "bold"),
+                ).pack(side="left", padx=(18, 10), pady=8)
+                signal_buttons = {}
+
+                def refresh_signal_buttons():
+                    visible = view_state["visible_series"]
+                    for choice, button in signal_buttons.items():
+                        selected = (
+                            len(visible) == len(TREND_VALUE_KEYS)
+                            if choice == "ALL"
+                            else choice in visible
+                        )
+                        color = (
+                            palette["blue"]
+                            if choice == "ALL"
+                            else plot_colors[choice]
+                        )
+                        button.configure(
+                            bg=color if selected else "#d7dde3",
+                            fg="#ffffff" if selected else palette["muted"],
+                            relief="sunken" if selected else "raised",
+                        )
+
+                def toggle_fullscreen_signal(choice):
+                    visible = view_state["visible_series"]
+                    if choice == "ALL":
+                        visible.update(TREND_VALUE_KEYS)
+                    elif choice in visible:
+                        if len(visible) == 1:
+                            return
+                        visible.remove(choice)
+                    else:
+                        visible.add(choice)
+                    view_state["cursor_locked"] = False
+                    view_state["cursor_epoch"] = None
+                    refresh_signal_buttons()
+                    redraw()
+
+                for choice in ("ALL",) + TREND_VALUE_KEYS:
+                    button = tk.Label(
+                        signal_bar,
+                        text=choice,
+                        bg="#d7dde3",
+                        fg=palette["muted"],
+                        font=("Segoe UI", 9, "bold"),
+                        relief="raised",
+                        bd=1,
+                        width=7,
+                        padx=6,
+                        pady=5,
+                        cursor="hand2",
+                    )
+                    button.bind(
+                        "<Button-1>",
+                        lambda _event, value=choice: (
+                            toggle_fullscreen_signal(value)
+                        ),
+                    )
+                    button.pack(side="left", padx=3, pady=7)
+                    signal_buttons[choice] = button
+                view_state["signal_buttons"] = signal_buttons
+                refresh_signal_buttons()
+                cursor_status_label = tk.Label(
+                    signal_bar,
+                    text="Hover to compare  •  Click graph to lock cursor",
+                    bg="#e8edf2",
+                    fg=palette["navy_dark"],
+                    font=("Segoe UI", 9, "bold"),
+                )
+                cursor_status_label.pack(side="right", padx=18)
+                view_state["cursor_status_label"] = cursor_status_label
+                graph_canvas = tk.Canvas(
+                    graph_window,
+                    bg=palette["panel"],
+                    highlightthickness=0,
+                    cursor="crosshair",
+                )
+                graph_canvas.pack(fill="both", expand=True)
+                view_state["fullscreen"] = True
+                view_state["fullscreen_window"] = graph_window
+                view_state["active_canvas"] = graph_canvas
+                fullscreen_button.configure(text="Exit Graph Full Screen")
+                graph_canvas.bind(
+                    "<Configure>",
+                    lambda _event: draw_chart(graph_canvas),
+                )
+                graph_canvas.bind("<Motion>", handle_chart_motion)
+                graph_canvas.bind("<Leave>", clear_chart_cursor)
+                graph_canvas.bind("<Button-1>", toggle_chart_cursor_lock)
+                graph_window.bind(
+                    "<Escape>", lambda _event: set_fullscreen(False),
+                )
+                graph_window.bind(
+                    "<F11>", lambda _event: set_fullscreen(False),
+                )
+                graph_window.protocol(
+                    "WM_DELETE_WINDOW", lambda: set_fullscreen(False),
+                )
+                try:
+                    graph_window.attributes("-fullscreen", True)
+                except tk.TclError:
+                    graph_window.state("zoomed")
+                graph_window.focus_force()
+                graph_window.after_idle(
+                    lambda: draw_chart(graph_canvas),
+                )
+                return
+
+            view_state["fullscreen"] = False
+            view_state["fullscreen_window"] = None
+            view_state["cursor_locked"] = False
+            view_state["cursor_epoch"] = None
+            view_state["signal_buttons"] = {}
+            view_state["cursor_status_label"] = None
+            view_state["active_canvas"] = canvas_trend
+            if graph_window is not None and graph_window.winfo_exists():
+                graph_window.destroy()
+            fullscreen_button.configure(text="Graph Full Screen")
+            curve_win.after_idle(lambda: draw_chart(canvas_trend))
+            curve_win.lift()
+            curve_win.focus_force()
+
+        def handle_curve_escape(_event=None):
+            if view_state["fullscreen"]:
+                set_fullscreen(False)
+            else:
+                close_curve()
+
+        curve_win.bind("<Escape>", handle_curve_escape)
+        curve_win.bind(
+            "<F11>",
+            lambda _event: set_fullscreen(
+                not view_state["fullscreen"]
+            ),
+        )
         curve_win.protocol("WM_DELETE_WINDOW", close_curve)
 
         title_bar = tk.Frame(
@@ -10844,7 +13212,7 @@ class SCADAMainUI:
             font=("Segoe UI", 9),
             anchor="w",
         ).pack(fill="x")
-        tk.Button(
+        close_button = tk.Button(
             title_bar,
             text="Close",
             command=close_curve,
@@ -10857,7 +13225,25 @@ class SCADAMainUI:
             padx=18,
             pady=5,
             cursor="hand2",
-        ).pack(side="right", padx=18, pady=13)
+        )
+        close_button.pack(side="right", padx=(8, 18), pady=13)
+        fullscreen_button = tk.Button(
+            title_bar,
+            text="Graph Full Screen",
+            command=lambda: set_fullscreen(
+                not view_state["fullscreen"]
+            ),
+            font=("Segoe UI", 10, "bold"),
+            bg="#dbe8f5",
+            fg=palette["navy_dark"],
+            activebackground="#c7dced",
+            relief="raised",
+            bd=1,
+            padx=14,
+            pady=5,
+            cursor="hand2",
+        )
+        fullscreen_button.pack(side="right", padx=0, pady=13)
 
         tool_frame = tk.Frame(
             curve_win,
@@ -10938,6 +13324,14 @@ class SCADAMainUI:
             **toolbar_button_options,
         )
         refresh_button.pack(side="left", padx=3, pady=7)
+        pause_button = tk.Button(
+            tool_frame,
+            text="Pause View",
+            bg="#fff0c7",
+            fg="#7a5200",
+            **toolbar_button_options,
+        )
+        pause_button.pack(side="left", padx=3, pady=7)
         export_button = tk.Button(
             tool_frame,
             text="Export Excel",
@@ -10946,13 +13340,14 @@ class SCADAMainUI:
             **toolbar_button_options,
         )
         export_button.pack(side="left", padx=3, pady=7)
-        tk.Label(
+        view_mode_label = tk.Label(
             tool_frame,
-            text="Historian ACTIVE  •  60 second sampling",
+            text="LIVE VIEW  •  Historian records every 60 seconds",
             bg=palette["toolbar"],
             fg=palette["green"],
             font=("Segoe UI", 9, "bold"),
-        ).pack(side="right", padx=14)
+        )
+        view_mode_label.pack(side="right", padx=14)
 
         status_bar = tk.Frame(
             curve_win, bg=palette["workspace"],
@@ -11099,7 +13494,7 @@ class SCADAMainUI:
         value_header.pack(fill="x")
         selected_value_label = tk.Label(
             value_header,
-            text="CURVE VALUES  •  SELECTED: LATEST RECORD",
+            text="CURSOR / SELECTED VALUES  •  LATEST RECORD",
             bg=palette["navy_dark"],
             fg="#ffffff",
             font=("Segoe UI", 9, "bold"),
@@ -11110,7 +13505,7 @@ class SCADAMainUI:
         selected_value_label.pack(side="left", fill="x", expand=True)
         current_value_label = tk.Label(
             value_header,
-            text="CURRENT: CHECKING",
+            text="LIVE SOURCE: CHECKING",
             bg=palette["navy_dark"],
             fg="#c8d7e6",
             font=("Segoe UI", 9, "bold"),
@@ -11145,7 +13540,7 @@ class SCADAMainUI:
             "number": "NO.",
             "tag": "TAG NAME",
             "description": "DESCRIPTION",
-            "selected": "SELECTED VALUE",
+            "selected": "CURSOR / SELECTED",
             "current": "CURRENT VALUE",
             "unit": "UNIT",
             "upper": "UPPER LIMIT",
@@ -11187,20 +13582,44 @@ class SCADAMainUI:
             right_split, bg=palette["workspace"],
         )
         right_split.add(charts_frame, weight=3)
-        canvas_ui = tk.Canvas(
+        chart_guide = tk.Label(
+            charts_frame,
+            text=(
+                "ONE COMPARISON GRAPH  •  All curves use a relative 0–100% "
+                "scale so different units can be compared. Exact engineering "
+                "values appear below and when the cursor moves over the graph."
+            ),
+            bg="#e8f2fa",
+            fg=palette["navy_dark"],
+            font=("Segoe UI", 9, "bold"),
+            anchor="w",
+            justify="left",
+            padx=10,
+            pady=7,
+        )
+        chart_guide.pack(fill="x", pady=(0, 3))
+        hover_value_label = tk.Label(
+            charts_frame,
+            text=(
+                "CURSOR: Move over the graph to compare U, I, P, Q, and f "
+                "at the same timestamp."
+            ),
+            bg=palette["navy_dark"],
+            fg="#ffffff",
+            font=("Courier New", 9, "bold"),
+            anchor="w",
+            padx=10,
+            pady=6,
+        )
+        hover_value_label.pack(fill="x", pady=(0, 3))
+        canvas_trend = tk.Canvas(
             charts_frame,
             bg=palette["panel"],
             highlightthickness=1,
             highlightbackground=palette["border"],
+            cursor="crosshair",
         )
-        canvas_ui.pack(fill="both", expand=True, pady=(0, 4))
-        canvas_power = tk.Canvas(
-            charts_frame,
-            bg=palette["panel"],
-            highlightthickness=1,
-            highlightbackground=palette["border"],
-        )
-        canvas_power.pack(fill="both", expand=True, pady=(4, 0))
+        canvas_trend.pack(fill="both", expand=True)
 
         table_frame = tk.Frame(
             right_split,
@@ -11272,6 +13691,13 @@ class SCADAMainUI:
         active_device = {"name": "Connection Wire I"}
         samples = []
         current_range = {"start": 0, "end": 0}
+        chart_state = {
+            "geometry": None,
+            "series_bounds": {},
+            "point_positions": {},
+            "sample_by_epoch": {},
+            "plottable_samples": [],
+        }
         plot_colors = {
             "U": palette["blue"],
             "I": palette["orange"],
@@ -11343,11 +13769,13 @@ class SCADAMainUI:
 
         def format_axis_time(epoch, total_span):
             value = datetime.datetime.fromtimestamp(epoch)
-            if total_span <= 86400:
-                return value.strftime("%H:%M")
+            if total_span <= 6 * 3600:
+                return value.strftime("%H:%M:%S")
+            if total_span <= 24 * 3600:
+                return value.strftime("%d %b\n%H:%M")
             if total_span <= 7 * 86400:
-                return value.strftime("%d %b %H:%M")
-            return value.strftime("%d %b")
+                return value.strftime("%d %b\n%H:%M")
+            return value.strftime("%d %b %Y")
         def format_trend_number(value):
             try:
                 number = float(value)
@@ -11467,64 +13895,254 @@ class SCADAMainUI:
                 )
 
 
-        def draw_chart(canvas, title, series_keys):
-            canvas.delete("all")
-            width = max(canvas.winfo_width(), 420)
-            height = max(canvas.winfo_height(), 190)
-            left, right, top, bottom = 64, 20, 48, 34
-            plot_width = max(1, width - left - right)
-            plot_height = max(1, height - top - bottom)
-            canvas.create_text(
-                14,
-                12,
-                text=title,
-                fill=palette["text"],
-                font=("Segoe UI", 10, "bold"),
-                anchor="nw",
+        def draw_engineering_panel(canvas, sample):
+            canvas.delete("trend_value_panel")
+            if canvas is canvas_trend:
+                return
+            geometry = chart_state.get("geometry")
+            if geometry is None:
+                return
+            panel_left = geometry["right"] + 18
+            panel_right = max(panel_left + 240, canvas.winfo_width() - 16)
+            panel_top = geometry["top"]
+            panel_bottom = min(geometry["bottom"], panel_top + 272)
+            canvas.create_rectangle(
+                panel_left,
+                panel_top,
+                panel_right,
+                panel_bottom,
+                fill="#f5f8fb",
+                outline=palette["border"],
+                width=2,
+                tags=("trend_value_panel",),
             )
-            numeric_values = [
-                float(sample[key])
-                for sample in samples
-                for key in series_keys
-                if sample.get(key) is not None
-            ]
-            if not numeric_values:
-                quality = (
-                    samples[-1]["quality"] if samples else "NO DATA"
-                )
-                message = (
-                    "IEC-104 source is offline — history contains no valid values"
-                    if quality == "OFFLINE"
-                    else "No historian values in the selected time range"
-                )
+            if view_state["cursor_locked"]:
+                panel_mode = "LOCKED CURSOR"
+                mode_color = palette["red"]
+            elif view_state["cursor_epoch"] is not None:
+                panel_mode = "HOVER CURSOR"
+                mode_color = palette["blue"]
+            else:
+                panel_mode = "LATEST VALID SAMPLE"
+                mode_color = palette["green"]
+            canvas.create_text(
+                panel_left + 14,
+                panel_top + 14,
+                text=panel_mode,
+                fill=mode_color,
+                font=("Segoe UI", 11, "bold"),
+                anchor="nw",
+                tags=("trend_value_panel",),
+            )
+            if sample is None:
                 canvas.create_text(
-                    width / 2,
-                    height / 2,
-                    text=message,
-                    fill=(
-                        palette["red"]
-                        if quality == "OFFLINE"
-                        else palette["muted"]
-                    ),
-                    font=("Segoe UI", 10, "bold"),
+                    (panel_left + panel_right) / 2,
+                    panel_top + 92,
+                    text="NO VALID ENGINEERING VALUES",
+                    fill=palette["muted"],
+                    font=("Segoe UI", 9, "bold"),
+                    anchor="center",
+                    tags=("trend_value_panel",),
                 )
                 return
+            timestamp = datetime.datetime.fromtimestamp(
+                sample["captured_at"]
+            ).strftime("%d %b %Y  %H:%M:%S")
+            canvas.create_text(
+                panel_left + 14,
+                panel_top + 38,
+                text=timestamp,
+                fill=palette["text"],
+                font=("Courier New", 10, "bold"),
+                anchor="nw",
+                tags=("trend_value_panel",),
+            )
+            canvas.create_text(
+                panel_left + 14,
+                panel_top + 58,
+                text=f"QUALITY: {sample.get('quality', 'NO DATA')}",
+                fill=(
+                    palette["green"]
+                    if sample.get("quality") == "ONLINE"
+                    else palette["red"]
+                ),
+                font=("Segoe UI", 8, "bold"),
+                anchor="nw",
+                tags=("trend_value_panel",),
+            )
+            row_y = panel_top + 88
+            visible = view_state["visible_series"]
+            for key in TREND_VALUE_KEYS:
+                active = key in visible
+                color = plot_colors[key] if active else "#9aa7b4"
+                suffix = "" if active else "  (hidden)"
+                canvas.create_line(
+                    panel_left + 14,
+                    row_y - 7,
+                    panel_left + 34,
+                    row_y - 7,
+                    fill=color,
+                    width=4 if active else 2,
+                    tags=("trend_value_panel",),
+                )
+                canvas.create_text(
+                    panel_left + 43,
+                    row_y - 14,
+                    text=key,
+                    fill=color,
+                    font=("Segoe UI", 10, "bold"),
+                    anchor="nw",
+                    tags=("trend_value_panel",),
+                )
+                canvas.create_text(
+                    panel_right - 14,
+                    row_y - 14,
+                    text=(
+                        f"{format_trend_number(sample.get(key))} "
+                        f"{curve_units[key]}{suffix}"
+                    ),
+                    fill=color,
+                    font=("Courier New", 10, "bold"),
+                    anchor="ne",
+                    tags=("trend_value_panel",),
+                )
+                row_y += 29
+            canvas.create_text(
+                (panel_left + panel_right) / 2,
+                panel_bottom - 14,
+                text="Click graph to lock / unlock cursor",
+                fill=palette["muted"],
+                font=("Segoe UI", 8, "bold"),
+                anchor="s",
+                tags=("trend_value_panel",),
+            )
 
-            minimum = min(numeric_values)
-            maximum = max(numeric_values)
-            if math.isclose(minimum, maximum):
-                padding = max(1.0, abs(maximum) * 0.1)
-                minimum -= padding
-                maximum += padding
-            else:
-                padding = (maximum - minimum) * 0.08
-                minimum -= padding
-                maximum += padding
+        def draw_chart(canvas):
+            canvas.delete("all")
+            width = max(canvas.winfo_width(), 620)
+            height = max(canvas.winfo_height(), 260)
+            fullscreen_graph = canvas is not canvas_trend
+            left = 76 if fullscreen_graph else 72
+            right = 300 if fullscreen_graph else 30
+            top = 112 if fullscreen_graph else 92
+            bottom = 72 if fullscreen_graph else 56
+            plot_width = max(1, width - left - right)
+            plot_height = max(1, height - top - bottom)
+            plot_bottom = top + plot_height
+            start_epoch = current_range["start"]
+            end_epoch = current_range["end"]
+            span = max(1, end_epoch - start_epoch)
+            range_start = datetime.datetime.fromtimestamp(
+                start_epoch
+            ).strftime("%d %b %Y %H:%M:%S")
+            range_end = datetime.datetime.fromtimestamp(
+                end_epoch
+            ).strftime("%d %b %Y %H:%M:%S")
+            title_size = 14 if fullscreen_graph else 11
+            detail_size = 10 if fullscreen_graph else 8
+            legend_size = 10 if fullscreen_graph else 8
+            axis_size = 10 if fullscreen_graph else 8
+            legend_y = 78 if fullscreen_graph else 62
+            canvas.create_text(
+                14,
+                11,
+                text=(
+                    f"{active_device['name']}  |  "
+                    "SYNCHRONIZED PROCESS COMPARISON"
+                ),
+                fill=palette["text"],
+                font=("Segoe UI", title_size, "bold"),
+                anchor="nw",
+            )
+            canvas.create_text(
+                14,
+                38 if fullscreen_graph else 32,
+                text=(
+                    "RELATIVE COMPARISON SCALE 0–100%  —  "
+                    "NOT ENGINEERING VALUES"
+                ),
+                fill=palette["warning"],
+                font=("Segoe UI", detail_size, "bold"),
+                anchor="nw",
+            )
+            canvas.create_text(
+                width - 14,
+                11,
+                text=f"TIME RANGE  {range_start}  —  {range_end}",
+                fill=palette["navy_dark"],
+                font=(
+                    "Courier New",
+                    11 if fullscreen_graph else 9,
+                    "bold",
+                ),
+                anchor="ne",
+            )
+            canvas.create_text(
+                width - 14,
+                38 if fullscreen_graph else 32,
+                text=(
+                    "LOCAL HISTORIAN DATE / TIME  •  "
+                    + (
+                        "Exact values are shown in the right analysis panel"
+                        if fullscreen_graph
+                        else "Hover a line for exact values"
+                    )
+                ),
+                fill=palette["blue"],
+                font=("Segoe UI", detail_size, "bold"),
+                anchor="ne",
+            )
+
+            visible = view_state["visible_series"]
+            series_bounds = {}
+            for key in TREND_VALUE_KEYS:
+                if key not in visible:
+                    continue
+                values = [
+                    float(sample[key])
+                    for sample in samples
+                    if sample.get(key) is not None
+                    and math.isfinite(float(sample[key]))
+                ]
+                if not values:
+                    continue
+                minimum = min(values)
+                maximum = max(values)
+                if math.isclose(minimum, maximum):
+                    padding = max(1.0, abs(maximum) * 0.1)
+                    minimum -= padding
+                    maximum += padding
+                series_bounds[key] = (minimum, maximum)
+
+            plottable_samples = [
+                sample
+                for sample in samples
+                if any(
+                    sample.get(key) is not None
+                    for key in visible
+                )
+            ]
+            chart_state.update({
+                "geometry": {
+                    "left": left,
+                    "right": width - right,
+                    "top": top,
+                    "bottom": plot_bottom,
+                    "width": plot_width,
+                    "height": plot_height,
+                },
+                "series_bounds": series_bounds,
+                "point_positions": {},
+                "sample_by_epoch": {
+                    sample["captured_at"]: sample
+                    for sample in plottable_samples
+                },
+                "plottable_samples": plottable_samples,
+            })
 
             for grid_index in range(5):
                 ratio = grid_index / 4.0
                 y = top + ratio * plot_height
-                value = maximum - ratio * (maximum - minimum)
                 canvas.create_line(
                     left,
                     y,
@@ -11533,17 +14151,14 @@ class SCADAMainUI:
                     fill=palette["grid"],
                 )
                 canvas.create_text(
-                    left - 7,
+                    left - 8,
                     y,
-                    text=f"{value:.2f}",
+                    text=f"{100 - int(ratio * 100)}%",
                     fill=palette["muted"],
-                    font=("Segoe UI", 8),
+                    font=("Segoe UI", axis_size),
                     anchor="e",
                 )
 
-            start_epoch = current_range["start"]
-            end_epoch = current_range["end"]
-            span = max(1, end_epoch - start_epoch)
             for index in range(6):
                 ratio = index / 5.0
                 x = left + ratio * plot_width
@@ -11552,20 +14167,30 @@ class SCADAMainUI:
                     x,
                     top,
                     x,
-                    top + plot_height,
+                    plot_bottom,
                     fill=palette["grid"],
                 )
                 canvas.create_text(
                     x,
-                    height - 9,
+                    plot_bottom + (27 if fullscreen_graph else 20),
                     text=format_axis_time(epoch, span),
-                    fill=palette["muted"],
-                    font=("Segoe UI", 8),
-                    anchor="s",
+                    fill=palette["text"],
+                    font=("Courier New", axis_size, "bold"),
+                    justify="center",
+                    anchor="center",
                 )
+            canvas.create_text(
+                left + plot_width / 2,
+                height - 8,
+                text="LOCAL HISTORIAN DATE / TIME",
+                fill=palette["navy_dark"],
+                font=("Segoe UI", axis_size, "bold"),
+                anchor="s",
+            )
 
-            legend_x = left
-            for key in series_keys:
+            legend_width = plot_width / len(TREND_VALUE_KEYS)
+            for index, key in enumerate(TREND_VALUE_KEYS):
+                legend_x = left + index * legend_width
                 latest = next(
                     (
                         sample.get(key)
@@ -11574,45 +14199,96 @@ class SCADAMainUI:
                     ),
                     None,
                 )
-                color = plot_colors[key]
+                active = key in visible
+                color = plot_colors[key] if active else "#aab3bd"
                 canvas.create_line(
                     legend_x,
-                    31,
-                    legend_x + 18,
-                    31,
+                    legend_y,
+                    legend_x + (28 if fullscreen_graph else 18),
+                    legend_y,
                     fill=color,
-                    width=3,
+                    width=4 if active else 2,
+                    dash=() if active else (3, 3),
                 )
+                legend_text = (
+                    f"{key}  {float(latest):.3f} {curve_units[key]}"
+                    if latest is not None
+                    else f"{key}  -- {curve_units[key]}"
+                )
+                if not active:
+                    legend_text += "  HIDDEN"
                 canvas.create_text(
-                    legend_x + 23,
-                    31,
-                    text=(
-                        f"{key} {latest:.2f}"
-                        if latest is not None else f"{key} --"
-                    ),
+                    legend_x + (35 if fullscreen_graph else 23),
+                    legend_y,
+                    text=legend_text,
                     fill=color,
-                    font=("Segoe UI", 8, "bold"),
+                    font=("Segoe UI", legend_size, "bold"),
                     anchor="w",
                 )
-                legend_x += 112
 
+            if not plottable_samples:
+                quality = (
+                    samples[-1]["quality"] if samples else "NO DATA"
+                )
+                message = (
+                    "IEC-104 source is offline — history contains no valid values"
+                    if quality == "OFFLINE"
+                    else "No historian values for the visible signals"
+                )
+                canvas.create_text(
+                    left + plot_width / 2,
+                    top + plot_height / 2,
+                    text=message,
+                    fill=(
+                        palette["red"]
+                        if quality == "OFFLINE"
+                        else palette["muted"]
+                    ),
+                    font=(
+                        "Segoe UI",
+                        12 if fullscreen_graph else 10,
+                        "bold",
+                    ),
+                )
+                draw_engineering_panel(canvas, None)
+                return
+
+            for key in TREND_VALUE_KEYS:
+                if key not in visible:
+                    continue
+                color = plot_colors[key]
+                bounds = series_bounds.get(key)
+                if bounds is None:
+                    continue
+                minimum, maximum = bounds
                 segments = []
                 segment = []
+                previous_epoch = None
+                maximum_line_gap = TREND_HISTORY_INTERVAL * 2.5
                 for sample in samples:
                     value = sample.get(key)
                     if value is None:
-                        if segment:
-                            segments.append(segment)
-                            segment = []
                         continue
+                    sample_epoch = sample["captured_at"]
+                    if (
+                        segment
+                        and previous_epoch is not None
+                        and sample_epoch - previous_epoch > maximum_line_gap
+                    ):
+                        segments.append(segment)
+                        segment = []
                     x = left + (
-                        (sample["captured_at"] - start_epoch) / span
+                        (sample_epoch - start_epoch) / span
                     ) * plot_width
                     y = top + (
                         (maximum - float(value))
                         / (maximum - minimum)
                     ) * plot_height
                     segment.append((x, y))
+                    previous_epoch = sample_epoch
+                    chart_state["point_positions"][
+                        (sample_epoch, key)
+                    ] = (x, y)
                 if segment:
                     segments.append(segment)
                 for points in segments:
@@ -11625,7 +14301,7 @@ class SCADAMainUI:
                         canvas.create_line(
                             *flattened,
                             fill=color,
-                            width=2,
+                            width=3 if fullscreen_graph else 2,
                             smooth=False,
                         )
                     elif points:
@@ -11639,18 +14315,184 @@ class SCADAMainUI:
                             outline=color,
                         )
 
+            cursor_sample = chart_state["sample_by_epoch"].get(
+                view_state["cursor_epoch"]
+            )
+            if cursor_sample is not None:
+                render_crosshair(cursor_sample, canvas)
+            else:
+                draw_engineering_panel(canvas, plottable_samples[-1])
+
+        def cursor_summary(sample):
+            timestamp = datetime.datetime.fromtimestamp(
+                sample["captured_at"]
+            ).strftime("%Y-%m-%d %H:%M:%S")
+            values = "  |  ".join(
+                (
+                    f"{key} {format_trend_number(sample.get(key))} "
+                    f"{curve_units[key]}"
+                )
+                for key in TREND_VALUE_KEYS
+            )
+            return f"CURSOR {timestamp}  |  {values}"
+
+        def update_cursor_status():
+            label = view_state.get("cursor_status_label")
+            if label is None or not label.winfo_exists():
+                return
+            locked = view_state["cursor_locked"]
+            label.configure(
+                text=(
+                    "CURSOR LOCKED  •  Click graph to unlock"
+                    if locked
+                    else "Hover to compare  •  Click graph to lock cursor"
+                ),
+                fg=palette["red"] if locked else palette["navy_dark"],
+            )
+
+        def render_crosshair(sample, canvas=None):
+            canvas = canvas or view_state.get("active_canvas") or canvas_trend
+            canvas.delete("trend_cursor")
+            geometry = chart_state["geometry"]
+            if geometry is None:
+                return
+            start_epoch = current_range["start"]
+            end_epoch = current_range["end"]
+            span = max(1, end_epoch - start_epoch)
+            x = geometry["left"] + (
+                (sample["captured_at"] - start_epoch) / span
+            ) * geometry["width"]
+            x = min(geometry["right"], max(geometry["left"], x))
+            canvas.create_line(
+                x,
+                geometry["top"],
+                x,
+                geometry["bottom"],
+                fill="#111111",
+                width=2,
+                dash=(4, 3),
+                tags=("trend_cursor",),
+            )
+            for key in TREND_VALUE_KEYS:
+                point = chart_state["point_positions"].get(
+                    (sample["captured_at"], key)
+                )
+                if point is None:
+                    continue
+                point_x, point_y = point
+                canvas.create_oval(
+                    point_x - 5,
+                    point_y - 5,
+                    point_x + 5,
+                    point_y + 5,
+                    fill="#ffffff",
+                    outline=plot_colors[key],
+                    width=3,
+                    tags=("trend_cursor",),
+                )
+            time_text = datetime.datetime.fromtimestamp(
+                sample["captured_at"]
+            ).strftime("%d %b %Y  %H:%M:%S")
+            label_x = min(
+                geometry["right"] - 92,
+                max(geometry["left"] + 92, x),
+            )
+            canvas.create_rectangle(
+                label_x - 88,
+                geometry["top"] + 4,
+                label_x + 88,
+                geometry["top"] + 28,
+                fill=palette["navy_dark"],
+                outline="#ffffff",
+                tags=("trend_cursor",),
+            )
+            canvas.create_text(
+                label_x,
+                geometry["top"] + 16,
+                text=time_text,
+                fill="#ffffff",
+                font=("Courier New", 9, "bold"),
+                tags=("trend_cursor",),
+            )
+            draw_engineering_panel(canvas, sample)
+
+        def sample_for_chart_event(event):
+            geometry = chart_state["geometry"]
+            plottable = chart_state["plottable_samples"]
+            if geometry is None or not plottable:
+                return None
+            if not (
+                geometry["left"] <= event.x <= geometry["right"]
+                and geometry["top"] <= event.y <= geometry["bottom"]
+            ):
+                return None
+            ratio = (
+                (event.x - geometry["left"]) / geometry["width"]
+            )
+            target_epoch = current_range["start"] + ratio * max(
+                1,
+                current_range["end"] - current_range["start"],
+            )
+            return min(
+                plottable,
+                key=lambda item: abs(
+                    item["captured_at"] - target_epoch
+                ),
+            )
+
+        def select_chart_sample(sample, canvas):
+            view_state["cursor_epoch"] = sample["captured_at"]
+            selected_sample["row"] = sample
+            refresh_curve_values()
+            hover_value_label.configure(text=cursor_summary(sample))
+            render_crosshair(sample, canvas)
+
+        def handle_chart_motion(event):
+            if view_state["cursor_locked"]:
+                return
+            sample = sample_for_chart_event(event)
+            if sample is None:
+                return
+            select_chart_sample(sample, event.widget)
+
+        def toggle_chart_cursor_lock(event):
+            sample = sample_for_chart_event(event)
+            if sample is None:
+                return
+            if view_state["cursor_locked"]:
+                view_state["cursor_locked"] = False
+            else:
+                view_state["cursor_locked"] = True
+            update_cursor_status()
+            select_chart_sample(sample, event.widget)
+
+        def clear_chart_cursor(event=None):
+            if view_state["cursor_locked"]:
+                return
+            view_state["cursor_epoch"] = None
+            canvas = (
+                event.widget
+                if event is not None and isinstance(event.widget, tk.Canvas)
+                else view_state.get("active_canvas") or canvas_trend
+            )
+            canvas.delete("trend_cursor")
+            hover_value_label.configure(
+                text=(
+                    "CURSOR: Move over the graph to compare U, I, P, Q, "
+                    "and f at the same timestamp."
+                )
+            )
+            latest = (
+                chart_state["plottable_samples"][-1]
+                if chart_state["plottable_samples"]
+                else None
+            )
+            draw_engineering_panel(canvas, latest)
+            update_cursor_status()
+
         def redraw():
-            device = active_device["name"]
-            draw_chart(
-                canvas_ui,
-                f"{device}  |  Voltage and Current",
-                ("U", "I"),
-            )
-            draw_chart(
-                canvas_power,
-                f"{device}  |  Active / Reactive Power and Frequency",
-                ("P", "Q", "f"),
-            )
+            canvas = view_state.get("active_canvas") or canvas_trend
+            draw_chart(canvas)
 
         def refresh_table():
             previous_timestamp = (
@@ -11693,12 +14535,14 @@ class SCADAMainUI:
                 if sample["captured_at"] == previous_timestamp:
                     selected_item = item_id
 
-            target_item = selected_item or latest_item
+            target_item = selected_item
+            if target_item is None and not view_state["cursor_locked"]:
+                target_item = latest_item
             if target_item is not None:
                 table.selection_set(target_item)
                 table.focus(target_item)
                 selected_sample["row"] = history_item_samples[target_item]
-            else:
+            elif not view_state["cursor_locked"]:
                 selected_sample["row"] = None
             refresh_curve_values()
 
@@ -11715,6 +14559,11 @@ class SCADAMainUI:
 
         def load_history(capture=False, show_error=False):
             nonlocal samples
+            locked_epoch = (
+                view_state["cursor_epoch"]
+                if view_state["cursor_locked"]
+                else None
+            )
             try:
                 if capture:
                     _trend_history_log_once()
@@ -11726,6 +14575,32 @@ class SCADAMainUI:
                     current_range["start"],
                     current_range["end"],
                     max_points=720,
+                )
+                locked_sample = None
+                if locked_epoch is not None and samples:
+                    locked_sample = min(
+                        samples,
+                        key=lambda sample: abs(
+                            sample["captured_at"] - locked_epoch
+                        ),
+                    )
+                    view_state["cursor_epoch"] = locked_sample[
+                        "captured_at"
+                    ]
+                    selected_sample["row"] = locked_sample
+                else:
+                    view_state["cursor_epoch"] = None
+                    view_state["cursor_locked"] = False
+                update_cursor_status()
+                hover_value_label.configure(
+                    text=(
+                        cursor_summary(locked_sample)
+                        if locked_sample is not None
+                        else (
+                            "CURSOR: Move over the graph to compare U, I, P, "
+                            "Q, and f at the same timestamp."
+                        )
+                    )
                 )
                 latest = samples[-1] if samples else None
                 quality = (
@@ -11863,10 +14738,37 @@ class SCADAMainUI:
         def apply_period(_event=None):
             load_history(show_error=True)
 
+        def set_view_paused(paused):
+            paused = bool(paused)
+            view_state["paused"] = paused
+            pause_button.configure(
+                text="Resume Live" if paused else "Pause View",
+                bg="#f2d38a" if paused else "#fff0c7",
+            )
+            refresh_button.configure(
+                state="disabled" if paused else "normal"
+            )
+            view_mode_label.configure(
+                text=(
+                    "VIEW PAUSED  •  Historian and IEC-104 data continue"
+                    if paused
+                    else "LIVE VIEW  •  Historian records every 60 seconds"
+                ),
+                fg=palette["warning"] if paused else palette["green"],
+            )
+            if not paused:
+                load_history(show_error=True)
+
+        def toggle_view_pause():
+            set_view_paused(not view_state["paused"])
+
         def auto_refresh():
             if not curve_win.winfo_exists():
                 return
-            if range_var.get() != "Custom":
+            if (
+                not view_state["paused"]
+                and range_var.get() != "Custom"
+            ):
                 load_history(show_error=False)
             curve_win.after(15000, auto_refresh)
 
@@ -11876,12 +14778,15 @@ class SCADAMainUI:
                 capture=True, show_error=True,
             )
         )
+        pause_button.configure(command=toggle_view_pause)
         export_button.configure(command=export_excel)
         range_combo.bind("<<ComboboxSelected>>", apply_period)
         tree_dev.bind("<<TreeviewSelect>>", select_device)
         table.bind("<<TreeviewSelect>>", select_history_record)
-        canvas_ui.bind("<Configure>", lambda _event: redraw())
-        canvas_power.bind("<Configure>", lambda _event: redraw())
+        canvas_trend.bind("<Configure>", lambda _event: redraw())
+        canvas_trend.bind("<Motion>", handle_chart_motion)
+        canvas_trend.bind("<Leave>", clear_chart_cursor)
+        canvas_trend.bind("<Button-1>", toggle_chart_cursor_lock)
 
         first_item = device_items[active_device["name"]]
         tree_dev.selection_set(first_item)
@@ -12782,6 +15687,7 @@ class SCADAMainUI:
             "device",
             "description",
             "severity",
+            "ack",
         )
         tree = ttk.Treeview(
             grid_frame,
@@ -12805,17 +15711,19 @@ class SCADAMainUI:
         tree.heading("device", text="DEVICE")
         tree.heading("description", text="ALARM DESCRIPTION")
         tree.heading("severity", text="STATUS")
+        tree.heading("ack", text="ACKNOWLEDGEMENT")
         tree.column("tanggal", width=120, minwidth=90, anchor="center")
         tree.column("jam", width=100, minwidth=80, anchor="center")
         tree.column("device", width=150, minwidth=110, anchor="center")
         tree.column("description", width=650, minwidth=260, anchor="w")
         tree.column("severity", width=140, minwidth=100, anchor="center")
+        tree.column("ack", width=160, minwidth=120, anchor="center")
         self._bind_mousewheel(tree)
         self._fit_tree_columns(
             tree,
             columns,
-            [90, 80, 110, 260, 100],
-            [1, 1, 1.3, 5, 1.2],
+            [90, 80, 110, 260, 100, 120],
+            [1, 1, 1.3, 5, 1.2, 1.4],
         )
         tree.tag_configure(
             "CRITICAL",
@@ -12867,6 +15775,78 @@ class SCADAMainUI:
         refreshed_label.pack(side="right", padx=10, pady=4)
 
         self._ensure_alarm_files()
+        control_status = tk.Label(
+            toolbar,
+            text="Annunciator audio enabled",
+            bg=palette["toolbar"],
+            fg=palette["muted"],
+            font=("Segoe UI", 9),
+        )
+        control_status.pack(side="right", padx=8)
+
+        def acknowledge_keys(keys):
+            count = EVENT_STORE.acknowledge(
+                keys, self.current_user or "Operator"
+            )
+            if count:
+                self.alarm_last_scan = 0.0
+                self._scan_alarm_engine()
+                self.refresh_real_time_alarm_tree(tree)
+            return count
+
+        def acknowledge_selected():
+            key_map = self.real_time_alarm_key_maps.get(id(tree), {})
+            keys = [
+                key_map[item]
+                for item in tree.selection()
+                if item in key_map
+            ]
+            if not keys:
+                messagebox.showwarning(
+                    "Alarm Acknowledge",
+                    "Select at least one active alarm.",
+                    parent=alarm_window,
+                )
+                return
+            acknowledge_keys(keys)
+
+        def acknowledge_all():
+            rows = self._read_active_alarm_rows()
+            acknowledge_keys(row[5] for row in rows if row[5])
+
+        def silence_annunciator():
+            self.alarm_silenced = True
+            if sys.platform.startswith("win"):
+                try:
+                    import winsound
+                    winsound.PlaySound(None, winsound.SND_PURGE)
+                except Exception:
+                    pass
+            control_status.configure(
+                text="Annunciator audio silenced"
+            )
+
+        for text, command, background in (
+            ("Acknowledge Selected", acknowledge_selected, "#d8e8f5"),
+            ("Acknowledge All", acknowledge_all, "#dcefe3"),
+            ("Silence Audio", silence_annunciator, "#f9dfca"),
+        ):
+            tk.Button(
+                toolbar,
+                text=text,
+                command=command,
+                bg=background,
+                fg=palette["text"],
+                font=("Segoe UI", 9, "bold"),
+                relief="raised",
+                bd=1,
+                padx=9,
+                pady=4,
+                cursor="hand2",
+            ).pack(side="left", padx=3, pady=7)
+        tree.bind(
+            "<Double-1>", lambda _event: acknowledge_selected()
+        )
 
         def refresh_tree(schedule=True):
             self.refresh_real_time_alarm_tree(tree)
@@ -12877,6 +15857,7 @@ class SCADAMainUI:
                 "NORMAL": 0,
             }
             active_count = 0
+            unacknowledged_count = 0
             for item in tree.get_children():
                 values = tree.item(item, "values")
                 if len(values) < 5:
@@ -12889,18 +15870,25 @@ class SCADAMainUI:
                     status = "NORMAL"
                 counts[status] += 1
                 active_count += 1
+                if len(values) >= 6 and str(values[5]) != "ACKNOWLEDGED":
+                    unacknowledged_count += 1
             for severity, label in severity_labels.items():
                 label.configure(text=f"{severity}  {counts[severity]}")
             summary_label.configure(
                 text=(
                     f"{active_count:,} active alarm"
                     f"{'' if active_count == 1 else 's'}"
+                    f" • {unacknowledged_count:,} unacknowledged"
                 ),
                 fg=palette["red"] if active_count else palette["green"],
             )
             refreshed_label.configure(
                 text=f"Last refresh: {datetime.datetime.now():%H:%M:%S}"
             )
+            if not self.alarm_silenced:
+                control_status.configure(
+                    text="Annunciator audio enabled"
+                )
             if schedule:
                 try:
                     if alarm_window.winfo_exists():
@@ -13882,18 +16870,20 @@ class SCADAMainUI:
             right_edge_x=1838
         )
         self.add_overlay_box(
-            canvas, 376, 12, 120, 108,
-            [("UAB", "0.00", "wire1_uab"), ("IA", "0.00", "wire1_ia"),
-             ("P", "0.00", "wire1_p"), ("Q", "0.00", "wire1_q")],
+            canvas, 356, 12, 120, 135,
+            [("UAB", "0.00", "wire1_uab"), ("f", "0.00", "wire1_f"),
+             ("IA", "0.00", "wire1_ia"), ("P", "0.00", "wire1_p"),
+             ("Q", "0.00", "wire1_q")],
             font_size=15,
             scale_box=False,
             horizontal_lines=True,
             vertical_line=True
         )
         self.add_overlay_box(
-            canvas, 1446, 12, 120, 108,
-            [("UAB", "0.00", "wire2_uab"), ("IA", "0.00", "wire2_ia"),
-             ("P", "0.00", "wire2_p"), ("Q", "0.00", "wire2_q")],
+            canvas, 1436, 12, 120, 135,
+            [("UAB", "0.00", "wire2_uab"), ("f", "0.00", "wire2_f"),
+             ("IA", "0.00", "wire2_ia"), ("P", "0.00", "wire2_p"),
+             ("Q", "0.00", "wire2_q")],
             font_size=15,
             scale_box=False,
             horizontal_lines=True,
@@ -14021,7 +17011,7 @@ class SCADAMainUI:
         # ================================================================
         # LEFT: ORIGINAL SLD PNG
         # ================================================================
-        left_panel = tk.Frame(content_area, bg=BG, width=455)
+        left_panel = tk.Frame(content_area, bg=BG, width=365)
         left_panel.pack(side="left", fill="y", padx=(8, 6), pady=8)
         left_panel.pack_propagate(False)
 
@@ -14043,7 +17033,7 @@ class SCADAMainUI:
             ).pack(side="left", padx=(0, 7))
             tk.Label(
                 frm, text=text, bg=BG, fg="#00ff00",
-                font=("Arial", 10, "bold")
+                font=("Arial", 11, "bold")
             ).pack(side="left")
 
         image_holder = tk.Frame(
@@ -14089,7 +17079,7 @@ class SCADAMainUI:
                     pass
 
                 # Make the SLD as large as possible inside the left panel.
-                max_w, max_h = 435, 800
+                max_w, max_h = 345, 800
                 ratio = min(
                     max_w / max(1, pil_img.width),
                     max_h / max(1, pil_img.height)
@@ -14118,6 +17108,32 @@ class SCADAMainUI:
                     expand=True,
                     fill="both"
                 )
+
+                # Cover the static green generator-breaker body in the PNG.
+                # Coordinates are measured from both original 223x390 images;
+                # anchoring from the image centre keeps the overlay aligned
+                # while the label expands inside the responsive holder.
+                breaker_x = ((52.0 / pil_img.width) - 0.5) * new_size[0]
+                breaker_y = ((29.0 / pil_img.height) - 0.5) * new_size[1]
+                breaker_overlay = tk.Label(
+                    lbl_img,
+                    text="",
+                    bg="#808080",
+                    bd=1,
+                    relief="solid",
+                )
+                breaker_overlay.place(
+                    relx=0.5,
+                    rely=0.5,
+                    x=int(breaker_x),
+                    y=int(breaker_y),
+                    width=max(12, int(7 * ratio)),
+                    height=max(18, int(11 * ratio)),
+                    anchor="center",
+                )
+                self.__dict__[
+                    f"g{gen_num}_sld_breaker_overlay"
+                ] = breaker_overlay
 
                 self.__dict__[f"g{gen_num}_sld_image"] = sld_img
 
@@ -14212,8 +17228,12 @@ class SCADAMainUI:
             return _norm_text(row.get("Unit")) or fallback
 
         def configured_label(physical, fallback):
-            row = setting_meta(physical)
-            return _norm_text(row.get("Info_Name")) or fallback
+            info_name = _norm_text(setting_meta(physical).get("Info_Name"))
+            return (
+                f"{fallback}  ·  {info_name}"
+                if info_name and info_name.casefold() != fallback.casefold()
+                else fallback
+            )
 
         # ================================================================
         # STATUS HEADER
@@ -14233,7 +17253,7 @@ class SCADAMainUI:
             text=f"{gen_num}# GENERATOR PROTECTION",
             bg="#0b2118",
             fg=YELLOW,
-            font=("Arial", 15, "bold")
+            font=("Arial", 18, "bold")
         ).pack(side="left")
 
         tk.Label(
@@ -14241,7 +17261,7 @@ class SCADAMainUI:
             text=f"IEC-104  •  {source_ip}",
             bg="#0b2118",
             fg=CYAN,
-            font=("Courier New", 10, "bold")
+            font=("Courier New", 12, "bold")
         ).pack(side="left", padx=18)
 
         status_dot = tk.Label(
@@ -14249,7 +17269,7 @@ class SCADAMainUI:
             text="●",
             bg="#0b2118",
             fg=RED,
-            font=("Arial", 15, "bold")
+            font=("Arial", 18, "bold")
         )
         status_dot.pack(side="right", padx=(8, 4))
 
@@ -14258,25 +17278,116 @@ class SCADAMainUI:
             text="OFFLINE",
             bg="#0b2118",
             fg=RED,
-            font=("Arial", 10, "bold")
+            font=("Arial", 12, "bold")
         )
         status_text.pack(side="right")
 
         self.__dict__[f"g{gen_num}_monitor_status_dot"] = status_dot
         self.__dict__[f"g{gen_num}_monitor_status_text"] = status_text
 
+        breaker_bar = tk.Frame(
+            center_panel,
+            bg="#07100d",
+            bd=1,
+            relief="ridge",
+            highlightbackground=BORDER,
+            highlightthickness=1,
+        )
+        breaker_bar.pack(fill="x", pady=(0, 8))
+        breaker_indicators = {}
+        breaker_defaults = _generator_breaker_defaults(f"G{gen_num}")
+        for rectangle_id, binding in breaker_defaults.items():
+            card = tk.Frame(
+                breaker_bar,
+                bg="#0b1412",
+                bd=1,
+                relief="solid",
+            )
+            card.pack(
+                side="left",
+                fill="both",
+                expand=True,
+                padx=3,
+                pady=5,
+            )
+            lamp = tk.Label(
+                card,
+                text="",
+                bg="#808080",
+                width=2,
+                height=2,
+                relief="sunken",
+                bd=1,
+            )
+            lamp.pack(side="left", padx=(7, 6), pady=6)
+            text_box = tk.Frame(card, bg="#0b1412")
+            text_box.pack(
+                side="left", fill="both", expand=True, pady=5
+            )
+            tk.Label(
+                text_box,
+                text=_norm_text(binding.get("label")) or rectangle_id,
+                bg="#0b1412",
+                fg=WHITE,
+                font=("Arial", 10, "bold"),
+                anchor="w",
+            ).pack(fill="x")
+            state_label = tk.Label(
+                text_box,
+                text="UNKNOWN",
+                bg="#0b1412",
+                fg="#aeb8b4",
+                font=("Arial", 10, "bold"),
+                anchor="w",
+            )
+            state_label.pack(fill="x")
+            open_binding = binding.get("open_binding", {})
+            address = (
+                f"ASDU {binding.get('ASDU', '-')} / "
+                f"IOA {binding.get('IOA', '-')}"
+            )
+            if isinstance(open_binding, dict) and open_binding:
+                address += f" + {open_binding.get('IOA', '-')}"
+            address_label = tk.Label(
+                text_box,
+                text=address,
+                bg="#0b1412",
+                fg=MUTED,
+                font=("Courier New", 8),
+                anchor="w",
+            )
+            address_label.pack(fill="x")
+            breaker_indicators[rectangle_id] = {
+                "lamp": lamp,
+                "state": state_label,
+                "address": address_label,
+            }
+        self.__dict__[
+            f"g{gen_num}_breaker_indicators"
+        ] = breaker_indicators
+        detail_area = tk.Frame(center_panel, bg=BG)
+        detail_area.pack(fill="both", expand=True)
+        detail_area.grid_rowconfigure(0, weight=1)
+        detail_area.grid_columnconfigure(0, weight=5, minsize=560)
+        detail_area.grid_columnconfigure(1, weight=3, minsize=360)
+
         # ================================================================
         # GENERATOR PROTECTION - LARGE, CLEAN, TWO COLUMNS
         # ================================================================
         protection = tk.Frame(
-            center_panel,
+            detail_area,
             bg=CARD,
             bd=1,
             relief="ridge",
             highlightbackground=BORDER,
             highlightthickness=1
         )
-        protection.pack(fill="x", pady=(0, 8))
+        protection.grid(
+            row=0,
+            column=1,
+            sticky="nsew",
+            padx=(4, 0),
+        )
 
         ph = tk.Frame(
             protection,
@@ -14309,7 +17420,7 @@ class SCADAMainUI:
             text=f"{gen_num}# GENERATOR PROTECTION",
             bg="#13231d",
             fg=YELLOW,
-            font=("Arial", 14, "bold")
+            font=("Arial", 16, "bold")
         ).pack(anchor="w")
 
         tk.Label(
@@ -14336,14 +17447,20 @@ class SCADAMainUI:
             bg=CARD
         )
         prot_grid.pack(
-            fill="x",
+            fill="both",
+            expand=True,
             padx=10,
             pady=10
         )
 
-        for c in range(2):
-            prot_grid.grid_columnconfigure(
-                c,
+        prot_grid.grid_columnconfigure(
+            0,
+            weight=1,
+            uniform="protection"
+        )
+        for row_no in range(len(protections)):
+            prot_grid.grid_rowconfigure(
+                row_no,
                 weight=1,
                 uniform="protection"
             )
@@ -14352,7 +17469,7 @@ class SCADAMainUI:
 
         for idx, prot in enumerate(protections):
 
-            rr, cc = divmod(idx, 2)
+            rr, cc = idx, 0
 
             p_frm = tk.Frame(
                 prot_grid,
@@ -14402,7 +17519,7 @@ class SCADAMainUI:
                 text=prot,
                 bg="#080b0b",
                 fg=WHITE,
-                font=("Arial", 10, "bold"),
+                font=("Arial", 11, "bold"),
                 anchor="w"
             ).pack(
                 side="left",
@@ -14467,22 +17584,24 @@ class SCADAMainUI:
         # This is the ONLY realtime value table on the page.
         # ================================================================
         parameter_card = tk.Frame(
-            center_panel,
+            detail_area,
             bg=CARD,
             bd=1,
             relief="ridge",
             highlightbackground=BORDER,
             highlightthickness=1
         )
-        parameter_card.pack(
-            fill="both",
-            expand=True
+        parameter_card.grid(
+            row=0,
+            column=0,
+            sticky="nsew",
+            padx=(0, 4),
         )
 
         head = tk.Frame(
             parameter_card,
             bg="#13231d",
-            height=62
+            height=66
         )
         head.pack(fill="x")
         head.pack_propagate(False)
@@ -14510,7 +17629,7 @@ class SCADAMainUI:
             text=f"{gen_num}# PROTECTION OF GENERATOR",
             bg="#13231d",
             fg=YELLOW,
-            font=("Arial", 14, "bold")
+            font=("Arial", 18, "bold")
         ).pack(anchor="w")
 
         tk.Label(
@@ -14518,7 +17637,7 @@ class SCADAMainUI:
             text="REAL-TIME ELECTRICAL VALUES • CSV CONFIGURED",
             bg="#13231d",
             fg=MUTED,
-            font=("Arial", 8, "bold")
+            font=("Arial", 10, "bold")
         ).pack(anchor="w")
 
         table = tk.Frame(
@@ -14528,12 +17647,12 @@ class SCADAMainUI:
         table.pack(
             fill="both",
             expand=True,
-            padx=10,
-            pady=10
+            padx=8,
+            pady=8
         )
 
         table.grid_columnconfigure(
-            0, weight=3
+            0, weight=5
         )
         table.grid_columnconfigure(
             1, weight=2
@@ -14550,8 +17669,8 @@ class SCADAMainUI:
                 text=txt,
                 bg="#202725",
                 fg="#c7d3ce",
-                font=("Arial", 9, "bold"),
-                pady=8
+                font=("Arial", 11, "bold"),
+                pady=6
             ).grid(
                 row=0,
                 column=col,
@@ -14576,18 +17695,18 @@ class SCADAMainUI:
         }
 
         display_fallback = {
-            "Uab": "UAB",
-            "Ubc": "UBC",
-            "Uca": "UCA",
-            "I A": "IA",
-            "I B": "IB",
-            "I C": "IC",
-            "P": "ACTIVE P",
-            "Q": "REACTIVE Q",
+            "Uab": "LINE VOLTAGE UAB",
+            "Ubc": "LINE VOLTAGE UBC",
+            "Uca": "LINE VOLTAGE UCA",
+            "I A": "PHASE CURRENT IA",
+            "I B": "PHASE CURRENT IB",
+            "I C": "PHASE CURRENT IC",
+            "P": "ACTIVE POWER P",
+            "Q": "REACTIVE POWER Q",
             "f": "FREQUENCY",
-            "COS": "COS φ",
-            "Urotor": "U ROTOR",
-            "Irotor": "I ROTOR",
+            "COS": "POWER FACTOR COS φ",
+            "Urotor": "ROTOR VOLTAGE",
+            "Irotor": "ROTOR CURRENT",
         }
 
         for idx, param in enumerate(
@@ -14622,10 +17741,10 @@ class SCADAMainUI:
                 text=label,
                 bg=bg_row,
                 fg=ORANGE,
-                font=("Arial", 10, "bold"),
+                font=("Arial", 11, "bold"),
                 anchor="w",
-                padx=10,
-                pady=8
+                padx=12,
+                pady=4
             ).grid(
                 row=idx,
                 column=0,
@@ -14636,13 +17755,13 @@ class SCADAMainUI:
 
             val_widget = tk.Label(
                 table,
-                text="0.00",
+                text="NO DATA",
                 bg="#020303",
-                fg=ORANGE,
-                font=("Courier New", 13, "bold"),
+                fg="#ffb020",
+                font=("Courier New", 20, "bold"),
                 anchor="e",
-                padx=10,
-                pady=8,
+                padx=14,
+                pady=4,
                 relief="solid",
                 bd=1
             )
@@ -14660,10 +17779,10 @@ class SCADAMainUI:
                 text=unit,
                 bg=bg_row,
                 fg="#9aa9a3",
-                font=("Arial", 9, "bold"),
+                font=("Arial", 11, "bold"),
                 anchor="w",
                 padx=8,
-                pady=8
+                pady=4
             ).grid(
                 row=idx,
                 column=2,
@@ -14752,6 +17871,14 @@ class SCADAMainUI:
             font=("Arial", 10, "bold")
         )
         self.system_config_status_label.pack(side="right", padx=10)
+        self.system_config_breaker_legend = tk.Label(
+            header,
+            text="CB YX: MERAH=CLOSED/ON  •  HIJAU=OPEN/OFF  •  ABU=NO DATA",
+            bg="#101010",
+            fg="#d8d8d8",
+            font=("Arial", 9, "bold"),
+        )
+        self.system_config_breaker_legend.pack(side="right", padx=(4, 16))
 
         canvas = tk.Canvas(frame, bg="#101010", highlightthickness=0, bd=0, relief="flat")
         canvas.pack(fill="both", expand=True)
@@ -14946,7 +18073,7 @@ class SCADAMainUI:
                         display = f"{label}: 0.00"
                     canvas.itemconfig(item, text=display, fill=color)
 
-            self._update_sld_status_items(
+            breaker_summary = self._update_sld_status_items(
                 canvas,
                 getattr(self, "system_config_status_items", []),
             )
@@ -14956,7 +18083,11 @@ class SCADAMainUI:
             if hasattr(self, "system_config_status_label"):
                 status_color = "#008000" if connected == 8 else ("#b8860b" if hosts_up else "#cc0000")
                 self.system_config_status_label.config(
-                    text=f"IEC-104 {connected}/8  •  IP {hosts_up}/8", fg=status_color
+                    text=(
+                        f"CB YX {breaker_summary['valid']}/{breaker_summary['total']}"
+                        f"  •  IEC-104 {connected}/8  •  IP {hosts_up}/8"
+                    ),
+                    fg=status_color,
                 )
         except Exception:
             pass
@@ -15466,6 +18597,8 @@ class SCADAMainUI:
         self.aux_status_items = []
         self.aux_source_image = None
         self.aux_image = None
+        self.aux_breaker_summary_item = None
+        self.aux_breaker_legend_item = None
 
         # Use the clean diagram as the background. All measurement tables are
         # canvas objects so their values remain live instead of being baked in.
@@ -15587,11 +18720,11 @@ class SCADAMainUI:
                                     lambda _event, bk=binding_key: self._open_binding_dialog(bk, "variables"))
                     self.aux_value_items.append((value_item, source_type, source_id, field, binding_key))
 
-            # Cover every breaker body with its authoritative StatusSetting YX
-            # point. Unknown/offline quality stays grey instead of being guessed
-            # from the feeder current.
-            assert len(SLD_BREAKER_SPECS) == 23
-            for breaker_key, element, _bay, physical_names, bx, by in SLD_BREAKER_SPECS:
+            # AUXILIARY_MATCHED.png has no outer Generator 1/2 breaker bodies.
+            # Draw only its 21 connected breaker positions; each still uses
+            # the authoritative StatusSetting YX point.
+            assert len(AUXILIARY_BREAKER_SPECS) == 21
+            for breaker_key, element, _bay, physical_names, bx, by in AUXILIARY_BREAKER_SPECS:
                 item = canvas.create_rectangle(
                     (bx - 8.0) * sx, (by - 14.0) * sy,
                     (bx + 8.0) * sx, (by + 14.0) * sy,
@@ -15612,6 +18745,40 @@ class SCADAMainUI:
                 canvas.tag_bind(item, "<Double-Button-1>",
                                 lambda _event, bk=binding_key: self._open_binding_dialog(bk, "statuses"))
                 self.aux_status_items.append((item, binding_key, value_item))
+            legend_left = 980.0 * sx
+            legend_top = 958.0 * sy
+            canvas.create_rectangle(
+                legend_left,
+                legend_top,
+                1522.0 * sx,
+                1016.0 * sy,
+                fill="#000000",
+                outline="#808080",
+                width=1,
+                tags="aux_live",
+            )
+            self.aux_breaker_summary_item = canvas.create_text(
+                1508.0 * sx,
+                974.0 * sy,
+                text=(
+                    f"CB YX LIVE 0/{len(AUXILIARY_BREAKER_SPECS)}"
+                    f"  •  CLOSED 0  •  OPEN 0"
+                    f"  •  NO DATA {len(AUXILIARY_BREAKER_SPECS)}"
+                ),
+                anchor="ne",
+                fill="#ff5555",
+                font=("Arial", max(8, int(round(11 * scale))), "bold"),
+                tags="aux_live",
+            )
+            self.aux_breaker_legend_item = canvas.create_text(
+                1508.0 * sx,
+                998.0 * sy,
+                text="MERAH=CLOSED/ON  •  HIJAU=OPEN/OFF  •  ABU-ABU=NO DATA",
+                anchor="ne",
+                fill="#d8d8d8",
+                font=("Arial", max(8, int(round(10 * scale))), "bold"),
+                tags="aux_live",
+            )
             self._update_auxiliary_realtime()
 
         canvas.bind("<Configure>", _resize_aux, add="+")
@@ -15636,21 +18803,42 @@ class SCADAMainUI:
         canvas.after(250, _aux_realtime_tick)
 
     def _update_sld_status_items(self, canvas, status_items):
-        """Render plant SLD breakers exclusively from authoritative YX points."""
+        """Render documented primary YX state and return its data-quality count."""
+        summary = {
+            "total": len(status_items),
+            "valid": 0,
+            "closed": 0,
+            "open": 0,
+            "unknown": 0,
+        }
         for item, binding_key, value_item in status_items:
-            binding = self.ui_bindings.get("statuses", {}).get(binding_key, {})
+            binding = self.ui_bindings.get("statuses", {}).get(
+                binding_key, {}
+            )
             if binding.get("Source_Kind") != "rectangle_status_csv":
                 color, label = "#808080", "?"
+                active = None
             else:
-                value = self._resolve_raw_ui_binding(binding_key)
-                _active, color, label = self._status_rectangle_style(
-                    binding_key,
-                    value,
-                    default_active=False,
-                    valid=value is not None,
-                )
+                point = _status_point_snapshot(binding)
+                value = point.get("raw")
+                if point.get("quality") != "GOOD" or value is None:
+                    color, label = "#808080", "?"
+                    active = None
+                else:
+                    active, color, label = self._status_rectangle_style(
+                        binding_key,
+                        value,
+                        default_active=False,
+                        valid=True,
+                    )
+            if active is None:
+                summary["unknown"] += 1
+            else:
+                summary["valid"] += 1
+                summary["closed" if active else "open"] += 1
             canvas.itemconfig(item, fill=color)
             canvas.itemconfig(value_item, text=label)
+        return summary
 
     def _update_auxiliary_realtime(self):
         canvas = getattr(self, "aux_canvas", None)
@@ -15678,10 +18866,29 @@ class SCADAMainUI:
                 value_font = max(8, 14 - max(0, len(text) - 7) // 2)
                 canvas.itemconfig(item, text=text, fill="#00ff36",
                                   font=("Arial Narrow", value_font, "bold"))
-            self._update_sld_status_items(
+            breaker_summary = self._update_sld_status_items(
                 canvas,
                 getattr(self, "aux_status_items", []),
             )
+            summary_item = getattr(self, "aux_breaker_summary_item", None)
+            if summary_item is not None:
+                summary_color = (
+                    "#00ff36"
+                    if breaker_summary["valid"] == breaker_summary["total"]
+                    else "#ffb020"
+                    if breaker_summary["valid"]
+                    else "#ff5555"
+                )
+                canvas.itemconfig(
+                    summary_item,
+                    text=(
+                        f"CB YX LIVE {breaker_summary['valid']}/{breaker_summary['total']}"
+                        f"  •  CLOSED {breaker_summary['closed']}"
+                        f"  •  OPEN {breaker_summary['open']}"
+                        f"  •  NO DATA {breaker_summary['unknown']}"
+                    ),
+                    fill=summary_color,
+                )
         except Exception:
             pass
 
@@ -15735,8 +18942,8 @@ class SCADAMainUI:
                 data.setdefault("variables", {})
                 statuses = data.setdefault("statuses", {})
                 # Migrate the former fourteen numeric screen keys to stable
-                # feeder names; the other nine SLD breakers are registered
-                # below on first draw.
+                # feeder names. Remaining fixed breakers register on first
+                # draw from each screen's own geometry.
                 for page in ("system", "aux"):
                     for card_no in range(1, 15):
                         old_key = f"{page}:breaker:{card_no}"
@@ -15744,6 +18951,10 @@ class SCADAMainUI:
                         if old_key in statuses:
                             statuses.setdefault(new_key, statuses[old_key])
                             statuses.pop(old_key, None)
+                # AUXILIARY_MATCHED.png has no outer Generator 1/2 breaker
+                # bodies. Remove bindings left by the former shared geometry.
+                statuses.pop("aux:breaker:generator_1", None)
+                statuses.pop("aux:breaker:generator_2", None)
                 return data
         except Exception:
             pass
@@ -15947,11 +19158,11 @@ class SCADAMainUI:
                 "Physical_Name": f"W{wire_no}_{phase}",
             }
 
-        match = re.fullmatch(r"wire([12])_(uab|ia|p|q)", key, re.I)
+        match = re.fullmatch(r"wire([12])_(uab|f|ia|p|q)", key, re.I)
         if match:
             wire_no = int(match.group(1))
             physical = {
-                "uab": "Uab", "ia": "Ia", "p": "P", "q": "Q",
+                "uab": "Uab", "f": "f", "ia": "Ia", "p": "P", "q": "Q",
             }[match.group(2).lower()]
             return {
                 "Device_Addr": "10.100.163.1",
@@ -16078,7 +19289,8 @@ class SCADAMainUI:
                 add(group, f"KV {roman} / {symbol}", symbol,
                     f"kv_{roman.lower()}_{suffix}")
             for suffix, symbol in (
-                ("uab", "UAB"), ("ia", "IA"), ("p", "P"), ("q", "Q"),
+                ("uab", "UAB"), ("f", "f"), ("ia", "IA"),
+                ("p", "P"), ("q", "Q"),
             ):
                 add(group, f"WIRE {roman} / {symbol}", symbol,
                     f"wire{wire_no}_{suffix}")
@@ -16178,6 +19390,52 @@ class SCADAMainUI:
         if not math.isfinite(number):
             return "-"
         return f"{number:.10g}"
+
+    @staticmethod
+    def _mapping_info_name(binding, registry=None):
+        """Return an encoded InfoName, resolving legacy physical-name aliases."""
+        configured = _norm_text(
+            binding.get("Info_Name", binding.get("InfoName"))
+        )
+        if _decode_parameter_info_name(configured):
+            return configured
+        try:
+            ip = _norm_text(binding.get("Device_Addr"))
+            asdu = int(float(binding.get("ASDU")))
+            ioa = int(float(binding.get("IOA")))
+        except (TypeError, ValueError):
+            return configured or "-"
+        if registry is None:
+            with SETTING_LOCK:
+                registry = list(SETTING_REGISTRY)
+        bay = _norm_text(binding.get("Bay_Name"))
+        physical = _norm_text(binding.get("Physical_Name"))
+        matches = []
+        for row in registry:
+            try:
+                address_matches = (
+                    _norm_text(row.get("Device_Addr")) == ip
+                    and int(row.get("ASDU_INT", row.get("ASDU"))) == asdu
+                    and int(row.get("IOA_INT", row.get("IOA"))) == ioa
+                )
+            except (TypeError, ValueError):
+                continue
+            if address_matches:
+                matches.append(row)
+        exact = next(
+            (
+                row for row in matches
+                if _norm_text(row.get("Bay_Name")) == bay
+                and _norm_text(row.get("Physical_Name")) == physical
+            ),
+            None,
+        )
+        candidates = [exact] if exact is not None else matches
+        for row in candidates:
+            info_name = _norm_text(row.get("Info_Name"))
+            if _decode_parameter_info_name(info_name):
+                return info_name
+        return configured or "-"
 
     def _run_monitor_formula_text(self, binding):
         """Expand a configured formula into a readable engineering expression."""
@@ -16319,6 +19577,7 @@ class SCADAMainUI:
                 "raw": self._run_monitor_number(raw_value),
                 "source": source,
                 "ip": ip or "-",
+                "infoname": self._mapping_info_name(binding, registry),
                 "asdu": self._run_monitor_number(binding.get("ASDU")),
                 "ioa": self._run_monitor_number(binding.get("IOA")),
                 "coefficient": self._run_monitor_number(
@@ -16336,6 +19595,8 @@ class SCADAMainUI:
         """Build live G1/G2 analog and breaker rows from MonitorTVConfig."""
         if not globals().get("MONITOR_TV_AVAILABLE", False):
             return []
+        with SETTING_LOCK:
+            registry = list(SETTING_REGISTRY)
 
         config = _monitor_tv_config()
         payload = _monitor_tv_payload()
@@ -16411,6 +19672,7 @@ class SCADAMainUI:
                     "quality": quality,
                     "source": source,
                     "ip": ip or "-",
+                    "infoname": self._mapping_info_name(binding, registry),
                     "asdu": self._run_monitor_number(binding.get("ASDU")),
                     "ioa": self._run_monitor_number(binding.get("IOA")),
                     "formula": formula,
@@ -16430,103 +19692,80 @@ class SCADAMainUI:
                 })
 
             rectangles = section.get("rectangles", {})
-            comparison_values = panel.get("rectangle_values", {})
+            breaker_states = panel.get("rectangle_states", {})
             for rectangle_id, binding in sorted(rectangles.items()):
                 if not isinstance(binding, dict):
                     continue
-                value = comparison_values.get(rectangle_id)
-                operator = "<" if binding.get("operator") == "<" else ">"
-                try:
-                    threshold = float(binding.get("threshold", 0.0))
-                except (TypeError, ValueError, OverflowError):
-                    threshold = 0.0
-                try:
-                    numeric_value = float(value)
-                    active = (
-                        numeric_value < threshold
-                        if operator == "<"
-                        else numeric_value > threshold
-                    )
-                except (TypeError, ValueError, OverflowError):
-                    numeric_value = None
-                    active = None
-
+                state = breaker_states.get(rectangle_id)
+                if not isinstance(state, dict):
+                    state = _digital_breaker_snapshot(binding)
                 ip = _norm_text(binding.get("Device_Addr"))
                 bay = _norm_text(binding.get("Bay_Name"))
                 physical = _norm_text(binding.get("Physical_Name"))
                 info_name = _norm_text(binding.get("Info_Name"))
-                try:
-                    preview = _monitor_tv_preview(binding)
-                    raw_value = preview.get("raw")
-                    if not ip:
-                        quality = "CONFIG"
-                    elif preview.get("online"):
-                        quality = (
-                            "ONLINE" if preview.get("available") else "NO DATA"
+                open_binding = state.get("open_binding", {})
+                open_physical = (
+                    _norm_text(open_binding.get("Physical_Name"))
+                    if isinstance(open_binding, dict) else ""
+                )
+                raw_parts = [
+                    f"CLOSE {self._run_monitor_number(state.get('raw_yx'))}"
+                ]
+                if open_binding:
+                    raw_parts.append(
+                        "OPEN "
+                        + self._run_monitor_number(
+                            state.get("open_raw_yx")
                         )
-                    else:
-                        quality = "OFFLINE"
-                except Exception:
-                    preview = {}
-                    raw_value = None
+                    )
+                state_quality = _norm_text(state.get("quality"))
+                if state_quality == "GOOD":
+                    quality = "ONLINE"
+                elif state_quality == "RTU OFFLINE":
+                    quality = "OFFLINE"
+                elif state_quality == "CONFIG INVALID":
                     quality = "CONFIG"
-
-                actual_text = self._run_monitor_number(numeric_value)
-                threshold_text = self._run_monitor_number(threshold)
-                if active is None:
-                    condition = "--"
-                    result_text = "UNKNOWN"
-                    color = "#808080"
-                elif active:
-                    condition = "TRUE / AKTIF"
-                    result_text = "TRUE"
-                    color = (
-                        binding.get("true_color")
-                        or binding.get("active_color")
-                        or "#ff2020"
+                else:
+                    quality = state_quality or "NO DATA"
+                if open_binding:
+                    formula = "CLOSE/TRIP CONTACT PAIR"
+                    rule = (
+                        "CLOSE=1, OPEN=0 → CLOSED; CLOSE=0, OPEN=1 "
+                        f"→ OPEN; lainnya INVALID; warna {state.get('color')}"
                     )
                 else:
-                    condition = "FALSE / TIDAK AKTIF"
-                    result_text = "FALSE"
-                    color = (
-                        binding.get("false_color")
-                        or binding.get("inactive_color")
-                        or "#14d84a"
+                    formula = "EFFECTIVE YX = RAW XOR REVERSE"
+                    rule = (
+                        f"YX=1 → CLOSED; YX=0 → OPEN; "
+                        f"warna {state.get('color')}"
                     )
-                rule = (
-                    f"{actual_text} {operator} {threshold_text} = "
-                    f"{result_text}; warna {color}; flow "
-                    f"{binding.get('flow', 'none')}"
-                )
+                point = physical or info_name or _norm_text(
+                    binding.get("label")
+                ) or "-"
+                if open_physical:
+                    point = f"{point} + {open_physical}"
                 rows.append({
                     "key": f"{monitor_id}:breaker:{rectangle_id}",
                     "monitor": monitor_id,
                     "kind": "Breaker",
                     "element": rectangle_id,
-                    "point": physical or info_name or _norm_text(
-                        binding.get("label")
-                    ) or "-",
-                    "actual": condition,
-                    "raw": self._run_monitor_number(raw_value),
+                    "point": point,
+                    "actual": state.get("condition", "UNKNOWN"),
+                    "raw": " / ".join(raw_parts),
                     "quality": quality,
                     "source": (
-                        f"ListSetting {bay}.csv"
+                        f"StatusSetting {bay}.csv"
                         if bay else "Mapping tidak ditemukan"
                     ),
                     "ip": ip or "-",
+                    "infoname": self._mapping_info_name(binding, registry),
                     "asdu": self._run_monitor_number(binding.get("ASDU")),
                     "ioa": self._run_monitor_number(binding.get("IOA")),
-                    "formula": (
-                        f"ACTUAL {operator} {threshold_text}"
-                    ),
-                    "coefficient": self._run_monitor_number(
-                        binding.get("Coefficient")
-                    ),
-                    "ctpt": self._run_monitor_number(binding.get("CTPT")),
-                    "offset": self._run_monitor_number(
-                        binding.get("Add_Offset")
-                    ),
-                    "unit": _norm_text(binding.get("Unit")) or "-",
+                    "formula": formula,
+                    "coefficient": "-",
+                    "ctpt": "-",
+                    "offset": "-",
+                    "unit": "YX",
                     "rule": rule,
                 })
 
@@ -16854,53 +20093,73 @@ class SCADAMainUI:
     # ======================================================================
     def _ensure_alarm_files(self):
         """Create the alarm event/history files when they do not exist."""
-        header = ["Date", "Time", "Device", "Description", "Status"]
-        for filename in (self.alarm_history_file, self.alarm_active_file):
+        files = (
+            (
+                self.alarm_history_file,
+                ["Date", "Time", "Device", "Description", "Status"],
+            ),
+            (
+                self.alarm_active_file,
+                [
+                    "Date", "Time", "Device", "Description", "Status",
+                    "AlarmKey", "Acknowledgement", "CycleID",
+                ],
+            ),
+        )
+        for filename, header in files:
             try:
                 if not os.path.exists(filename):
-                    with open(filename, "w", newline="", encoding="utf-8") as f:
-                        csv.writer(f).writerow(header)
+                    with open(
+                        filename, "w", newline="", encoding="utf-8"
+                    ) as handle:
+                        csv.writer(handle).writerow(header)
             except Exception:
                 pass
 
     def _append_alarm_history(self, device, description, status):
-        """Append one alarm transition to AlarmHistory.csv."""
+        """Append one alarm transition through the shared serialized writer."""
         self._ensure_alarm_files()
-        now = datetime.datetime.now()
-        try:
-            with open(self.alarm_history_file, "a", newline="", encoding="utf-8") as f:
-                csv.writer(f).writerow([
-                    now.strftime("%Y-%m-%d"),
-                    now.strftime("%H:%M:%S"),
-                    str(device),
-                    str(description),
-                    str(status).upper(),
-                ])
-        except Exception:
-            pass
+        _append_alarm_history_row(device, description, status)
 
     def _read_active_alarm_rows(self):
-        """Read the current active-alarm snapshot from Alarm.csv."""
+        """Read active alarms including stable keys and ACK cycle metadata."""
         self._ensure_alarm_files()
         rows = []
         try:
-            with open(self.alarm_active_file, "r", newline="", encoding="utf-8") as f:
-                reader = csv.reader(f)
+            with open(
+                self.alarm_active_file,
+                "r",
+                newline="",
+                encoding="utf-8",
+            ) as handle:
+                reader = csv.reader(handle)
                 next(reader, None)
                 for row in reader:
                     if len(row) >= 5 and row[2] != "SYSTEM":
-                        rows.append(row[:5])
+                        normalized = list(row[:8])
+                        normalized.extend(
+                            [""] * (8 - len(normalized))
+                        )
+                        rows.append(normalized)
         except Exception:
             pass
         return rows
 
     def _write_active_alarm_rows(self, rows):
-        """Rewrite Alarm.csv as the current active-alarm snapshot."""
+        """Rewrite Alarm.csv as the current keyed active-alarm snapshot."""
         self._ensure_alarm_files()
         try:
-            with open(self.alarm_active_file, "w", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
-                writer.writerow(["Date", "Time", "Device", "Description", "Status"])
+            with open(
+                self.alarm_active_file,
+                "w",
+                newline="",
+                encoding="utf-8",
+            ) as handle:
+                writer = csv.writer(handle)
+                writer.writerow([
+                    "Date", "Time", "Device", "Description", "Status",
+                    "AlarmKey", "Acknowledgement", "CycleID",
+                ])
                 writer.writerows(rows)
         except Exception:
             pass
@@ -16980,8 +20239,10 @@ class SCADAMainUI:
             return self._safe_float(data.get(key))
         return None
 
-    def _update_alarm_event(self, alarm_key, device, description, status):
-        """Record only transitions: NORMAL->alarm, alarm->changed alarm, alarm->NORMAL."""
+    def _update_alarm_event(
+        self, alarm_key, device, description, status
+    ):
+        """Record one communication/analog transition and its ACK cycle."""
         status = str(status).upper()
         with self.alarm_engine_lock:
             previous = self.alarm_states.get(alarm_key, "NORMAL")
@@ -16989,12 +20250,63 @@ class SCADAMainUI:
                 return
             self.alarm_states[alarm_key] = status
             if status == "NORMAL":
-                self._append_alarm_history(device, f"RETURN TO NORMAL: {description}", "NORMAL")
+                EVENT_STORE.clear_alarm_cycle(alarm_key)
+                self._append_alarm_history(
+                    device,
+                    f"RETURN TO NORMAL: {description}",
+                    "NORMAL",
+                )
             else:
-                self._append_alarm_history(device, description, status)
+                cycle_id = hashlib.sha256(
+                    (
+                        f"{alarm_key}|{status}|"
+                        f"{datetime.datetime.now().isoformat(timespec='milliseconds')}"
+                    ).encode("utf-8")
+                ).hexdigest()[:32]
+                EVENT_STORE.start_alarm_cycle(alarm_key, cycle_id)
+                self._append_alarm_history(
+                    device, description, status
+                )
+
+    def _active_alarm_row(
+        self,
+        alarm_key,
+        device,
+        description,
+        status,
+        source_time=None,
+        event_id="",
+    ):
+        """Build one visible alarm row with hidden stable ACK identifiers."""
+        acknowledgement = EVENT_STORE.acknowledgement(alarm_key)
+        timestamp = (
+            source_time
+            or datetime.datetime.now().isoformat(timespec="milliseconds")
+        )
+        try:
+            parsed = datetime.datetime.fromisoformat(str(timestamp))
+        except ValueError:
+            parsed = datetime.datetime.now()
+        cycle_id = str(
+            event_id or acknowledgement.get("cycle_id", "")
+        )
+        return (
+            parsed.strftime("%Y-%m-%d"),
+            parsed.strftime("%H:%M:%S.%f")[:-3],
+            str(device),
+            str(description),
+            str(status).upper(),
+            str(alarm_key),
+            (
+                "ACKNOWLEDGED"
+                if acknowledgement.get("acknowledged")
+                else "UNACKNOWLEDGED"
+            ),
+            cycle_id,
+        )
 
     def _scan_alarm_engine(self):
-        """Evaluate IEC-104 communication and configured parameter limits."""
+        """Evaluate communication, analog limits, and durable digital alarms."""
         self._ensure_alarm_files()
         now = time.monotonic()
         if now - self.alarm_last_scan < 0.15:
@@ -17005,73 +20317,94 @@ class SCADAMainUI:
         settings = self._load_alarm_settings()
         statuses = dict(VINCI_STATUS)
 
-        # --------------------------------------------------------------
-        # 1. Communication alarms: every configured RTU is supervised.
-        #    A short debounce avoids a false alarm during application start.
-        # --------------------------------------------------------------
         for rtu in RTU_LIST:
             ip = rtu["ip"]
             name = rtu["name"]
             online = bool(statuses.get(ip, False))
             key = f"COMM:{ip}"
-
             if online:
                 self.alarm_offline_since.pop(ip, None)
                 self._update_alarm_event(
-                    key, name,
+                    key,
+                    name,
                     f"IEC-104 communication restored for {ip}",
-                    "NORMAL"
+                    "NORMAL",
                 )
             else:
                 started = self.alarm_offline_since.setdefault(ip, now)
                 if now - started >= 2.0:
-                    desc = f"IEC-104 communication OFFLINE - {ip}"
-                    active[key] = (
-                        datetime.date.today().strftime("%Y-%m-%d"),
-                        datetime.datetime.now().strftime("%H:%M:%S"),
-                        name,
-                        desc,
-                        "CRITICAL",
+                    description = (
+                        f"IEC-104 communication OFFLINE - {ip}"
                     )
-                    self._update_alarm_event(key, name, desc, "CRITICAL")
+                    self._update_alarm_event(
+                        key, name, description, "CRITICAL"
+                    )
+                    active[key] = self._active_alarm_row(
+                        key, name, description, "CRITICAL"
+                    )
 
-        # --------------------------------------------------------------
-        # 2. Parameter alarms from the existing ListSetting CSV files.
-        # --------------------------------------------------------------
         for row in settings:
             ip = str(row.get("Device_Addr", "")).strip()
-            if ip not in DATA_STORE:
+            if (
+                ip not in DATA_STORE
+                or not bool(statuses.get(ip, False))
+            ):
                 continue
-            if not bool(statuses.get(ip, False)):
-                continue
-
-            physical = str(row.get("Physical_Name", "")).strip()
+            physical = str(
+                row.get("Physical_Name", "")
+            ).strip()
             value = self._get_parameter_value(ip, physical)
             result = self._alarm_status_from_limits(value, row)
             key = f"LIMIT:{ip}:{physical}"
-            device = str(row.get("Bay_Name", ip)).strip() or ip
-
+            device = (
+                str(row.get("Bay_Name", ip)).strip() or ip
+            )
             if result is None:
                 self._update_alarm_event(
-                    key, device,
+                    key,
+                    device,
                     f"{physical} returned to normal",
-                    "NORMAL"
+                    "NORMAL",
                 )
             else:
-                severity, desc = result
-                active[key] = (
-                    datetime.date.today().strftime("%Y-%m-%d"),
-                    datetime.datetime.now().strftime("%H:%M:%S"),
+                severity, description = result
+                self._update_alarm_event(
+                    key, device, description, severity
+                )
+                active[key] = self._active_alarm_row(
+                    key,
                     device,
-                    desc,
+                    description,
                     severity,
                 )
-                self._update_alarm_event(key, device, desc, severity)
 
-        # --------------------------------------------------------------
-        # 3. Keep Alarm.csv as the live active-alarm report.
-        # --------------------------------------------------------------
-        self._write_active_alarm_rows(list(active.values()))
+        for alarm in EVENT_STORE.active_status_alarms():
+            key = str(alarm["alarm_key"])
+            active[key] = self._active_alarm_row(
+                key,
+                alarm["device"],
+                alarm["description"],
+                alarm["severity"],
+                source_time=alarm["source_time"],
+                event_id=alarm["event_id"],
+            )
+
+        severity_rank = {
+            "CRITICAL": 0,
+            "URGENT": 1,
+            "WARNING": 2,
+            "NORMAL": 3,
+        }
+        rows = sorted(
+            active.values(),
+            key=lambda item: (
+                severity_rank.get(str(item[4]).upper(), 4),
+                item[0],
+                item[1],
+                item[5],
+            ),
+        )
+        self._write_active_alarm_rows(rows)
 
     def _start_alarm_engine(self):
         if self.alarm_engine_started:
@@ -17080,39 +20413,149 @@ class SCADAMainUI:
         self._ensure_alarm_files()
 
     def refresh_real_time_alarm_tree(self, tree):
-        """Refresh a Real-Time Alarm Treeview from the active Alarm.csv."""
+        """Refresh the alarm grid and retain stable keys for ACK actions."""
         try:
             for item in tree.get_children():
                 tree.delete(item)
+            key_map = {}
             rows = self._read_active_alarm_rows()
             if not rows:
                 tree.insert(
-                    "", "end",
+                    "",
+                    "end",
                     values=(
                         datetime.date.today().strftime("%Y-%m-%d"),
                         datetime.datetime.now().strftime("%H:%M:%S"),
                         "SYSTEM",
                         "No active alarms",
                         "NORMAL",
+                        "-",
                     ),
                     tags=("NORMAL",),
                 )
+                self.real_time_alarm_key_maps[id(tree)] = key_map
                 return
-            for row in reversed(rows):
+            for index, row in enumerate(rows):
                 status = row[4].upper()
-                tag = status if status in ("CRITICAL", "URGENT", "WARNING", "NORMAL") else "NORMAL"
-                tree.insert("", "end", values=tuple(row), tags=(tag,))
+                tag = (
+                    status
+                    if status in {
+                        "CRITICAL", "URGENT", "WARNING", "NORMAL",
+                    }
+                    else "NORMAL"
+                )
+                iid = f"alarm-{index}"
+                tree.insert(
+                    "",
+                    "end",
+                    iid=iid,
+                    values=tuple(row[:5] + [row[6]]),
+                    tags=(tag,),
+                )
+                key_map[iid] = row[5]
+            self.real_time_alarm_key_maps[id(tree)] = key_map
+        except Exception as exc:
+            _communication_log(
+                "LOCAL", "ALARM_TREE_REFRESH_ERROR", str(exc)
+            )
+
+    def _play_alarm_sound(self, sound_paths):
+        """Play the first configured sound, or use the platform bell."""
+        selected = next(
+            (
+                path
+                for path in sound_paths
+                if path and os.path.isfile(path)
+            ),
+            "",
+        )
+        if selected and sys.platform.startswith("win"):
+            try:
+                import winsound
+                winsound.PlaySound(
+                    selected,
+                    winsound.SND_FILENAME | winsound.SND_ASYNC,
+                )
+                return
+            except Exception:
+                pass
+        try:
+            self.root.bell()
         except Exception:
             pass
 
+    def _refresh_alarm_annunciator(self):
+        """Flash and sound only unacknowledged active alarm cycles."""
+        rows = self._read_active_alarm_rows()
+        if not rows:
+            self.alarm_silenced = False
+            self.annunciated_alarm_cycles.clear()
+            if self.g1_status or self.g2_status:
+                self.alarm_label.config(
+                    text="IEC-104 ONLINE", bg="#008000", fg="#ffffff"
+                )
+            else:
+                self.alarm_label.config(
+                    text="IEC-104 OFFLINE", bg="#cc0000", fg="#ffffff"
+                )
+            return
+
+        unacknowledged = [
+            row for row in rows if row[6] != "ACKNOWLEDGED"
+        ]
+        cycles = {row[7] or row[5] for row in rows}
+        new_cycles = cycles - self.annunciated_alarm_cycles
+        if new_cycles:
+            self.alarm_silenced = False
+            details = EVENT_STORE.annunciation_for_event_ids(
+                new_cycles
+            )
+            detail_by_id = {
+                item["event_id"]: item for item in details
+            }
+            should_ring = any(
+                cycle not in detail_by_id
+                or detail_by_id[cycle].get("annunciate")
+                for cycle in new_cycles
+            )
+            if should_ring and not self.alarm_silenced:
+                self._play_alarm_sound([
+                    str(
+                        detail_by_id.get(
+                            cycle, {}
+                        ).get("sound_path", "")
+                    )
+                    for cycle in new_cycles
+                ])
+        self.annunciated_alarm_cycles = cycles
+        self.alarm_flash_phase = not self.alarm_flash_phase
+        if unacknowledged:
+            background = (
+                "#ffff00"
+                if self.alarm_flash_phase
+                else "#cc0000"
+            )
+            foreground = (
+                "#000000"
+                if self.alarm_flash_phase
+                else "#ffffff"
+            )
+        else:
+            background, foreground = "#b45309", "#ffffff"
+        self.alarm_label.config(
+            text=(
+                f"{len(rows)} ACTIVE ALARM"
+                f" | {len(unacknowledged)} UNACKNOWLEDGED"
+            ),
+            bg=background,
+            fg=foreground,
+        )
+
     def update_alarm_ui(self):
-        # Alarm engine is evaluated from the same live IEC-104 status/data used by the UI.
+        """Refresh the alarm engine and visible annunciator state."""
         self._start_alarm_engine()
         self._scan_alarm_engine()
-        if self.g1_status or self.g2_status:
-            self.alarm_label.config(text=f"🟢 {'IEC-104 ONLINE'}", bg="#008000")
-        else:
-            self.alarm_label.config(text=f"⚠️ {'IEC-104 OFFLINE'}", bg="#cc0000")
+        self._refresh_alarm_annunciator()
 
     def update_vinci_ui(self):
         """Transfer CSV-engineered VINCI/IEC104 values into the existing SCADA widgets."""
@@ -17140,10 +20583,12 @@ class SCADAMainUI:
             self._set_realtime("kv_ii_uca", rtu1.get("W2_Uca", 0.0), 2)
 
             self._set_realtime("wire1_uab", rtu1.get("W1_Uab", 0.0), 2)
+            self._set_realtime("wire1_f", rtu1.get("W1_f", 0.0), 2)
             self._set_realtime("wire1_ia", rtu1.get("W1_Ia", 0.0), 2)
             self._set_realtime("wire1_p", rtu1.get("W1_P", 0.0), 2)
             self._set_realtime("wire1_q", rtu1.get("W1_Q", 0.0), 2)
             self._set_realtime("wire2_uab", rtu1.get("W2_Uab", 0.0), 2)
+            self._set_realtime("wire2_f", rtu1.get("W2_f", 0.0), 2)
             self._set_realtime("wire2_ia", rtu1.get("W2_Ia", 0.0), 2)
             self._set_realtime("wire2_p", rtu1.get("W2_P", 0.0), 2)
             self._set_realtime("wire2_q", rtu1.get("W2_Q", 0.0), 2)
@@ -17183,6 +20628,16 @@ class SCADAMainUI:
             # same connection state used for generator value visibility.
             self._set_generator_monitor_status(1, self.g1_status)
             self._set_generator_monitor_status(2, self.g2_status)
+            config_loader = globals().get("_monitor_tv_config")
+            breaker_config = (
+                config_loader() if callable(config_loader) else {}
+            )
+            self._update_generator_breaker_indicators(
+                1, breaker_config.get("G1", {})
+            )
+            self._update_generator_breaker_indicators(
+                2, breaker_config.get("G2", {})
+            )
             if hasattr(self, "status_indicators") and hasattr(self, "run_canvas"):
                 for panel_idx, _bay_name, _ip, _points in CARD_POINT_MAP:
                     self._set_breaker_current(
@@ -17268,20 +20723,52 @@ class SCADAMainUI:
             return
         self.rectangle_report_states[binding_key] = active
         try:
-            new_file = not os.path.exists(self.rectangle_report_file) or os.path.getsize(self.rectangle_report_file) == 0
             now = datetime.datetime.now()
-            with REPORT_LOGGER_LOCK, open(self.rectangle_report_file, "a", newline="", encoding="utf-8-sig") as handle:
-                writer = csv.writer(handle)
-                if new_file:
-                    writer.writerow(["Date", "Time", "Page", "Rectangle", "Binding", "State", "Value", "Operator", "Threshold", "Device_Addr", "Bay_Name", "Physical_Name", "ASDU", "IOA"])
-                writer.writerow([now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S"),
-                                 config.get("page", ""), config.get("label", config.get("element", binding_key)),
-                                 binding_key, "ON" if active else "OFF", value,
-                                 config.get("operator", ">"), config.get("threshold", 0),
-                                 config.get("Device_Addr", ""), config.get("Bay_Name", ""),
-                                 config.get("Physical_Name", ""), config.get("ASDU", ""), config.get("IOA", "")])
-        except Exception:
-            pass
+            header = [
+                "Date", "Time", "Page", "Rectangle", "Binding",
+                "State", "Value", "Operator", "Threshold",
+                "Device_Addr", "Bay_Name", "Physical_Name",
+                "ASDU", "IOA",
+            ]
+            _report_prepare_file(
+                self.rectangle_report_file, header, now,
+            )
+            row = [
+                now.strftime("%Y-%m-%d"),
+                now.strftime("%H:%M:%S"),
+                config.get("page", ""),
+                config.get(
+                    "label", config.get("element", binding_key),
+                ),
+                binding_key,
+                "ON" if active else "OFF",
+                value,
+                config.get("operator", ">"),
+                config.get("threshold", 0),
+                config.get("Device_Addr", ""),
+                config.get("Bay_Name", ""),
+                config.get("Physical_Name", ""),
+                config.get("ASDU", ""),
+                config.get("IOA", ""),
+            ]
+            with REPORT_LOGGER_LOCK:
+                with open(
+                    self.rectangle_report_file,
+                    "a",
+                    newline="",
+                    encoding="utf-8-sig",
+                ) as handle:
+                    csv.writer(handle).writerow(row)
+        except Exception as exc:
+            if previous is None:
+                self.rectangle_report_states.pop(binding_key, None)
+            else:
+                self.rectangle_report_states[binding_key] = previous
+            _report_log_event(
+                "REPORT_WRITE_ERROR",
+                f"rectangle {binding_key}: {type(exc).__name__}: {exc}",
+                f"rectangle:{binding_key}",
+            )
 
     def _set_breaker_current(self, key, ia_value):
         """Colour any Run Monitor breaker from its displayed IA value."""
@@ -17326,6 +20813,52 @@ class SCADAMainUI:
         if text is not None:
             text.config(text=state, fg=color)
         self._update_generator_protection_indicators(gen_num, online)
+
+    def _update_generator_breaker_indicators(
+            self, gen_num, config_section):
+        """Render all four G1/G2 breakers from the shared digital mapping."""
+        indicators = getattr(
+            self, f"g{gen_num}_breaker_indicators", None
+        )
+        if not indicators:
+            return
+        defaults = _generator_breaker_defaults(f"G{gen_num}")
+        rectangles = (
+            config_section.get("rectangles", {})
+            if isinstance(config_section, dict) else {}
+        )
+        for rectangle_id, widgets in indicators.items():
+            binding = rectangles.get(
+                rectangle_id, defaults.get(rectangle_id, {})
+            )
+            state = _digital_breaker_snapshot(binding)
+            color = state.get("color", "#808080")
+            state_name = state.get("state", "UNKNOWN")
+            quality = state.get("quality", "NO DATA")
+            state_text = (
+                state_name
+                if quality == "GOOD"
+                else f"{state_name} • {quality}"
+            )
+            widgets["lamp"].config(bg=color)
+            widgets["state"].config(
+                text=state_text,
+                fg=color if state_name != "UNKNOWN" else "#aeb8b4",
+            )
+            if rectangle_id == "j-generator":
+                overlay = getattr(
+                    self, f"g{gen_num}_sld_breaker_overlay", None
+                )
+                if overlay is not None:
+                    overlay.config(bg=color)
+            open_binding = state.get("open_binding", {})
+            address = (
+                f"ASDU {binding.get('ASDU', '-')} / "
+                f"IOA {binding.get('IOA', '-')}"
+            )
+            if isinstance(open_binding, dict) and open_binding:
+                address += f" + {open_binding.get('IOA', '-')}"
+            widgets["address"].config(text=address)
 
     def _update_generator_protection_indicators(self, gen_num, online):
         """Colour protection lamps from the generator's StatusSetting rows."""
@@ -17412,12 +20945,15 @@ class SCADAMainUI:
             decimals = 0 if param in ("Urotor", "Irotor") else 2
             if lbl is not None:
                 if not online:
-                    lbl.config(text="--")
+                    lbl.config(text="NO DATA", fg="#ffb020")
                 else:
                     try:
-                        lbl.config(text=f"{float(value):.{decimals}f}")
+                        lbl.config(
+                            text=f"{float(value):.{decimals}f}",
+                            fg="#00ff88",
+                        )
                     except Exception:
-                        lbl.config(text="--")
+                        lbl.config(text="NO DATA", fg="#ffb020")
             self._set_realtime(
                 f"{prefix}_{param.lower().replace(' ', '')}",
                 value,
@@ -17589,21 +21125,28 @@ try:
         source = value if isinstance(value, dict) else {}
         running_value = source.get("running", False)
         if isinstance(running_value, str):
-            running = running_value.strip().lower() in {"1", "true", "yes", "on"}
+            running = running_value.strip().lower() in {
+                "1", "true", "yes", "on",
+            }
         else:
             running = bool(running_value)
         try:
-            accumulated = float(source.get("accumulated_seconds", 0.0))
+            accumulated = float(
+                source.get("accumulated_seconds", 0.0)
+            )
         except (TypeError, ValueError):
             accumulated = 0.0
         if not math.isfinite(accumulated) or accumulated < 0:
             accumulated = 0.0
         started_at = source.get("started_at_epoch")
         try:
-            started_at = float(started_at) if started_at is not None else None
+            started_at = (
+                float(started_at) if started_at is not None else None
+            )
         except (TypeError, ValueError):
             started_at = None
-        if started_at is not None and (not math.isfinite(started_at) or started_at < 0):
+        if started_at is not None and (
+                not math.isfinite(started_at) or started_at < 0):
             started_at = None
         if running and started_at is None:
             started_at = time.time()
@@ -17613,18 +21156,23 @@ try:
             "accumulated_seconds": accumulated,
         }
 
+
     def _operational_counter_snapshot(value):
         """Calculate completed operational days without mutating stored state."""
         state = _normalize_operational_counter(value)
         elapsed = state["accumulated_seconds"]
         if state["running"] and state["started_at_epoch"] is not None:
-            elapsed += max(0.0, time.time() - state["started_at_epoch"])
+            elapsed += max(
+                0.0, time.time() - state["started_at_epoch"]
+            )
         started_at = state["started_at_epoch"]
         return {
             "days": int(elapsed // 86400),
             "running": state["running"],
             "started_at": (
-                datetime.datetime.fromtimestamp(started_at).isoformat(timespec="seconds")
+                datetime.datetime.fromtimestamp(started_at).isoformat(
+                    timespec="seconds"
+                )
                 if started_at is not None else None
             ),
             "elapsed_seconds": int(elapsed),
@@ -17632,58 +21180,47 @@ try:
 
 
     def _monitor_tv_config():
-        # Rectangle / junction dapat menggunakan nilai hasil telemetry mana pun.
-        # ``operator`` dan ``threshold`` menentukan kondisi BENAR; warna serta
-        # efek flow dapat diubah dari editor Monitor TV dan tersimpan di JSON.
-        def rectangle(field, label, operator=">", threshold=1.0):
-            return {
-                "field": field,
-                "label": label,
-                "operator": operator,
-                "threshold": threshold,
-                "true_color": "#ff2020",
-                "false_color": "#14d84a",
-                "flow": "none",
-            }
-
+        """Load analog display bindings and digital G1/G2 breaker mappings."""
         default_rectangles = {
-            "j-main": rectangle("ct3", "Main Junction"),
-            "j-generator": rectangle("ll1", "Generator Junction"),
-            "j-transformer": rectangle("rr2", "Transformer Junction"),
-            "j-transformer-bottom": rectangle(
-                "rr3", "Transformer Bottom", threshold=0.0,
-            ),
+            monitor_id: _generator_breaker_defaults(monitor_id)
+            for monitor_id in ("G1", "G2")
         }
         result = {
-            "G1": {"variables": {}, "rectangles": {
-                name: dict(item) for name, item in default_rectangles.items()}},
-            "G2": {"variables": {}, "rectangles": {
-                name: dict(item) for name, item in default_rectangles.items()}},
-            "operational_counter": _default_operational_counter(),
+            monitor_id: {
+                "variables": {},
+                "rectangles": {
+                    name: dict(item)
+                    for name, item in default_rectangles[monitor_id].items()
+                },
+            }
+            for monitor_id in ("G1", "G2")
         }
-        config_changed = False
+        result["operational_counter"] = _default_operational_counter()
         try:
-            with MONITOR_TV_CONFIG_LOCK, open(MONITOR_TV_CONFIG_PATH, "r", encoding="utf-8-sig") as handle:
+            with MONITOR_TV_CONFIG_LOCK, open(
+                    MONITOR_TV_CONFIG_PATH, "r",
+                    encoding="utf-8-sig") as handle:
                 loaded = json.load(handle)
             if isinstance(loaded, dict):
                 for monitor_id in ("G1", "G2"):
                     section = loaded.get(monitor_id, {})
                     if isinstance(section, dict):
-                        result[monitor_id]["variables"].update(section.get("variables", {}))
-                        result[monitor_id]["rectangles"].update(section.get("rectangles", {}))
+                        result[monitor_id]["variables"].update(
+                            section.get("variables", {})
+                        )
+                        result[monitor_id]["rectangles"].update(
+                            section.get("rectangles", {})
+                        )
                 loaded_counter = loaded.get("operational_counter")
                 if isinstance(loaded_counter, dict):
-                    normalized_counter = _normalize_operational_counter(loaded_counter)
-                    result["operational_counter"] = normalized_counter
-                    if loaded_counter != normalized_counter:
-                        config_changed = True
-                else:
-                    config_changed = True
+                    result["operational_counter"] = (
+                        _normalize_operational_counter(loaded_counter)
+                    )
         except Exception:
             pass
-        # Seed new/incomplete TV bindings and refresh source metadata from the
-        # authoritative ListSetting registry. The selected Bay/point remains
-        # unchanged, while edits made in Parameter Setting propagate to TV.
+
+        # Refresh analog display metadata from ListSetting without letting
+        # those engineering values determine a physical breaker position.
         source_bays = {
             "auxiliary1": "1# Auxiliary Transformer",
             "auxiliary2": "2# Auxiliary Transformer",
@@ -17709,27 +21246,47 @@ try:
                 elif source == "wire2" and not physical.startswith("W2_"):
                     physical = "W2_" + physical
                 existing = variables.get(str(html_id), {})
-                # Bay + Physical is the persistent selection identity. Address,
-                # formula, and coefficient may be selected in the TV editor;
-                # CT/PT always follows Device Manager through the registry.
-                lookup_bay = str(existing.get("Bay_Name", bay)).strip() if isinstance(existing, dict) else bay
-                lookup_physical = str(existing.get("Physical_Name", physical)).strip() if isinstance(existing, dict) else physical
-                row = next((item for item in registry
-                            if str(item.get("Bay_Name", "")).strip() == lookup_bay
-                            and str(item.get("Physical_Name", "")).strip() == lookup_physical), None)
+                lookup_bay = (
+                    str(existing.get("Bay_Name", bay)).strip()
+                    if isinstance(existing, dict) else bay
+                )
+                lookup_physical = (
+                    str(existing.get("Physical_Name", physical)).strip()
+                    if isinstance(existing, dict) else physical
+                )
+                row = next((
+                    item for item in registry
+                    if str(item.get("Bay_Name", "")).strip() == lookup_bay
+                    and str(item.get("Physical_Name", "")).strip()
+                    == lookup_physical
+                ), None)
                 if row is None and isinstance(existing, dict):
-                    lookup_index = str(existing.get("Info_Index", "")).strip()
-                    lookup_info = str(existing.get("Info_Name", "")).strip()
-                    row = next((item for item in registry
-                                if str(item.get("Bay_Name", "")).strip() == lookup_bay
-                                and lookup_index
-                                and str(item.get("Info_Index", "")).strip() == lookup_index), None)
+                    lookup_index = str(
+                        existing.get("Info_Index", "")
+                    ).strip()
+                    lookup_info = str(
+                        existing.get("Info_Name", "")
+                    ).strip()
+                    row = next((
+                        item for item in registry
+                        if str(item.get("Bay_Name", "")).strip()
+                        == lookup_bay
+                        and lookup_index
+                        and str(item.get("Info_Index", "")).strip()
+                        == lookup_index
+                    ), None)
                     if row is None:
-                        row = next((item for item in registry
-                                    if str(item.get("Bay_Name", "")).strip() == lookup_bay
-                                    and lookup_info
-                                    and str(item.get("Info_Name", "")).strip() == lookup_info), None)
-                seeded = dict(existing) if isinstance(existing, dict) else {}
+                        row = next((
+                            item for item in registry
+                            if str(item.get("Bay_Name", "")).strip()
+                            == lookup_bay
+                            and lookup_info
+                            and str(item.get("Info_Name", "")).strip()
+                            == lookup_info
+                        ), None)
+                seeded = (
+                    dict(existing) if isinstance(existing, dict) else {}
+                )
                 seeded.setdefault("source", source)
                 seeded.setdefault("key", str(key))
                 seeded.setdefault("Decimals", 2)
@@ -17739,80 +21296,50 @@ try:
                             seeded[column] = row.get(column, "")
                     seeded["CTPT"] = row.get("CTPT", "")
                     seeded["CTPT_Source"] = row.get("CTPT_Source", "")
-                if variables.get(str(html_id)) != seeded:
-                    variables[str(html_id)] = seeded
-                    config_changed = True
-            # Older rectangle configurations only stored ``field``. Fill in
-            # the linked variable address once for backwards compatibility,
-            # while preserving any address edited directly on the rectangle.
-            for rect_name, rectangle in result[monitor_id]["rectangles"].items():
-                if not isinstance(rectangle, dict):
-                    continue
-                variable = variables.get(str(rectangle.get("field", "")), {})
-                if not isinstance(variable, dict):
-                    continue
-                for column in SETTING_COLUMNS:
-                    if column in variable and column not in rectangle:
-                        rectangle[column] = variable.get(column)
-                        config_changed = True
-                if "source" not in rectangle:
-                    rectangle["source"] = variable.get("source", "")
-                    config_changed = True
-                if "key" not in rectangle:
-                    rectangle["key"] = variable.get("key", "")
-                    config_changed = True
+                variables[str(html_id)] = seeded
 
-        # Older releases converted these four TV indicators to StatusSetting
-        # YX points. Restore their original engineering-value threshold model:
-        # the selected ListSetting value is calculated first, then compared
-        # with either ``>`` or ``<`` and the configured threshold.
+        # Clean cutover: every fixed G1/G2 junction resolves a StatusSetting
+        # point. Missing/invalid contacts render UNKNOWN instead of falling
+        # back to current, power, or voltage thresholds.
         for monitor_id in ("G1", "G2"):
-            variables = result[monitor_id]["variables"]
             rectangles = result[monitor_id]["rectangles"]
-            for rectangle_id, fallback in default_rectangles.items():
-                rectangle = rectangles.get(rectangle_id)
-                if not isinstance(rectangle, dict):
-                    continue
-                if rectangle.get("Source_Kind") == "rectangle_status_csv":
-                    field = fallback["field"]
-                    linked = variables.get(field, {})
-                    migrated = (
-                        dict(linked) if isinstance(linked, dict) else {}
+            for rectangle_id, fallback in default_rectangles[
+                    monitor_id].items():
+                rectangles[rectangle_id] = (
+                    _normalize_monitor_breaker_binding(
+                        rectangles.get(rectangle_id), fallback
                     )
-                    migrated.update({
-                        "field": field,
-                        "label": rectangle.get(
-                            "label", fallback["label"],
-                        ),
-                        "operator": fallback["operator"],
-                        "threshold": fallback["threshold"],
-                        "true_color": rectangle.get(
-                            "true_color",
-                            rectangle.get("active_color", "#ff2020"),
-                        ),
-                        "false_color": rectangle.get(
-                            "false_color",
-                            rectangle.get("inactive_color", "#14d84a"),
-                        ),
-                        "flow": rectangle.get("flow", "none"),
-                        "Source_Kind": "",
-                    })
-                    rectangles[rectangle_id] = migrated
-                    config_changed = True
-                    continue
-                if rectangle.get("operator") not in {">", "<"}:
-                    rectangle["operator"] = fallback["operator"]
-                    rectangle["threshold"] = fallback["threshold"]
-                    config_changed = True
-        # Do not persist normalization from this read path.  Monitor-TV is
-        # served by more than one SCADA process, so saving a result assembled
-        # from a stale snapshot can overwrite a CT/PT edit that was just
-        # submitted by the operator.  Explicit POST requests remain the only
-        # writer for MonitorTVConfig.json; the normalized result is still used
-        # in memory for the current response.
+                )
         return result
 
     def _save_monitor_tv_config(config):
+        """Atomically save TV settings after enforcing digital breaker inputs."""
+        if not isinstance(config, dict):
+            raise ValueError("Konfigurasi TV tidak valid")
+        for monitor_id in ("G1", "G2"):
+            section = config.setdefault(monitor_id, {})
+            rectangles = section.setdefault("rectangles", {})
+            defaults = _generator_breaker_defaults(monitor_id)
+            for rectangle_id, fallback in defaults.items():
+                current = rectangles.get(rectangle_id)
+                normalized = _normalize_monitor_breaker_binding(
+                    current, fallback
+                )
+                physical = _norm_text(
+                    normalized.get("Physical_Name")
+                ).casefold()
+                eligible = (
+                    "breaker position" in physical
+                    and "trip position" not in physical
+                ) or "breaker close position" in physical or (
+                    physical.endswith("breaker close")
+                )
+                if not eligible:
+                    raise ValueError(
+                        f"{monitor_id} {rectangle_id}: pilih point "
+                        "breaker position atau breaker close"
+                    )
+                rectangles[rectangle_id] = normalized
         temporary = MONITOR_TV_CONFIG_PATH + ".tmp"
         with MONITOR_TV_CONFIG_LOCK:
             with open(temporary, "w", encoding="utf-8") as handle:
@@ -18175,27 +21702,23 @@ try:
 
         payload["online"] = generator_online
         payload["wire_online"] = wire_online
-        # Breaker indicators on Monitor TV use calculated engineering values,
-        # not StatusSetting YX. Each selected ListSetting point is evaluated
-        # with its normal formula before the browser applies > / < threshold.
+        # Physical breaker position is authoritative StatusSetting YX.
+        # Paired close/open contacts expose conflicts instead of silently
+        # inferring state from analog current, power, or voltage.
+        rectangle_states = {}
         rectangle_values = {}
-        for rectangle_id, item in config.get("rectangles", {}).items():
-            if not isinstance(item, dict):
+        for rectangle_id, binding in config.get(
+                "rectangles", {}).items():
+            if not isinstance(binding, dict):
                 continue
-            linked = configured_variables.get(str(item.get("field", "")), {})
-            binding = dict(linked) if isinstance(linked, dict) else {}
-            binding.update(item)
-            try:
-                preview = _monitor_tv_preview(binding)
-                rectangle_values[str(rectangle_id)] = (
-                    preview.get("actual")
-                    if preview.get("available")
-                    else None
-                )
-            except (TypeError, ValueError):
-                rectangle_values[str(rectangle_id)] = None
+            state = _digital_breaker_snapshot(binding)
+            rectangle_states[str(rectangle_id)] = state
+            rectangle_values[str(rectangle_id)] = state.get(
+                "effective_yx"
+            )
         payload["rectangles"] = config.get("rectangles", {})
         payload["rectangle_values"] = rectangle_values
+        payload["rectangle_states"] = rectangle_states
         return payload
 
     def _monitor_tv_payload():
@@ -18229,60 +21752,37 @@ try:
         return result
 
 
-    def _breaker_status_row(identifier, display_name, binding, used_in, binding_keys):
-        """Resolve one configured breaker without creating a second IEC-104 client."""
-        ip = str(binding.get("Device_Addr", "")).strip()
-        bay = str(binding.get("Bay_Name", "")).strip()
-        physical = str(binding.get("Physical_Name", "")).strip()
-        info_name = str(binding.get("Info_Name", binding.get("InfoName", ""))).strip()
-        info_index = str(binding.get("Info_Index", "")).strip()
-        reverse_raw = binding.get("Reverse", 0)
-        reverse_enabled = str(reverse_raw or "").strip().lower() in {
-            "-1", "1", "true", "yes", "on",
-        }
-        raw_value = None
-        with DATA_LOCK:
-            rtu_online = bool(ip and VINCI_STATUS.get(ip, False))
-            if rtu_online:
-                if info_name:
-                    raw_value = STATUS_VALUE_STORE.get((ip, "info", info_name))
-                if raw_value is None and physical:
-                    raw_value = STATUS_VALUE_STORE.get((ip, "physical", physical))
-                if raw_value is None and info_index:
-                    raw_value = STATUS_VALUE_STORE.get((ip, "index", info_index))
-
-        if not ip:
-            quality = "CONFIG INVALID"
-        elif not rtu_online:
-            quality = "RTU OFFLINE"
-        elif raw_value is None:
-            quality = "POINT NOT RECEIVED"
-        else:
-            quality = "GOOD"
-
-        if raw_value is None:
-            raw_yx = None
-            effective_yx = None
-            condition = "Unknown"
-            color_name = "Abu-abu"
-            color_hex = "#808080"
-        else:
-            raw_yx = int(float(raw_value))
-            effective_yx = _cbz_breaker_state(raw_yx, reverse_raw)
-            if effective_yx == 1:
-                condition = "Closed/On"
-                color_name = "Merah"
-                color_hex = "#ff2020"
-            else:
-                condition = "Open/Off"
-                color_name = "Hijau"
-                color_hex = "#14d84a"
-
+    def _breaker_status_row(
+            identifier, display_name, binding, used_in, binding_keys):
+        """Resolve one configured breaker from the shared digital state path."""
+        ip = _norm_text(binding.get("Device_Addr"))
+        bay = _norm_text(binding.get("Bay_Name"))
+        physical = _norm_text(binding.get("Physical_Name"))
+        info_name = _norm_text(
+            binding.get("Info_Name", binding.get("InfoName"))
+        )
+        info_index = _norm_text(binding.get("Info_Index"))
+        reverse_enabled = str(
+            binding.get("Reverse", 0) or ""
+        ).strip().lower() in {"-1", "1", "true", "yes", "on"}
+        state = _digital_breaker_snapshot(binding)
+        color_name = {
+            "#ff2020": "Merah",
+            "#14d84a": "Hijau",
+            "#ffb020": "Kuning",
+            "#808080": "Abu-abu",
+        }.get(str(state.get("color", "")).lower(), "Abu-abu")
+        open_binding = state.get("open_binding", {})
+        paired = isinstance(open_binding, dict) and bool(open_binding)
         return {
             "id": str(identifier),
             "display_name": str(display_name or bay or identifier),
-            "used_in": sorted({str(item) for item in used_in if str(item).strip()}),
-            "binding_keys": sorted({str(item) for item in binding_keys}),
+            "used_in": sorted({
+                str(item) for item in used_in if str(item).strip()
+            }),
+            "binding_keys": sorted({
+                str(item) for item in binding_keys
+            }),
             "device_addr": ip,
             "bay_name": bay,
             "physical_name": physical,
@@ -18294,15 +21794,23 @@ try:
             "reset_str": binding.get("ResetStr", ""),
             "source_kind": binding.get("Source_Kind", ""),
             "source": f"IEC-104 {ip} · {bay} · {info_name or physical}",
-            "raw_yx": raw_yx,
+            "raw_yx": state.get("raw_yx"),
             "reverse": 1 if reverse_enabled else 0,
-            "effective_yx": effective_yx,
-            "condition": condition,
+            "effective_yx": state.get("effective_yx"),
+            "open_raw_yx": state.get("open_raw_yx"),
+            "open_effective_yx": state.get("open_effective_yx"),
+            "open_binding": open_binding,
+            "state": state.get("state"),
+            "condition": state.get("condition"),
             "color_name": color_name,
-            "color_hex": color_hex,
-            "quality": quality,
-            "rtu_online": rtu_online,
-            "expected_rule": "Effective YX = Raw YX XOR Reverse",
+            "color_hex": state.get("color"),
+            "quality": state.get("quality"),
+            "rtu_online": state.get("rtu_online"),
+            "expected_rule": (
+                "CLOSE=1 and OPEN=0 => CLOSED; "
+                "CLOSE=0 and OPEN=1 => OPEN"
+                if paired else "Effective YX = Raw YX XOR Reverse"
+            ),
         }
 
     def _breaker_status_payload():
@@ -18363,11 +21871,12 @@ try:
         return {
             "schema": "SCADA-BONT-BREAKER-STATUS-1",
             "generated_at": datetime.datetime.now().isoformat(timespec="milliseconds"),
-            "rule": "Effective YX = Raw YX XOR Reverse",
+            "rule": "Single point: Effective YX = Raw YX XOR Reverse",
             "legend": {
                 "0": {"condition": "Open/Off", "color_name": "Hijau", "color_hex": "#14d84a"},
                 "1": {"condition": "Closed/On", "color_name": "Merah", "color_hex": "#ff2020"},
                 "unknown": {"condition": "Unknown", "color_name": "Abu-abu", "color_hex": "#808080"},
+                "invalid": {"condition": "Contact conflict", "color_name": "Kuning", "color_hex": "#ffb020"},
             },
             "matrix": [
                 {"raw_yx": 0, "reverse": 0, "effective_yx": 0, "condition": "Open/Off", "color_name": "Hijau"},
@@ -18375,6 +21884,7 @@ try:
                 {"raw_yx": 0, "reverse": 1, "effective_yx": 1, "condition": "Closed/On", "color_name": "Merah"},
                 {"raw_yx": 1, "reverse": 1, "effective_yx": 0, "condition": "Open/Off", "color_name": "Hijau"},
             ],
+            "pair_rule": "CLOSE=1 and OPEN=0 => CLOSED; CLOSE=0 and OPEN=1 => OPEN; matching contacts => INVALID",
             "breakers": breakers,
             "monitor_tv": monitor_tv,
         }
@@ -18429,6 +21939,15 @@ try:
                     {"ip": key[0], "kind": key[1], "key": key[2], "value": value}
                     for key, value in STATUS_VALUE_STORE.items()
                     if isinstance(key, tuple) and len(key) == 3
+                ],
+                "soe_events": EVENT_STORE.recent_events(
+                    500, _owned_rtu_ips() or set(data_store)
+                ),
+                "status_alarms": [
+                    alarm
+                    for alarm in EVENT_STORE.active_status_alarms()
+                    if str(alarm.get("source_ip", ""))
+                    in (_owned_rtu_ips() or set(data_store))
                 ],
             }
 
@@ -18500,11 +22019,36 @@ try:
                     with SETTING_LOCK:
                         options = [
                             {
-                                key: row.get(key, "")
-                                for key in SETTING_COLUMNS
+                                **{
+                                    key: row.get(key, "")
+                                    for key in SETTING_COLUMNS
+                                },
+                                "Source_Kind": "",
                             }
                             for row in SETTING_REGISTRY
                         ]
+                    with STATUS_LOCK:
+                        status_rows = [
+                            dict(row) for row in STATUS_REGISTRY
+                        ]
+                    for row in status_rows:
+                        physical = _norm_text(
+                            row.get(
+                                "Physical_Name",
+                                row.get("PhysicalName"),
+                            )
+                        ).casefold()
+                        eligible = (
+                            "breaker position" in physical
+                            and "trip position" not in physical
+                        ) or "breaker close position" in physical or (
+                            physical.endswith("breaker close")
+                        )
+                        if not eligible:
+                            continue
+                        option = _status_binding_from_row(row)
+                        option["Breaker_Eligible"] = True
+                        options.append(option)
                     body = json.dumps(options, ensure_ascii=False).encode("utf-8")
                     self.send_response(200)
                     self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -18644,43 +22188,72 @@ try:
             allowed_peer = _parallel_peer_ip()
             expected_token = str(config.get("relay_token", ""))
             remote_ip = str(self.client_address[0])
-            supplied_token = str(self.headers.get("X-SCADA-Relay-Token", ""))
             path = urlparse(self.path).path.rstrip("/")
-            if remote_ip != allowed_peer or not expected_token or supplied_token != expected_token:
+            authenticated = (
+                remote_ip == allowed_peer
+                and _relay_auth_valid(
+                    "GET",
+                    path,
+                    expected_token,
+                    self.headers,
+                    consume_nonce=True,
+                )
+            )
+            if not authenticated:
                 body = b"Forbidden"
                 self.send_response(403)
-                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header(
+                    "Content-Type", "text/plain; charset=utf-8",
+                )
             elif path == "/RealtimeSnapshot.json":
                 body = json.dumps(
                     _full_realtime_relay_payload(),
                     ensure_ascii=False,
-                    separators=(",", ":")
+                    separators=(",", ":"),
                 ).encode("utf-8")
                 self.send_response(200)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header(
+                    "Content-Type", "application/json; charset=utf-8",
+                )
                 self.send_header("Cache-Control", "no-store")
             elif path == "/ConfigSyncManifest.json":
                 body = json.dumps(
                     _config_sync_manifest(),
                     ensure_ascii=False,
-                    separators=(",", ":")
+                    separators=(",", ":"),
                 ).encode("utf-8")
                 self.send_response(200)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header(
+                    "Content-Type", "application/json; charset=utf-8",
+                )
                 self.send_header("Cache-Control", "no-store")
             elif path == "/ConfigSync.json":
                 body = json.dumps(
                     _config_sync_snapshot(),
                     ensure_ascii=False,
-                    separators=(",", ":")
+                    separators=(",", ":"),
                 ).encode("utf-8")
                 self.send_response(200)
-                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header(
+                    "Content-Type", "application/json; charset=utf-8",
+                )
                 self.send_header("Cache-Control", "no-store")
             else:
                 body = b"Not Found"
                 self.send_response(404)
-                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header(
+                    "Content-Type", "text/plain; charset=utf-8",
+                )
+            if authenticated:
+                request_nonce = str(
+                    self.headers.get("X-SCADA-Auth-Nonce", "")
+                )
+                self.send_header(
+                    "X-SCADA-Response-Signature",
+                    _relay_response_signature(
+                        path, request_nonce, body, expected_token,
+                    ),
+                )
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -18741,6 +22314,59 @@ except Exception as _monitor_tv_import_error:
 def run_engineering_qc():
     """Deterministic offline QC for authoritative RTU1 routing and scaling."""
     failures = []
+    auxiliary_breaker_keys = {
+        spec[0] for spec in AUXILIARY_BREAKER_SPECS
+    }
+    if (
+        len(auxiliary_breaker_keys) != 21
+        or {"generator_1", "generator_2"} & auxiliary_breaker_keys
+    ):
+        failures.append(
+            "Auxiliary geometry must contain 21 connected breaker bodies "
+            "without the two outer generator indicators"
+        )
+    documented_run_breakers = {
+        "wire_1": "01YX0102000002",
+        "wire_2": "01YX0202000002",
+        "generator_1": "02YX0601000002",
+        "feeder_01": "05YX0A02000002",
+        "feeder_02": "05YX0B02000002",
+        "feeder_03": "05YX0C02000002",
+        "feeder_04": "05YX0D02000002",
+        "feeder_05": "05YX0E02000002",
+        "feeder_06": "05YX0F02000002",
+        "feeder_07": "05YX1002000002",
+        "feeder_08": "06YX1102000002",
+        "feeder_09": "06YX1202000002",
+        "feeder_10": "06YX1302000002",
+        "feeder_11": "06YX1402000002",
+        "feeder_12": "06YX1502000002",
+        "feeder_13": "06YX1602000002",
+        "feeder_14": "06YX1702000002",
+        "generator_2": "03YX0801000002",
+    }
+    for breaker_key, expected_info_name in documented_run_breakers.items():
+        bay, physical_names = SLD_BREAKER_SOURCE_BY_KEY[breaker_key]
+        binding = _status_binding_for_bay(bay, physical_names)
+        if (
+            binding.get("Info_Name") != expected_info_name
+            or _cbz_breaker_state(1, binding.get("Reverse", 0)) != 1
+            or _cbz_breaker_state(0, binding.get("Reverse", 0)) != 0
+        ):
+            failures.append(
+                f"Breaker {breaker_key}: expected primary YX "
+                f"{expected_info_name} with Reverse=0"
+            )
+    unresolved_sld_breakers = [
+        breaker_key
+        for breaker_key, (bay, physical_names) in SLD_BREAKER_SOURCE_BY_KEY.items()
+        if not _status_binding_for_bay(bay, physical_names)
+    ]
+    if unresolved_sld_breakers:
+        failures.append(
+            "SLD breaker StatusSetting mapping missing: "
+            + ", ".join(unresolved_sld_breakers)
+        )
     tests = [
         (("W1_Ia", 143), 13.0845),
         (("W2_Ia", 160), 14.64),
@@ -18917,7 +22543,7 @@ def run_engineering_qc():
         for failure in failures:
             print(" -", failure)
         return False
-    print("[ENGINEERING QC] PASS - Parameter Setting refresh, InfoName decoding, card routing, and RTU1 scaling verified")
+    print("[ENGINEERING QC] PASS - documented breaker YX mapping, Parameter Setting refresh, card routing, and RTU1 scaling verified")
     return True
 
 
@@ -19131,11 +22757,6 @@ def run_monitor_tv_qc():
     # DESIGNER: original BONT/TIFICO logo presentation restored; no overlay.
     if ".landscape-brand{" in MONITOR_TV_HTML or "class=\"landscape-brand\"" in MONITOR_TV_HTML:
         failures.append("Original logo layout not restored")
-    if '.tifico-logo{position:absolute;right:24px;top:22px;width:176px;height:66px' not in MONITOR_TV_HTML:
-        failures.append("Original tifico-logo position/style missing")
-
-    # DISPLAY ENGINEERING: all telemetry seven-segment values are exactly 2 decimals.
-    def _fmt_qc(v):
         n=float(v)
         if not math.isfinite(n): return "0.00"
         if abs(n)<0.0005: n=0.0
@@ -19325,9 +22946,9 @@ def validate_setting_files():
                         if previous is None:
                             protocol_keys[key] = physical
                         elif previous.lower() != physical.lower():
-                            warnings.append(
-                                f"{filename}:{line_no}: ASDU/IOA collision {key}: "
-                                f"{previous} vs {physical}; runtime uses the last active row"
+                            problems.append(
+                                f"{filename}:{line_no}: conflicting physical names "
+                                f"share ASDU/IOA {key}: {previous} vs {physical}"
                             )
 
                     vkey = (ip, _norm_text(row.get("Bay_Name")).casefold(), physical.lower())
