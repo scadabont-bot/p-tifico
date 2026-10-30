@@ -162,12 +162,14 @@ jobs:
               throw "$installerName self-test exited with code $($selfTest.ExitCode)."
             }
             $env:SCADA_UI_SELF_TEST = "1"
+            $env:SCADA_UI_TEST_PASSWORD = "123456"
             $uiSmoke = Start-Process `
               -FilePath (Join-Path $installDir "p-tifico-backup.exe") `
               -WorkingDirectory $installDir `
               -PassThru `
               -Wait
             Remove-Item Env:\SCADA_UI_SELF_TEST
+            Remove-Item Env:\SCADA_UI_TEST_PASSWORD
             if ($uiSmoke.ExitCode -ne 0) {
               throw "$installerName login UI smoke test exited with code $($uiSmoke.ExitCode)."
             }
