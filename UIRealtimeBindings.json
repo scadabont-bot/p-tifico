@@ -4042,6 +4042,7 @@
       "SetStr": "1",
       "ResetStr": "2",
       "Reverse": "0",
+      "contact_mode": "single",
       "source_id": "generator_1",
       "on_color": "#14d84a",
       "off_color": "#ff2020"
@@ -4130,6 +4131,7 @@
       "SetStr": "1",
       "ResetStr": "2",
       "Reverse": "0",
+      "contact_mode": "single",
       "source_id": "generator_2",
       "on_color": "#14d84a",
       "off_color": "#ff2020"

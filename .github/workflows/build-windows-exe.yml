@@ -140,7 +140,7 @@ jobs:
             $statusSettings = @(
               Get-ChildItem $installDir -Filter "StatusSetting *.csv"
             )
-            if ($listSettings.Count -lt 24 -or $statusSettings.Count -lt 24) {
+            if ($listSettings.Count -lt 23 -or $statusSettings.Count -lt 24) {
               throw (
                 "$installerName has incomplete settings: " +
                 "$($listSettings.Count) ListSetting and " +

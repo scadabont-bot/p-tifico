@@ -30,6 +30,197 @@ class VoltageMonitoringMappingTests(unittest.TestCase):
         self.assertEqual(actual, expected)
 
 
+class GeneratorFormulaSourceTests(unittest.TestCase):
+    EXPECTED_POINTS = {
+        "Ia": (16385, 91.5),
+        "Ib": (16386, 91.5),
+        "Ic": (16387, 91.5),
+        "Uab": (16395, 0.219719999994),
+        "Ubc": (16396, 0.219719999994),
+        "Uca": (16397, 0.219719999994),
+        "P": (16398, 951.41999997),
+        "Q": (16399, 951.41999997),
+        "cos": (16400, 0.036621097),
+        "IE": (16417, 18.2367599834),
+        "UE": (16418, 10.985999999),
+        "f": (16419, 50.073242187497),
+    }
+
+    def test_g1_g2_use_local_measure_control_addresses_and_formulas(self):
+        generators = (
+            ("10.100.163.2", "1# Measure Control Box", 1537),
+            ("10.100.163.3", "2# Measure Control Box", 2049),
+        )
+        for ip, bay, asdu in generators:
+            for physical, (ioa, wanted) in self.EXPECTED_POINTS.items():
+                with self.subTest(bay=bay, physical=physical):
+                    row = next(
+                        item
+                        for item in scada.SETTING_REGISTRY
+                        if item.get("Device_Addr") == ip
+                        and item.get("Bay_Name") == bay
+                        and item.get("Physical_Name") == physical
+                    )
+                    self.assertEqual(
+                        (row["ASDU_INT"], row["IOA_INT"]),
+                        (asdu, ioa),
+                    )
+                    actual = scada._calculate_formula(1000.0, row, {})
+                    self.assertAlmostEqual(actual, wanted, places=9)
+
+    def test_obsolete_generator_cos_aliases_are_not_loaded(self):
+        self.assertFalse(any(
+            row.get("Bay_Name") in {"1# Generator", "2# Generator"}
+            for row in scada.SETTING_REGISTRY
+        ))
+
+
+class MonitorTVFormulaSourceTests(unittest.TestCase):
+    def _assert_value_equal(self, actual, wanted, field):
+        try:
+            self.assertAlmostEqual(
+                float(actual), float(wanted), places=12, msg=field,
+            )
+        except (TypeError, ValueError):
+            self.assertEqual(str(actual), str(wanted), field)
+
+    def test_saved_points_take_engineering_metadata_from_settings(self):
+        config = scada._monitor_tv_config()
+        columns = (
+            "Device_Addr", "ASDU", "IOA", "Coefficient", "CTPT",
+            "Formula", "Add_Offset", "Unit",
+        )
+        for panel in ("G1", "G2"):
+            for field, binding in config[panel]["variables"].items():
+                row = next(
+                    item
+                    for item in scada.SETTING_REGISTRY
+                    if item.get("Bay_Name") == binding.get("Bay_Name")
+                    and item.get("Physical_Name")
+                    == binding.get("Physical_Name")
+                )
+                for column in columns:
+                    with self.subTest(
+                            panel=panel, field=field, column=column):
+                        self._assert_value_equal(
+                            binding.get(column, ""),
+                            row.get(column, ""),
+                            column,
+                        )
+
+    def test_g1_g2_top_voltages_share_local_voltage_monitor(self):
+        config = scada._monitor_tv_config()
+        expected = {
+            "tk2": (6402, 16394),
+            "tk3": (6402, 16395),
+            "tk4": (6402, 16396),
+        }
+        for panel in ("G1", "G2"):
+            for field, address in expected.items():
+                binding = config[panel]["variables"][field]
+                self.assertEqual(binding["Device_Addr"], "10.100.163.7")
+                self.assertEqual(binding["Bay_Name"], "Voltage Monitoring")
+                self.assertEqual(
+                    (int(binding["ASDU"]), int(binding["IOA"])),
+                    address,
+                )
+                self.assertNotIn(
+                    "CUSTOM", str(binding["Formula"]).upper(),
+                )
+
+    def test_preview_uses_exact_voltage_and_mw_formulas(self):
+        config = scada._monitor_tv_config()
+        original_raw = dict(scada.RAW_ADDRESS_STORE)
+        original_online = dict(scada.VINCI_STATUS)
+        try:
+            voltage_results = []
+            for panel in ("G1", "G2"):
+                binding = dict(config[panel]["variables"]["tk2"])
+                binding["Display_Field"] = "tk2"
+                address = (
+                    binding["Device_Addr"],
+                    int(binding["ASDU"]),
+                    int(binding["IOA"]),
+                )
+                scada.RAW_ADDRESS_STORE[address] = 10000.0
+                scada.VINCI_STATUS[binding["Device_Addr"]] = True
+                voltage_results.append(
+                    scada._monitor_tv_preview(binding)["actual"]
+                )
+            self.assertAlmostEqual(
+                voltage_results[0], voltage_results[1], places=12,
+            )
+            self.assertAlmostEqual(
+                voltage_results[0],
+                10000.0 * 0.00369899941 * 0.034114061388,
+                places=12,
+            )
+
+            power = dict(config["G1"]["variables"]["ll1"])
+            power["Display_Field"] = "ll1"
+            power_address = (
+                power["Device_Addr"],
+                int(power["ASDU"]),
+                int(power["IOA"]),
+            )
+            scada.RAW_ADDRESS_STORE[power_address] = 20000.0
+            scada.VINCI_STATUS[power["Device_Addr"]] = True
+            self.assertAlmostEqual(
+                scada._monitor_tv_preview(power)["actual"],
+                20000.0 * 0.031713999999 * 30.0 / 1000.0,
+                places=9,
+            )
+        finally:
+            scada.RAW_ADDRESS_STORE.clear()
+            scada.RAW_ADDRESS_STORE.update(original_raw)
+            scada.VINCI_STATUS.clear()
+            scada.VINCI_STATUS.update(original_online)
+
+
+class GeneratorProtectionSourceTests(unittest.TestCase):
+    def test_lamps_use_the_exact_hard_links_from_local_avd_files(self):
+        expected = {
+            "Generator differential": (
+                "02YX05010000A2", "03YX07010000A2",
+            ),
+            "Stator overload": (
+                "02YX05020000BC", "03YX07020000BC",
+            ),
+            "Negative sequence OC": (
+                "02YX05020000BD", "03YX07020000BD",
+            ),
+            "Complex voltage OC": (
+                "02YX05020000B9", "03YX07020000B9",
+            ),
+            "Over voltage": (
+                "02YX05020000B6", "03YX07020000B6",
+            ),
+            "Stator earthing": (
+                "02YX05020000AA", "03YX07020000AA",
+            ),
+            "Loss of magnetism": (
+                "02YX05020000AB", "03YX07020000AB",
+            ),
+            "Rotor earthing": (
+                "02YX05020000B4", "03YX07020000B4",
+            ),
+        }
+        self.assertEqual(
+            scada.SCADAMainUI.GENERATOR_PROTECTION_SOURCES,
+            expected,
+        )
+        for info_names in expected.values():
+            for ip, info_name in zip(
+                    ("10.100.163.2", "10.100.163.3"), info_names):
+                matches = [
+                    row
+                    for row in scada.STATUS_REGISTRY
+                    if row.get("Device_Addr") == ip
+                    and row.get("Info_Name") == info_name
+                ]
+                self.assertEqual(len(matches), 1, f"{info_name} {ip}")
+
+
 class BreakerMappingTests(unittest.TestCase):
     def setUp(self):
         scada._load_status_settings()
@@ -38,10 +229,7 @@ class BreakerMappingTests(unittest.TestCase):
         self.original_data = {
             ip: dict(values) for ip, values in scada.DATA_STORE.items()
         }
-        with open(
-            scada.MONITOR_TV_CONFIG_PATH, "r", encoding="utf-8-sig",
-        ) as handle:
-            self.config = json.load(handle)
+        self.config = scada._monitor_tv_config()
         with open(
             os.path.join(scada.APP_DIR, "UIRealtimeBindings.json"),
             "r",
@@ -60,11 +248,11 @@ class BreakerMappingTests(unittest.TestCase):
     def test_monitor_breakers_match_authoritative_status_addresses(self):
         expected = {
             ("G1", "j-main"): (258, 2, None, 0),
-            ("G1", "j-generator"): (1537, 2, 1, 0),
+            ("G1", "j-generator"): (1537, 2, None, 0),
             ("G1", "j-transformer"): (770, 4, 3, 0),
             ("G1", "j-transformer-bottom"): (770, 6, 5, 0),
             ("G2", "j-main"): (514, 2, None, 0),
-            ("G2", "j-generator"): (2049, 2, 1, 0),
+            ("G2", "j-generator"): (2049, 2, None, 0),
             ("G2", "j-transformer"): (1026, 4, 3, 0),
             ("G2", "j-transformer-bottom"): (1026, 6, 5, 0),
         }
@@ -120,27 +308,21 @@ class BreakerMappingTests(unittest.TestCase):
                 persisted["off_color"], scada.BREAKER_OPEN_COLOR,
             )
 
-    def test_authoritative_generator_contacts_use_green_closed_red_open(self):
+    def test_authoritative_generator_contact_uses_green_closed_red_open(self):
         for panel in ("G1", "G2"):
             binding = self.config[panel]["rectangles"]["j-generator"]
             ip = binding["Device_Addr"]
-            open_binding = binding["open_binding"]
+            self.assertFalse(scada._companion_open_status_binding(binding))
             scada.VINCI_STATUS[ip] = True
 
             scada.STATUS_VALUE_STORE[
                 (ip, "info", binding["Info_Name"])
             ] = 1
-            scada.STATUS_VALUE_STORE[
-                (ip, "info", open_binding["Info_Name"])
-            ] = 0
             closed = scada._digital_breaker_snapshot(binding)
 
             scada.STATUS_VALUE_STORE[
                 (ip, "info", binding["Info_Name"])
             ] = 0
-            scada.STATUS_VALUE_STORE[
-                (ip, "info", open_binding["Info_Name"])
-            ] = 1
             opened = scada._digital_breaker_snapshot(binding)
 
             self.assertEqual(
@@ -155,12 +337,9 @@ class BreakerMappingTests(unittest.TestCase):
     def test_run_monitor_uses_same_digital_generator_state(self):
         binding = scada._run_monitor_breaker_binding("brk_g1")
         ip = binding["Device_Addr"]
-        open_binding = scada._companion_open_status_binding(binding)
+        self.assertFalse(scada._companion_open_status_binding(binding))
         scada.VINCI_STATUS[ip] = True
         scada.STATUS_VALUE_STORE[(ip, "info", binding["Info_Name"])] = 1
-        scada.STATUS_VALUE_STORE[
-            (ip, "info", open_binding["Info_Name"])
-        ] = 0
         scada.DATA_STORE.setdefault(ip, {})["Ia"] = 0.0
 
         state_without_current = scada._run_monitor_breaker_snapshot("brk_g1")

@@ -350,7 +350,7 @@ IOA_MAP_STANDARD = {
     16411: "Uab_L", 16412: "Ubc_L", 16413: "Uca_L",
 }
 
-APP_VERSION = "2.6.3"
+APP_VERSION = "2.6.4"
 APP_DIR = (
     os.path.dirname(os.path.abspath(sys.executable))
     if getattr(sys, "frozen", False)
@@ -3735,7 +3735,8 @@ GENERATOR_BREAKER_SPECS = {
             "label": "GENERATOR 1",
             "bay": "1# Measure Control Box",
             "close": ("1# G circuit breaker close position",),
-            "open": ("1# G circuit breaker trip position",),
+            "open": (),
+            "contact_mode": "single",
         },
         "j-transformer": {
             "label": "AUX TRANSFORMER 1 HV",
@@ -3761,7 +3762,8 @@ GENERATOR_BREAKER_SPECS = {
             "label": "GENERATOR 2",
             "bay": "2# Measure Control Box",
             "close": ("1# G circuit breaker close position",),
-            "open": ("1# G circuit breaker trip position",),
+            "open": (),
+            "contact_mode": "single",
         },
         "j-transformer": {
             "label": "AUX TRANSFORMER 2 HV",
@@ -3803,6 +3805,7 @@ def _generator_breaker_defaults(monitor_id):
             "flow": "none",
             "state_mode": "digital",
             "Source_Kind": "rectangle_status_csv",
+            "contact_mode": spec.get("contact_mode", "paired"),
         })
         if spec["open"]:
             open_binding = _status_binding_for_bay(
@@ -3816,6 +3819,8 @@ def _generator_breaker_defaults(monitor_id):
 
 def _companion_open_status_binding(binding):
     """Find the trip/open contact paired with a selected close contact."""
+    if _norm_text(binding.get("contact_mode")).casefold() == "single":
+        return {}
     existing = binding.get("open_binding")
     if isinstance(existing, dict) and existing.get("Device_Addr"):
         return dict(existing)
@@ -3992,6 +3997,9 @@ def _run_monitor_breaker_binding(display_key):
         "unknown_color": BREAKER_UNKNOWN_COLOR,
         "invalid_color": BREAKER_INVALID_COLOR,
     })
+    if source_key in {"generator_1", "generator_2"}:
+        # The local RTDB/ZFYX tables publish only the close-position contact.
+        binding["contact_mode"] = "single"
     return binding
 
 
@@ -5779,48 +5787,33 @@ class SCADAMainUI:
         "Admin": frozenset({"view", "crud", "configure"}),
         "Developer": frozenset({"view", "crud", "configure"}),
     }
+    # Exact hard-link InfoNames taken from the legacy G1/G2 AVDs. Physical
+    # labels are not unique (notably "Complex voltage c"), so address lamps by
+    # InfoName rather than aggregating every row with the same description.
     GENERATOR_PROTECTION_SOURCES = {
         "Generator differential": (
-            "Different Pro soft link",
-            "Different Pro hard link",
+            "02YX05010000A2", "03YX07010000A2",
         ),
         "Stator overload": (
-            "Sym overload signal",
-            "Sym OL soft link",
-            "Sym OL INV soft link",
-            "Sym OL INV hard link",
+            "02YX05020000BC", "03YX07020000BC",
         ),
         "Negative sequence OC": (
-            "Nesq over current",
-            "Nesq over current I soft link",
-            "Nesq over current II soft link",
-            "Nseq over current Pro hard link",
+            "02YX05020000BD", "03YX07020000BD",
         ),
         "Complex voltage OC": (
-            "Complex voltage c",
-            "Complex voltage over current T1 soft link",
-            "Complex voltage over current T2 soft link",
-            "Complex voltage over current Pro hard link",
+            "02YX05020000B9", "03YX07020000B9",
         ),
         "Over voltage": (
-            "Over voltage soft link",
-            "Over voltage Pro hard link",
+            "02YX05020000B6", "03YX07020000B6",
         ),
         "Stator earthing": (
-            "Fund 3rd soft link",
-            "Fund64 soft link",
-            "Fund64 hard link",
+            "02YX05020000AA", "03YX07020000AA",
         ),
         "Loss of magnetism": (
-            "Loss ET I soft link",
-            "Loss ET II soft link",
-            "Loss ET III soft link",
-            "Loss ET hard link",
+            "02YX05020000AB", "03YX07020000AB",
         ),
         "Rotor earthing": (
-            "64R 1GND signal",
-            "64R 1GND soft link",
-            "64R 1GND hard link",
+            "02YX05020000B4", "03YX07020000B4",
         ),
     }
 
@@ -19589,13 +19582,14 @@ class SCADAMainUI:
                 binding = state.get("binding", {})
                 open_binding = state.get("open_binding", {})
                 active = state.get("active")
+                state_name = state.get("state")
                 color_label = (
-                    "MERAH"
-                    if active is True
-                    else "HIJAU"
-                    if active is False
+                    "HIJAU"
+                    if state_name == "CLOSED"
+                    else "MERAH"
+                    if state_name == "OPEN"
                     else "KUNING"
-                    if state.get("state") == "INVALID"
+                    if state_name == "INVALID"
                     else "ABU-ABU"
                 )
                 raw_text = f"CLOSE {self._run_monitor_number(state.get('raw_yx'))}"
@@ -21021,39 +21015,36 @@ class SCADAMainUI:
         with DATA_LOCK:
             status_values = dict(STATUS_VALUE_STORE)
 
-        for label, aliases in self.GENERATOR_PROTECTION_SOURCES.items():
+        for label, info_names in self.GENERATOR_PROTECTION_SOURCES.items():
             lamp_parts = indicators.get(label)
             if lamp_parts is None:
                 continue
 
-            normalized_aliases = {
-                _norm_text(alias).casefold() for alias in aliases
-            }
-            samples = []
-            for row in status_rows:
-                physical = _norm_text(
-                    row.get("Physical_Name") or row.get("PhysicalName")
-                )
-                if physical.casefold() not in normalized_aliases:
-                    continue
-                info_name = _norm_text(
-                    row.get("Info_Name") or row.get("InfoName")
-                )
-                key = (source_ip, "info", info_name)
-                if not info_name or key not in status_values:
-                    continue
+            info_name = info_names[0 if gen_num == 1 else 1]
+            row = next((
+                item
+                for item in status_rows
+                if _norm_text(
+                    item.get("Info_Name") or item.get("InfoName")
+                ).casefold() == info_name.casefold()
+            ), None)
+            active = None
+            key = (source_ip, "info", info_name)
+            if row is not None and key in status_values:
                 try:
-                    active = bool(int(float(status_values[key])))
-                    reverse = bool(int(float(row.get("Reverse", 0) or 0)))
+                    raw_active = bool(int(float(status_values[key])))
+                    reverse = bool(
+                        int(float(row.get("Reverse", 0) or 0))
+                    )
+                    active = not raw_active if reverse else raw_active
                 except (TypeError, ValueError):
-                    continue
-                samples.append(not active if reverse else active)
+                    active = None
 
             if not online:
                 outer_color, inner_color = "#5f6d68", "#273532"
-            elif not samples:
+            elif active is None:
                 outer_color, inner_color = "#d59b2b", "#5c4314"
-            elif any(samples):
+            elif active:
                 outer_color = inner_color = "#ff4352"
             else:
                 outer_color = inner_color = "#00ee78"
@@ -21389,6 +21380,14 @@ try:
                 elif source == "wire2" and not physical.startswith("W2_"):
                     physical = "W2_" + physical
                 existing = variables.get(str(html_id), {})
+                legacy_g2_phase = (
+                    monitor_id == "G2"
+                    and str(html_id) in {"tk2", "tk3", "tk4"}
+                    and isinstance(existing, dict)
+                    and str(existing.get("key", "")).endswith("_phase")
+                )
+                if legacy_g2_phase:
+                    existing = {}
                 lookup_bay = (
                     str(existing.get("Bay_Name", bay)).strip()
                     if isinstance(existing, dict) else bay
@@ -21434,10 +21433,11 @@ try:
                 seeded.setdefault("key", str(key))
                 seeded.setdefault("Decimals", 2)
                 if row:
-                    if seeded.get("mode") != "selected":
-                        for column in SETTING_COLUMNS:
-                            seeded[column] = row.get(column, "")
-                    seeded["CTPT"] = row.get("CTPT", "")
+                    # A saved mapping selects the point; its protocol address
+                    # and engineering formula always come from Parameter/
+                    # ListSetting. Stale copied coefficients must never win.
+                    for column in SETTING_COLUMNS:
+                        seeded[column] = row.get(column, "")
                     seeded["CTPT_Source"] = row.get("CTPT_Source", "")
                 variables[str(html_id)] = seeded
 
@@ -21490,7 +21490,7 @@ try:
             os.replace(temporary, MONITOR_TV_CONFIG_PATH)
 
     def _monitor_tv_relay_engineered_value(binding, display_field):
-        """Read an engineered fallback from an older PC1 relay snapshot."""
+        """Read an engineered point from the current PC1 relay snapshot."""
         ip = str(binding.get("Device_Addr", "")).strip()
         bay = str(binding.get("Bay_Name", "")).strip()
         physical = str(binding.get("Physical_Name", "")).strip()
@@ -21499,22 +21499,12 @@ try:
             bay_values = dict(BAY_VALUE_STORE.get(bay, {}))
             ip_values = dict(DATA_STORE.get(ip, {}))
 
-        # PC1 relay versions before raw-address synchronization already expose
-        # the three calculated G2 phase values through these compatibility keys.
-        phase_key = {
-            "W2_Uab": "W2_Uab_phase",
-            "W2_Ubc": "W2_Ubc_phase",
-            "W2_Uca": "W2_Uca_phase",
-        }.get(physical)
-        candidates = []
-        if display_field in {"tk2", "tk3", "tk4"} and phase_key:
-            candidates.append((ip_values, phase_key))
-        candidates.extend((
+        candidates = (
             (bay_values, physical),
             (bay_values, runtime_physical),
             (ip_values, runtime_physical),
             (ip_values, physical),
-        ))
+        )
         for values, key in candidates:
             if not key or key not in values:
                 continue
@@ -21715,13 +21705,6 @@ try:
         )
         for html_id, (source, data_key) in MONITOR_TV_FIELD_MAP_G1.items()
     }
-    # G2 top phase-voltage estimates use its own Wire II line voltages.
-    # The saved MonitorTVConfig formula converts each line value by sqrt(3).
-    MONITOR_TV_FIELD_MAP_G2.update({
-        "tk2": ("wire2", "Uab_phase"),
-        "tk3": ("wire2", "Ubc_phase"),
-        "tk4": ("wire2", "Uca_phase"),
-    })
 
     def _monitor_tv_generator_payload(source_ip, wire_prefix=None, display_name=None):
         """Build one Monitor-TV payload using MONITOR_TV_FIELD_MAP."""
@@ -21757,16 +21740,23 @@ try:
             voltage_values = dict(
                 DATA_STORE.get(
                     voltage_monitor_ip,
-                    DEFAULT_DATA
+                    DEFAULT_DATA,
+                )
             )
-        )
+            voltage_online = bool(
+                VINCI_STATUS.get(voltage_monitor_ip, False)
+            )
+            # Auxiliary transformers are stations 769/1025 on RTU1 (.1).
+            auxiliary_online = wire_online
 
             aux_transformer_values = dict(
                 BAY_VALUE_STORE.get(
-                    "2# Auxiliary Transformer" if wire_prefix == "W2" else "1# Auxiliary Transformer",
-                    {}
+                    "2# Auxiliary Transformer"
+                    if wire_prefix == "W2"
+                    else "1# Auxiliary Transformer",
+                    {},
+                )
             )
-        )
 
             measure_control_values = dict(
                 BAY_VALUE_STORE.get(
@@ -21823,7 +21813,11 @@ try:
                 preview = _monitor_tv_preview(binding)
                 payload[field_id] = (
                     float(preview["actual"])
-                    if preview.get("available") and preview.get("actual") is not None
+                    if (
+                        preview.get("online")
+                        and preview.get("available")
+                        and preview.get("actual") is not None
+                    )
                     else 0.0
                 )
             except (TypeError, ValueError, OverflowError):
@@ -21840,14 +21834,20 @@ try:
         for html_id, (source, data_key) in field_map.items():
             if source.startswith("measure_control") and not generator_online:
                 payload[html_id] = 0.0
-            elif (source.startswith("wire") or source.startswith("auxiliary")) and not wire_online:
+            elif source.startswith("wire") and not wire_online:
+                payload[html_id] = 0.0
+            elif source.startswith("auxiliary") and not auxiliary_online:
+                payload[html_id] = 0.0
+            elif source == "voltage" and not voltage_online:
                 payload[html_id] = 0.0
 
         payload["online"] = generator_online
         payload["wire_online"] = wire_online
-        # Physical breaker position is authoritative StatusSetting YX.
-        # Paired close/open contacts expose conflicts instead of silently
-        # inferring state from analog current, power, or voltage.
+        payload["auxiliary_online"] = auxiliary_online
+        payload["voltage_online"] = voltage_online
+        # Physical breaker position is authoritative StatusSetting YX. The
+        # generator RTDB publishes one close-position contact; paired devices
+        # still expose conflicts when both contacts are available.
         rectangle_states = {}
         rectangle_values = {}
         for rectangle_id, binding in config.get(
@@ -22035,18 +22035,10 @@ try:
 
     def _full_realtime_relay_payload():
         """Complete read-only snapshot consumed by the second SCADA PC."""
-        # The slave receives engineered telemetry, not RAW IEC values.
-        # Include the configured G2 phase estimates as separate wire keys.
-        g2_phase_values = _monitor_tv_generator_payload(RTU_LIST[2]["ip"], "W2")
         with DATA_LOCK:
-            data_store = {ip: dict(values) for ip, values in DATA_STORE.items()}
-            wire_values = data_store.setdefault("10.100.163.1", {})
-            for field, key in (("tk2", "W2_Uab_phase"),
-                               ("tk3", "W2_Ubc_phase"),
-                               ("tk4", "W2_Uca_phase")):
-                value = g2_phase_values.get(field)
-                if isinstance(value, (int, float)) and math.isfinite(value):
-                    wire_values[key] = float(value)
+            data_store = {
+                ip: dict(values) for ip, values in DATA_STORE.items()
+            }
             return {
                 "schema": "SCADA-BONT-RELAY-1",
                 "generated_at": datetime.datetime.now().isoformat(timespec="milliseconds"),
@@ -22696,7 +22688,7 @@ def run_engineering_qc():
 
 
 def run_pc2_relay_qc():
-    """Regression check for PC2 consuming current and legacy PC1 snapshots."""
+    """Regression check for PC2 consuming the current PC1 snapshot."""
     if not MONITOR_TV_AVAILABLE:
         print("[PC2 RELAY QC] FAILED - Monitor TV unavailable")
         return False
@@ -22727,7 +22719,6 @@ def run_pc2_relay_qc():
             DATA_STORE.setdefault("10.100.163.1", {}).update({
                 "W2_P": 232.1,
                 "W2_Uab": 11.085,
-                "W2_Uab_phase": 6.4,
             })
             DATA_STORE.setdefault("10.100.163.3", {})["P"] = 607.0
             BAY_VALUE_STORE["Connection Wire II"] = {
@@ -22736,8 +22727,11 @@ def run_pc2_relay_qc():
             }
             BAY_VALUE_STORE["2# Measure Control Box"] = {"P": 607.0}
             BAY_VALUE_STORE["2# Auxiliary Transformer"] = {"P": 407.0}
+            DATA_STORE.setdefault("10.100.163.7", {})["Uab"] = 6.4
+            BAY_VALUE_STORE["Voltage Monitoring"] = {"Uab": 6.4}
             VINCI_STATUS["10.100.163.1"] = True
             VINCI_STATUS["10.100.163.3"] = True
+            VINCI_STATUS["10.100.163.7"] = True
 
         config = _monitor_tv_config()["G2"]["variables"]
         payload = _monitor_tv_generator_payload(
@@ -23249,7 +23243,7 @@ if __name__ == "__main__":
             except Exception:
                 status_schema_ok = False
                 break
-        if (len(RTU_LIST) != 8 or len(setting_files) < 24 or len(status_files) < 24
+        if (len(RTU_LIST) != 8 or len(setting_files) < 23 or len(status_files) < 24
                 or not status_schema_ok or not SETTING_VALIDATION_OK or not ENGINEERING_QC_OK
                 or not PC2_RELAY_QC_OK
                 or not all(os.path.isfile(p) for p in required_assets)):
