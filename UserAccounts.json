@@ -1,0 +1,26 @@
+{
+  "schema": "SCADA-BONT-AUTH-1",
+  "roles": {
+    "Operator": {
+      "algorithm": "PBKDF2-HMAC-SHA256",
+      "iterations": 600000,
+      "salt": "xODOQD9DNGQGWXQ81b+JWQ==",
+      "hash": "DIbtkP9QFzkXnPaBKwyqk66RysOFW5gFGtmoHPLeA1Y=",
+      "updated_at": "2026-10-30T16:55:19"
+    },
+    "Admin": {
+      "algorithm": "PBKDF2-HMAC-SHA256",
+      "iterations": 600000,
+      "salt": "T99Uq3GNrYki4UWJZvwNUQ==",
+      "hash": "3N1YA6eu20byfJGqT8pbjkH0q9fcswRErQnZ/0UD3MI=",
+      "updated_at": "2026-10-30T16:55:19"
+    },
+    "Developer": {
+      "algorithm": "PBKDF2-HMAC-SHA256",
+      "iterations": 600000,
+      "salt": "XkIGcggkcBJ3pONJQFBEbw==",
+      "hash": "/zTlJ1Gd2ih4xTQGMjr0XJN3Zg8x6iPlNVTS5U8urD0=",
+      "updated_at": "2026-10-30T16:55:19"
+    }
+  }
+}

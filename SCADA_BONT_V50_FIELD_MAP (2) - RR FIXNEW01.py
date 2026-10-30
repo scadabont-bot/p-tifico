@@ -350,7 +350,7 @@ IOA_MAP_STANDARD = {
     16411: "Uab_L", 16412: "Ubc_L", 16413: "Uca_L",
 }
 
-APP_VERSION = "2.6.4"
+APP_VERSION = "2.6.5"
 APP_DIR = (
     os.path.dirname(os.path.abspath(sys.executable))
     if getattr(sys, "frozen", False)
@@ -416,7 +416,7 @@ AUTH_ACCOUNTS_PATH = os.environ.get(
 )
 AUTH_ACCOUNT_SCHEMA = "SCADA-BONT-AUTH-1"
 AUTH_ROLES = ("Operator", "Admin", "Developer")
-AUTH_MIN_PASSWORD_LENGTH = 12
+AUTH_MIN_PASSWORD_LENGTH = 6
 AUTH_PBKDF2_ITERATIONS = 600_000
 AUTH_ACCOUNT_LOCK = threading.RLock()
 
@@ -530,17 +530,6 @@ def _auth_set_password(role, password):
     if len(password) < AUTH_MIN_PASSWORD_LENGTH:
         raise ValueError(
             f"Password must contain at least {AUTH_MIN_PASSWORD_LENGTH} characters."
-        )
-    character_classes = sum((
-        any(char.islower() for char in password),
-        any(char.isupper() for char in password),
-        any(char.isdigit() for char in password),
-        any(not char.isalnum() for char in password),
-    ))
-    if character_classes < 3:
-        raise ValueError(
-            "Password must use at least three of: uppercase, lowercase, "
-            "number, and symbol."
         )
     salt = os.urandom(16)
     digest = hashlib.pbkdf2_hmac(
@@ -9915,8 +9904,7 @@ class SCADAMainUI:
                     if configured
                     else (
                         f"\nCredential status: ENROLLMENT — minimum "
-                        f"{AUTH_MIN_PASSWORD_LENGTH} characters and three "
-                        "character classes"
+                        f"{AUTH_MIN_PASSWORD_LENGTH} characters"
                     )
                 )
             )
@@ -23131,11 +23119,19 @@ def run_login_ui_smoke_test():
     login_win = None
     try:
         with tempfile.TemporaryDirectory() as temporary:
+            with open(
+                original_accounts_path, "r", encoding="utf-8",
+            ) as handle:
+                packaged_accounts = json.load(handle)
             AUTH_ACCOUNTS_PATH = os.path.join(
                 temporary, "UserAccounts.json",
             )
-            _auth_set_password("Admin", "Smoke-Admin-2026")
+            _auth_write_accounts(packaged_accounts)
             smoke_roles = _auth_configured_roles()
+            password_valid = all(
+                _auth_verify_password(role, "123456")
+                for role in AUTH_ROLES
+            )
             root = tk.Tk()
             root.geometry("1x1+0+0")
             root.update()
@@ -23169,7 +23165,8 @@ def run_login_ui_smoke_test():
             ]
             passed = (
                 login_win is not None
-                and smoke_roles == frozenset({"Admin"})
+                and smoke_roles == frozenset(AUTH_ROLES)
+                and password_valid
                 and len(confirm_labels) == 1
                 and not confirm_labels[0].winfo_ismapped()
                 and len(visible_entries) == 1
@@ -23179,6 +23176,7 @@ def run_login_ui_smoke_test():
                 print(
                     "[LOGIN UI SMOKE] FAILED - "
                     f"roles={sorted(smoke_roles)}, "
+                    f"password_valid={password_valid}, "
                     f"confirm_visible="
                     f"{[item.winfo_ismapped() for item in confirm_labels]}, "
                     f"visible_entries={len(visible_entries)}, "
@@ -23186,7 +23184,7 @@ def run_login_ui_smoke_test():
                 )
                 return False
             print(
-                "[LOGIN UI SMOKE] PASS - configured login surface verified"
+                "[LOGIN UI SMOKE] PASS - all packaged roles accept requested password"
             )
             return True
     except Exception as exc:
@@ -23217,6 +23215,7 @@ if __name__ == "__main__":
         # without opening IEC-104 sessions or starting the operator UI.
         required_assets = [
             os.path.join(APP_DIR, "UIRealtimeBindings.json"),
+            os.path.join(APP_DIR, "UserAccounts.json"),
             os.path.join(APP_DIR, "MONITOR V55.html"),
             os.path.join(APP_DIR, "MANUAL_MAPPING_G1_G2.png"),
             os.path.join(APP_DIR, "MANUAL_COMMUNICATION_SETTINGS.png"),

@@ -537,9 +537,41 @@ class CredentialSecurityTests(unittest.TestCase):
         )
         self.assertEqual(scada._auth_configured_roles(), {"Admin"})
 
-    def test_weak_password_is_rejected(self):
+    def test_password_shorter_than_six_characters_is_rejected(self):
         with self.assertRaises(ValueError):
-            scada._auth_set_password("Admin", "password")
+            scada._auth_set_password("Admin", "12345")
+
+    def test_six_digit_password_is_allowed_for_every_role(self):
+        for role in scada.AUTH_ROLES:
+            scada._auth_set_password(role, "123456")
+            self.assertTrue(scada._auth_verify_password(role, "123456"))
+        self.assertEqual(
+            scada._auth_configured_roles(),
+            set(scada.AUTH_ROLES),
+        )
+
+    def test_packaged_credentials_reset_every_role_to_requested_password(self):
+        temporary_path = scada.AUTH_ACCOUNTS_PATH
+        scada.AUTH_ACCOUNTS_PATH = os.path.join(
+            scada.APP_DIR, "UserAccounts.json",
+        )
+        try:
+            self.assertEqual(
+                scada._auth_configured_roles(),
+                set(scada.AUTH_ROLES),
+            )
+            for role in scada.AUTH_ROLES:
+                self.assertTrue(
+                    scada._auth_verify_password(role, "123456"),
+                    role,
+                )
+            with open(
+                scada.AUTH_ACCOUNTS_PATH, "r", encoding="utf-8",
+            ) as handle:
+                payload = json.load(handle)
+            self.assertNotIn("123456", json.dumps(payload))
+        finally:
+            scada.AUTH_ACCOUNTS_PATH = temporary_path
 
 
 class RelayAuthenticationTests(unittest.TestCase):

@@ -112,6 +112,7 @@ jobs:
               "MQTTConfig.json",
               "UIRealtimeBindings.json",
               "MonitorTVConfig.json",
+              "UserAccounts.json",
               "CBZ8000AppData.json"
             )
             foreach ($file in $requiredFiles) {
