@@ -2143,8 +2143,8 @@ body.monitor-display .reference-layout{display:block;}
 .ref-breaker-12{left:1453px;}
 .ref-breaker-13{left:1565px;}
 .ref-breaker-14{left:1677px;}
-.ref-breaker.open{background:#14d84a;}
-.ref-breaker.closed{background:#ff2020;}
+.ref-breaker.open{background:#ff2020;}
+.ref-breaker.closed{background:#14d84a;}
 .ref-breaker.unknown{background:#808080;}
 .ref-circle{
     position:absolute;
@@ -2171,8 +2171,8 @@ body.monitor-display .reference-layout{display:block;}
 .ref-circle-12{left:1454px;}
 .ref-circle-13{left:1566px;}
 .ref-circle-14{left:1678px;}
-.ref-circle.open{background:#14d84a;}
-.ref-circle.closed{background:#ff2020;}
+.ref-circle.open{background:#ff2020;}
+.ref-circle.closed{background:#14d84a;}
 .ref-circle.unknown{background:#808080;}
 .reference-yx-note{
     position:absolute;
@@ -3041,8 +3041,8 @@ window.updateJunctionStatus = function(p){
         window.setJunctionState(
             id,
             active,
-            rule.true_color||rule.active_color||"#ff2020",
-            rule.false_color||rule.inactive_color||"#14d84a",
+            rule.true_color||rule.active_color||"#14d84a",
+            rule.false_color||rule.inactive_color||"#ff2020",
             rule.flow||"none",
             active===null ? "?" : ""
         );
@@ -3061,7 +3061,7 @@ window.updateJunctionStatus = function(p){
 // No telemetry must never look like an open breaker.
 document.addEventListener("DOMContentLoaded",function(){
     ["j-main","j-generator","j-transformer","j-transformer-bottom"].forEach(id=>{
-        window.setJunctionState(id,null,"#ff2020","#14d84a","none","?");
+        window.setJunctionState(id,null,"#14d84a","#ff2020","none","?");
     });
 });
 </script>
@@ -4232,11 +4232,11 @@ function ensureEditor(){
             </label>
             <label>
               <span>Kondisi benar / Aktif</span>
-              <input id="tv-true-color" type="color" value="#ff2020">
+              <input id="tv-true-color" type="color" value="#14d84a">
             </label>
             <label>
               <span>Kondisi salah / Tidak aktif</span>
-              <input id="tv-false-color" type="color" value="#14d84a">
+              <input id="tv-false-color" type="color" value="#ff2020">
             </label>
             <label>
               <span>Efek kondisi aktif</span>
@@ -4248,7 +4248,7 @@ function ensureEditor(){
             </label>
           </div>
           <div class="tv-breaker-rule" id="tv-breaker-rule">
-            CLOSED merah, OPEN hijau, data tidak valid atau offline abu-abu.
+            CLOSED hijau, OPEN merah, data tidak valid atau offline abu-abu.
           </div>
         </section>
 
@@ -4331,7 +4331,7 @@ function updateTvSourceSummary(binding){
 function updateBreakerRule(){
     if(!tvEditTarget||tvEditTarget.kind!=="rectangle")return;
     document.getElementById("tv-breaker-rule").textContent=
-        "Status berasal dari YX: CLOSED merah, OPEN hijau. " +
+        "Status berasal dari YX: CLOSED hijau, OPEN merah. " +
         "Jika tersedia, kontak close dan trip divalidasi sebagai pasangan; " +
         "konflik kontak atau RTU offline tidak dianggap OPEN.";
 }
@@ -4511,8 +4511,8 @@ async function openTvEditor(kind,name){
             label:name,
             operator:"=",
             threshold:1,
-            true_color:"#ff2020",
-            false_color:"#14d84a",
+            true_color:"#14d84a",
+            false_color:"#ff2020",
             flow:"none",
             state_mode:"digital",
             Source_Kind:"rectangle_status_csv"
@@ -4556,9 +4556,9 @@ async function openTvEditor(kind,name){
     document.getElementById("tv-editor-target").textContent=
         monitorId+" // "+name;
     document.getElementById("tv-true-color").value=
-        cfg.true_color||cfg.active_color||"#ff2020";
+        cfg.true_color||cfg.active_color||"#14d84a";
     document.getElementById("tv-false-color").value=
-        cfg.false_color||cfg.inactive_color||"#14d84a";
+        cfg.false_color||cfg.inactive_color||"#ff2020";
     document.getElementById("tv-flow").value=cfg.flow||"none";
     document.getElementById("tv-rectangle-label").value=cfg.label||name;
     document.getElementById("tv-operator").value="=";

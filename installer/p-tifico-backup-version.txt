@@ -1,7 +1,7 @@
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(2, 6, 2, 0),
-    prodvers=(2, 6, 2, 0),
+    filevers=(2, 6, 3, 0),
+    prodvers=(2, 6, 3, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x40004,
@@ -16,12 +16,12 @@ VSVersionInfo(
         [
           StringStruct(u'CompanyName', u'TIFICO'),
           StringStruct(u'FileDescription', u'p-tifico-backup SCADA BONT'),
-          StringStruct(u'FileVersion', u'2.6.2'),
+          StringStruct(u'FileVersion', u'2.6.3'),
           StringStruct(u'InternalName', u'p-tifico-backup'),
           StringStruct(u'LegalCopyright', u'TIFICO'),
           StringStruct(u'OriginalFilename', u'p-tifico-backup.exe'),
           StringStruct(u'ProductName', u'p-tifico-backup'),
-          StringStruct(u'ProductVersion', u'2.6.2'),
+          StringStruct(u'ProductVersion', u'2.6.3'),
         ],
       )
     ]),

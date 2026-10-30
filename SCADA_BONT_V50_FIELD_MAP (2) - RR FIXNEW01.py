@@ -122,8 +122,14 @@ def _set_macos_application_menu_title(name):
 
 
 
+BREAKER_CLOSED_COLOR = "#14d84a"
+BREAKER_OPEN_COLOR = "#ff2020"
+BREAKER_UNKNOWN_COLOR = "#808080"
+BREAKER_INVALID_COLOR = "#ffb020"
+
+
 def _cbz_breaker_state(raw_value, reverse=0):
-    """Normalize one YX bit like CBZ8000: 1=closed/red, 0=open/green."""
+    """Normalize one YX bit like CBZ8000: 1=closed, 0=open."""
     try:
         raw_state = 1 if int(float(raw_value)) == 1 else 0
     except (TypeError, ValueError):
@@ -344,7 +350,7 @@ IOA_MAP_STANDARD = {
     16411: "Uab_L", 16412: "Ubc_L", 16413: "Uca_L",
 }
 
-APP_VERSION = "2.6.2"
+APP_VERSION = "2.6.3"
 APP_DIR = (
     os.path.dirname(os.path.abspath(sys.executable))
     if getattr(sys, "frozen", False)
@@ -3786,14 +3792,14 @@ def _generator_breaker_defaults(monitor_id):
             "label": spec["label"],
             "operator": "=",
             "threshold": 1,
-            "true_color": "#ff2020",
-            "false_color": "#14d84a",
-            "active_color": "#ff2020",
-            "inactive_color": "#14d84a",
-            "on_color": "#ff2020",
-            "off_color": "#14d84a",
-            "unknown_color": "#808080",
-            "invalid_color": "#ffb020",
+            "true_color": BREAKER_CLOSED_COLOR,
+            "false_color": BREAKER_OPEN_COLOR,
+            "active_color": BREAKER_CLOSED_COLOR,
+            "inactive_color": BREAKER_OPEN_COLOR,
+            "on_color": BREAKER_CLOSED_COLOR,
+            "off_color": BREAKER_OPEN_COLOR,
+            "unknown_color": BREAKER_UNKNOWN_COLOR,
+            "invalid_color": BREAKER_INVALID_COLOR,
             "flow": "none",
             "state_mode": "digital",
             "Source_Kind": "rectangle_status_csv",
@@ -3918,7 +3924,7 @@ def _digital_breaker_snapshot(binding):
             "state": "UNKNOWN",
             "condition": "UNKNOWN",
             "active": None,
-            "color": source.get("unknown_color", "#808080"),
+            "color": source.get("unknown_color", BREAKER_UNKNOWN_COLOR),
             "quality": close_point["quality"],
         })
         return base
@@ -3927,7 +3933,7 @@ def _digital_breaker_snapshot(binding):
             "state": "UNKNOWN",
             "condition": "UNKNOWN",
             "active": None,
-            "color": source.get("unknown_color", "#808080"),
+            "color": source.get("unknown_color", BREAKER_UNKNOWN_COLOR),
             "quality": f"OPEN CONTACT: {open_point['quality']}",
         })
         return base
@@ -3939,7 +3945,7 @@ def _digital_breaker_snapshot(binding):
             "state": "INVALID",
             "condition": "CONTACT CONFLICT",
             "active": None,
-            "color": source.get("invalid_color", "#ffb020"),
+            "color": source.get("invalid_color", BREAKER_INVALID_COLOR),
             "quality": "CONTACT CONFLICT",
         })
     elif closed == 1:
@@ -3948,7 +3954,8 @@ def _digital_breaker_snapshot(binding):
             "condition": "CLOSED / ON",
             "active": True,
             "color": source.get(
-                "true_color", source.get("active_color", "#ff2020")
+                "true_color",
+                source.get("active_color", BREAKER_CLOSED_COLOR),
             ),
             "quality": "GOOD",
         })
@@ -3958,7 +3965,8 @@ def _digital_breaker_snapshot(binding):
             "condition": "OPEN / OFF",
             "active": False,
             "color": source.get(
-                "false_color", source.get("inactive_color", "#14d84a")
+                "false_color",
+                source.get("inactive_color", BREAKER_OPEN_COLOR),
             ),
             "quality": "GOOD",
         })
@@ -3979,10 +3987,10 @@ def _run_monitor_breaker_binding(display_key):
         "label": SLD_BREAKER_LABEL_BY_KEY.get(source_key, str(display_key)),
         "operator": "=",
         "threshold": 1,
-        "true_color": "#ff2020",
-        "false_color": "#14d84a",
-        "unknown_color": "#808080",
-        "invalid_color": "#ffb020",
+        "true_color": BREAKER_CLOSED_COLOR,
+        "false_color": BREAKER_OPEN_COLOR,
+        "unknown_color": BREAKER_UNKNOWN_COLOR,
+        "invalid_color": BREAKER_INVALID_COLOR,
     })
     return binding
 
@@ -3995,7 +4003,7 @@ def _run_monitor_breaker_snapshot(display_key):
             "state": "UNKNOWN",
             "condition": "UNKNOWN",
             "active": None,
-            "color": "#808080",
+            "color": BREAKER_UNKNOWN_COLOR,
             "quality": "CONFIG INVALID",
             "effective_yx": None,
         }
@@ -4021,14 +4029,14 @@ def _normalize_monitor_breaker_binding(binding, fallback):
         "state_mode": "digital",
         "Source_Kind": "rectangle_status_csv",
     })
-    normalized.setdefault("true_color", "#ff2020")
-    normalized.setdefault("false_color", "#14d84a")
+    normalized.setdefault("true_color", BREAKER_CLOSED_COLOR)
+    normalized.setdefault("false_color", BREAKER_OPEN_COLOR)
     normalized.setdefault("active_color", normalized["true_color"])
     normalized.setdefault("inactive_color", normalized["false_color"])
     normalized.setdefault("on_color", normalized["true_color"])
     normalized.setdefault("off_color", normalized["false_color"])
-    normalized.setdefault("unknown_color", "#808080")
-    normalized.setdefault("invalid_color", "#ffb020")
+    normalized.setdefault("unknown_color", BREAKER_UNKNOWN_COLOR)
+    normalized.setdefault("invalid_color", BREAKER_INVALID_COLOR)
     normalized.setdefault("flow", "none")
     open_binding = _companion_open_status_binding(normalized)
     if open_binding:
@@ -7264,7 +7272,7 @@ class SCADAMainUI:
             footer,
             text=(
                 "Nilai aktual tetap memakai ListSetting. Posisi breaker memakai "
-                "StatusSetting YX: CLOSED merah, OPEN hijau, unknown abu-abu."
+                "StatusSetting YX: CLOSED hijau, OPEN merah, unknown abu-abu."
             ),
             bg="#d4d0c8",
             fg="#555555",
@@ -11088,7 +11096,7 @@ class SCADAMainUI:
                     "Transformer, 14 feeder motor, dan No.3 Feed Water Pump.\n\n"
                     "Diagram memuat 21 indikator breaker/status digital untuk sistem "
                     "auxiliary. Setiap indikator mengambil YX dari StatusSetting terkait: "
-                    "CLOSED merah, OPEN hijau, dan tanda ? abu-abu ketika point belum "
+                    "CLOSED hijau, OPEN merah, dan tanda ? abu-abu ketika point belum "
                     "diterima, kualitas tidak valid, atau RTU offline. Nilai Uab/Ubc/Uca, "
                     "Ia, P, dan Q tetap dihitung dari ListSetting masing-masing bay; "
                     "posisi breaker tidak pernah disimpulkan dari besar arus."
@@ -11107,7 +11115,7 @@ class SCADAMainUI:
                     "ditampilkan sebagai NO DATA berwarna amber dan tidak boleh dianggap "
                     "sebagai nilai nol.\n\n"
                     "Empat breaker dan lampu proteksi berasal dari StatusSetting terkait. "
-                    "Merah berarti CLOSED, hijau OPEN, abu-abu tidak valid/offline, dan "
+                    "Hijau berarti CLOSED, merah OPEN, abu-abu tidak valid/offline, dan "
                     "kuning menandai konflik pasangan kontak close/trip."
                 ),
             ),
@@ -11273,7 +11281,7 @@ class SCADAMainUI:
                     "Klik indikator breaker untuk membuka MAPPING BREAKER MONITOR TV. "
                     "Sumber yang dapat dipilih dibatasi pada point breaker position atau "
                     "breaker close dari StatusSetting. Effective YX 1 berarti CLOSED/"
-                    "merah dan 0 berarti OPEN/hijau. Jika kontak trip tersedia, close dan "
+                    "hijau dan 0 berarti OPEN/merah. Jika kontak trip tersedia, close dan "
                     "trip divalidasi sebagai pasangan; konflik berwarna kuning, sedangkan "
                     "point belum diterima atau RTU offline berwarna abu-abu.\n\n"
                     "Tekan Save setelah alamat dan preview benar. Perubahan langsung "
@@ -17970,7 +17978,7 @@ class SCADAMainUI:
         self.system_config_status_label.pack(side="right", padx=10)
         self.system_config_breaker_legend = tk.Label(
             header,
-            text="CB YX: MERAH=CLOSED/ON  •  HIJAU=OPEN/OFF  •  ABU=NO DATA",
+            text="CB YX: HIJAU=CLOSED/ON  •  MERAH=OPEN/OFF  •  ABU=NO DATA",
             bg="#101010",
             fg="#d8d8d8",
             font=("Arial", 9, "bold"),
@@ -18870,7 +18878,7 @@ class SCADAMainUI:
             self.aux_breaker_legend_item = canvas.create_text(
                 1508.0 * sx,
                 998.0 * sy,
-                text="MERAH=CLOSED/ON  •  HIJAU=OPEN/OFF  •  ABU-ABU=NO DATA",
+                text="HIJAU=CLOSED/ON  •  MERAH=OPEN/OFF  •  ABU-ABU=NO DATA",
                 anchor="ne",
                 fill="#d8d8d8",
                 font=("Arial", max(8, int(round(10 * scale))), "bold"),
@@ -20071,13 +20079,13 @@ class SCADAMainUI:
                                 font=("Consolas", 10), padx=14, pady=12, height=7)
         detail_label.grid(row=2, column=0, columnspan=3, sticky="ew")
 
-        # Digital status follows the YX bit after Reverse: 1=C/red, 0=O/green.
+        # Digital status follows YX after Reverse: 1=C/green, 0=O/red.
         # An offline RTU or point not yet received is rendered as unknown.
         display_name = tk.StringVar(value=str(current.get("label", current.get("element", binding_key))))
         threshold_var = tk.StringVar(value="1")
         operator_var = tk.StringVar(value="=")
-        on_color_var = tk.StringVar(value="#ff2020")
-        off_color_var = tk.StringVar(value="#14d84a")
+        on_color_var = tk.StringVar(value=BREAKER_CLOSED_COLOR)
+        off_color_var = tk.StringVar(value=BREAKER_OPEN_COLOR)
         status_mode_var = tk.StringVar(value=str(current.get("status_mode", "analog")))
         on_text_var = tk.StringVar(value=str(current.get("on_text", "ON")))
         off_text_var = tk.StringVar(value=str(current.get("off_text", "OFF")))
@@ -20202,8 +20210,8 @@ class SCADAMainUI:
             if kind != "variables":
                 saved.update({"label": display_name.get().strip() or binding_key,
                               "operator": "=", "threshold": 1.0,
-                              "on_color": "#ff2020",
-                              "off_color": "#14d84a",
+                              "on_color": BREAKER_CLOSED_COLOR,
+                              "off_color": BREAKER_OPEN_COLOR,
                               "status_mode": "raw", "on_text": "ON",
                               "off_text": "OFF", "flow": "none"})
             saved["mode"] = "selected"
@@ -20807,13 +20815,14 @@ class SCADAMainUI:
         effective_config = dict(config)
         if config.get("Source_Kind") == "rectangle_status_csv":
             if not valid or value is None:
-                return None, "#808080", "?"
+                return None, BREAKER_UNKNOWN_COLOR, "?"
             active = bool(_cbz_breaker_state(value, config.get("Reverse", 0)))
             effective_config.update({
                 "operator": "=", "threshold": 1.0,
-                "on_color": "#ff2020", "off_color": "#14d84a",
+                "on_color": BREAKER_CLOSED_COLOR,
+                "off_color": BREAKER_OPEN_COLOR,
             })
-            color = "#ff2020" if active else "#14d84a"
+            color = BREAKER_CLOSED_COLOR if active else BREAKER_OPEN_COLOR
             label = "1" if active else "0"
         else:
             active = bool(default_active)
@@ -20830,8 +20839,10 @@ class SCADAMainUI:
                         active = number > threshold
                 except (TypeError, ValueError):
                     active = False
-            color = config.get("on_color" if active else "off_color",
-                               "#ff2020" if active else "#14d84a")
+            color = config.get(
+                "on_color" if active else "off_color",
+                BREAKER_CLOSED_COLOR if active else BREAKER_OPEN_COLOR,
+            )
             try:
                 label = str(int(float(value)))
             except (TypeError, ValueError):
@@ -22005,16 +22016,16 @@ try:
             "generated_at": datetime.datetime.now().isoformat(timespec="milliseconds"),
             "rule": "Single point: Effective YX = Raw YX XOR Reverse",
             "legend": {
-                "0": {"condition": "Open/Off", "color_name": "Hijau", "color_hex": "#14d84a"},
-                "1": {"condition": "Closed/On", "color_name": "Merah", "color_hex": "#ff2020"},
-                "unknown": {"condition": "Unknown", "color_name": "Abu-abu", "color_hex": "#808080"},
-                "invalid": {"condition": "Contact conflict", "color_name": "Kuning", "color_hex": "#ffb020"},
+                "0": {"condition": "Open/Off", "color_name": "Merah", "color_hex": BREAKER_OPEN_COLOR},
+                "1": {"condition": "Closed/On", "color_name": "Hijau", "color_hex": BREAKER_CLOSED_COLOR},
+                "unknown": {"condition": "Unknown", "color_name": "Abu-abu", "color_hex": BREAKER_UNKNOWN_COLOR},
+                "invalid": {"condition": "Contact conflict", "color_name": "Kuning", "color_hex": BREAKER_INVALID_COLOR},
             },
             "matrix": [
-                {"raw_yx": 0, "reverse": 0, "effective_yx": 0, "condition": "Open/Off", "color_name": "Hijau"},
-                {"raw_yx": 1, "reverse": 0, "effective_yx": 1, "condition": "Closed/On", "color_name": "Merah"},
-                {"raw_yx": 0, "reverse": 1, "effective_yx": 1, "condition": "Closed/On", "color_name": "Merah"},
-                {"raw_yx": 1, "reverse": 1, "effective_yx": 0, "condition": "Open/Off", "color_name": "Hijau"},
+                {"raw_yx": 0, "reverse": 0, "effective_yx": 0, "condition": "Open/Off", "color_name": "Merah"},
+                {"raw_yx": 1, "reverse": 0, "effective_yx": 1, "condition": "Closed/On", "color_name": "Hijau"},
+                {"raw_yx": 0, "reverse": 1, "effective_yx": 1, "condition": "Closed/On", "color_name": "Hijau"},
+                {"raw_yx": 1, "reverse": 1, "effective_yx": 0, "condition": "Open/Off", "color_name": "Merah"},
             ],
             "pair_rule": "CLOSE=1 and OPEN=0 => CLOSED; CLOSE=0 and OPEN=1 => OPEN; matching contacts => INVALID",
             "breakers": breakers,
