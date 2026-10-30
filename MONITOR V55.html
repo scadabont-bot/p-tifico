@@ -3032,29 +3032,54 @@ window.setJunctionState = function(id, active, activeColor, inactiveColor, flowM
 
 window.updateJunctionStatus = function(p){
     if(!p) return;
-    const configured=p.rectangles||{};
-    const states=p.rectangle_states||{};
-    ["j-main","j-generator","j-transformer","j-transformer-bottom"].forEach(id=>{
-        const rule=configured[id]||{};
-        const state=states[id]||{};
-        const active=typeof state.active==="boolean" ? state.active : null;
+
+    const numberOrNull=value=>{
+        if(value===null||value===undefined||value==="") return null;
+        const number=typeof value==="number"
+            ?value
+            :Number(String(value).trim().replace(/,/g,"."));
+        return Number.isFinite(number) ? number : null;
+    };
+    const breakerRules={
+        "j-main":{
+            field:"ct3", threshold:1.00, onlineField:"wire_online"
+        },
+        "j-generator":{
+            field:"ll1", threshold:1.00, onlineField:"online"
+        },
+        "j-transformer":{
+            field:"rr2", threshold:1.00, onlineField:"wire_online"
+        },
+        "j-transformer-bottom":{
+            field:"rr3", threshold:0.00, onlineField:"online"
+        }
+    };
+
+    Object.entries(breakerRules).forEach(([id,rule])=>{
+        const value=numberOrNull(p[rule.field]);
+        const available=value!==null&&p[rule.onlineField]!==false;
+        const active=available ? value>rule.threshold : null;
+        const condition=active===null
+            ?"UNKNOWN"
+            :active
+                ?"CLOSED"
+                :"OPEN";
         window.setJunctionState(
             id,
             active,
-            rule.true_color||rule.active_color||"#14d84a",
-            rule.false_color||rule.inactive_color||"#ff2020",
-            rule.flow||"none",
-            active===null ? "?" : "",
-            state.color||""
+            "#14d84a",
+            "#ff2020",
+            "none",
+            active===null ? "?" : ""
         );
         const el=document.querySelector("." + id);
         if(el){
+            const actual=value===null ? "--" : value.toFixed(2);
             el.title=[
-                rule.label||id,
-                state.condition||"UNKNOWN",
-                state.quality||"NO DATA",
-                state.info_name||""
-            ].filter(Boolean).join(" • ");
+                id,
+                `${rule.field} ${actual} > ${rule.threshold.toFixed(2)}`,
+                condition
+            ].join(" • ");
         }
     });
 };
