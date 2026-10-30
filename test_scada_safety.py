@@ -319,7 +319,7 @@ class BreakerMappingTests(unittest.TestCase):
                     persisted["off_color"], scada.BREAKER_OPEN_COLOR,
                 )
 
-    def test_authoritative_breaker_points_use_green_closed_red_open(self):
+    def test_authoritative_breaker_points_use_red_closed_green_open(self):
         for panel in ("G1", "G2"):
             for rectangle, binding in self.config[panel]["rectangles"].items():
                 with self.subTest(panel=panel, rectangle=rectangle):
@@ -358,6 +358,20 @@ class BreakerMappingTests(unittest.TestCase):
                         ("OPEN", scada.BREAKER_OPEN_COLOR, "GOOD"),
                     )
 
+    def test_offline_breaker_is_unknown_not_green_open(self):
+        binding = self.config["G1"]["rectangles"]["j-main"]
+        scada.VINCI_STATUS[binding["Device_Addr"]] = False
+        state = scada._digital_breaker_snapshot(binding)
+        self.assertEqual(
+            (
+                state["state"],
+                state["active"],
+                state["color"],
+                state["quality"],
+            ),
+            ("UNKNOWN", None, scada.BREAKER_UNKNOWN_COLOR, "RTU OFFLINE"),
+        )
+
     def test_run_monitor_uses_same_digital_generator_state(self):
         binding = scada._run_monitor_breaker_binding("brk_g1")
         ip = binding["Device_Addr"]
@@ -377,7 +391,9 @@ class BreakerMappingTests(unittest.TestCase):
             state_with_current["effective_yx"],
         )
 
-    def test_all_breaker_surfaces_use_green_closed_red_open(self):
+    def test_all_breaker_surfaces_use_red_closed_green_open(self):
+        self.assertEqual(scada.BREAKER_CLOSED_COLOR, "#ff2020")
+        self.assertEqual(scada.BREAKER_OPEN_COLOR, "#14d84a")
         surfaces = []
         for display_key in scada.RUN_MONITOR_BREAKER_SOURCE_BY_KEY:
             surfaces.append((

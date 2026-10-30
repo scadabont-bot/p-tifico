@@ -122,8 +122,8 @@ def _set_macos_application_menu_title(name):
 
 
 
-BREAKER_CLOSED_COLOR = "#14d84a"
-BREAKER_OPEN_COLOR = "#ff2020"
+BREAKER_CLOSED_COLOR = "#ff2020"
+BREAKER_OPEN_COLOR = "#14d84a"
 BREAKER_UNKNOWN_COLOR = "#808080"
 BREAKER_INVALID_COLOR = "#ffb020"
 
@@ -350,7 +350,7 @@ IOA_MAP_STANDARD = {
     16411: "Uab_L", 16412: "Ubc_L", 16413: "Uca_L",
 }
 
-APP_VERSION = "2.6.6"
+APP_VERSION = "2.6.7"
 APP_DIR = (
     os.path.dirname(os.path.abspath(sys.executable))
     if getattr(sys, "frozen", False)
@@ -4111,12 +4111,12 @@ def _normalize_monitor_breaker_binding(binding, fallback):
         "state_mode": "digital",
         "Source_Kind": "rectangle_status_csv",
     })
-    normalized.setdefault("true_color", BREAKER_CLOSED_COLOR)
-    normalized.setdefault("false_color", BREAKER_OPEN_COLOR)
-    normalized.setdefault("active_color", normalized["true_color"])
-    normalized.setdefault("inactive_color", normalized["false_color"])
-    normalized.setdefault("on_color", normalized["true_color"])
-    normalized.setdefault("off_color", normalized["false_color"])
+    normalized["true_color"] = BREAKER_CLOSED_COLOR
+    normalized["false_color"] = BREAKER_OPEN_COLOR
+    normalized["active_color"] = BREAKER_CLOSED_COLOR
+    normalized["inactive_color"] = BREAKER_OPEN_COLOR
+    normalized["on_color"] = BREAKER_CLOSED_COLOR
+    normalized["off_color"] = BREAKER_OPEN_COLOR
     normalized.setdefault("unknown_color", BREAKER_UNKNOWN_COLOR)
     normalized.setdefault("invalid_color", BREAKER_INVALID_COLOR)
     normalized.setdefault("flow", "none")
@@ -7339,7 +7339,7 @@ class SCADAMainUI:
             footer,
             text=(
                 "Nilai aktual tetap memakai ListSetting. Posisi breaker memakai "
-                "StatusSetting YX: CLOSED hijau, OPEN merah, unknown abu-abu."
+                "StatusSetting YX: CLOSED merah, OPEN hijau, unknown abu-abu."
             ),
             bg="#d4d0c8",
             fg="#555555",
@@ -11162,7 +11162,7 @@ class SCADAMainUI:
                     "Transformer, 14 feeder motor, dan No.3 Feed Water Pump.\n\n"
                     "Diagram memuat 21 indikator breaker/status digital untuk sistem "
                     "auxiliary. Setiap indikator mengambil YX dari StatusSetting terkait: "
-                    "CLOSED hijau, OPEN merah, dan tanda ? abu-abu ketika point belum "
+                    "CLOSED merah, OPEN hijau, dan tanda ? abu-abu ketika point belum "
                     "diterima, kualitas tidak valid, atau RTU offline. Nilai Uab/Ubc/Uca, "
                     "Ia, P, dan Q tetap dihitung dari ListSetting masing-masing bay; "
                     "posisi breaker tidak pernah disimpulkan dari besar arus."
@@ -11181,7 +11181,7 @@ class SCADAMainUI:
                     "ditampilkan sebagai NO DATA berwarna amber dan tidak boleh dianggap "
                     "sebagai nilai nol.\n\n"
                     "Empat breaker dan lampu proteksi berasal dari StatusSetting terkait. "
-                    "Hijau berarti CLOSED, merah OPEN, abu-abu tidak valid/offline, dan "
+                    "Merah berarti CLOSED, hijau OPEN, abu-abu tidak valid/offline, dan "
                     "kuning menandai konflik pasangan kontak close/trip."
                 ),
             ),
@@ -11347,7 +11347,7 @@ class SCADAMainUI:
                     "Klik indikator breaker untuk membuka MAPPING BREAKER MONITOR TV. "
                     "Sumber yang dapat dipilih dibatasi pada point breaker position atau "
                     "breaker close dari StatusSetting. Effective YX 1 berarti CLOSED/"
-                    "hijau dan 0 berarti OPEN/merah. Jika kontak trip tersedia, close dan "
+                    "merah dan 0 berarti OPEN/hijau. Jika kontak trip tersedia, close dan "
                     "trip divalidasi sebagai pasangan; konflik berwarna kuning, sedangkan "
                     "point belum diterima atau RTU offline berwarna abu-abu.\n\n"
                     "Tekan Save setelah alamat dan preview benar. Perubahan langsung "
@@ -18044,7 +18044,7 @@ class SCADAMainUI:
         self.system_config_status_label.pack(side="right", padx=10)
         self.system_config_breaker_legend = tk.Label(
             header,
-            text="CB YX: HIJAU=CLOSED/ON  •  MERAH=OPEN/OFF  •  ABU=NO DATA",
+            text="CB YX: MERAH=CLOSED/ON  •  HIJAU=OPEN/OFF  •  ABU=NO DATA",
             bg="#101010",
             fg="#d8d8d8",
             font=("Arial", 9, "bold"),
@@ -18944,7 +18944,7 @@ class SCADAMainUI:
             self.aux_breaker_legend_item = canvas.create_text(
                 1508.0 * sx,
                 998.0 * sy,
-                text="HIJAU=CLOSED/ON  •  MERAH=OPEN/OFF  •  ABU-ABU=NO DATA",
+                text="MERAH=CLOSED/ON  •  HIJAU=OPEN/OFF  •  ABU-ABU=NO DATA",
                 anchor="ne",
                 fill="#d8d8d8",
                 font=("Arial", max(8, int(round(10 * scale))), "bold"),
@@ -19657,9 +19657,9 @@ class SCADAMainUI:
                 active = state.get("active")
                 state_name = state.get("state")
                 color_label = (
-                    "HIJAU"
+                    "MERAH"
                     if state_name == "CLOSED"
-                    else "MERAH"
+                    else "HIJAU"
                     if state_name == "OPEN"
                     else "KUNING"
                     if state_name == "INVALID"
@@ -22089,16 +22089,16 @@ try:
             "generated_at": datetime.datetime.now().isoformat(timespec="milliseconds"),
             "rule": "Single point: Effective YX = Raw YX XOR Reverse",
             "legend": {
-                "0": {"condition": "Open/Off", "color_name": "Merah", "color_hex": BREAKER_OPEN_COLOR},
-                "1": {"condition": "Closed/On", "color_name": "Hijau", "color_hex": BREAKER_CLOSED_COLOR},
+                "0": {"condition": "Open/Off", "color_name": "Hijau", "color_hex": BREAKER_OPEN_COLOR},
+                "1": {"condition": "Closed/On", "color_name": "Merah", "color_hex": BREAKER_CLOSED_COLOR},
                 "unknown": {"condition": "Unknown", "color_name": "Abu-abu", "color_hex": BREAKER_UNKNOWN_COLOR},
                 "invalid": {"condition": "Contact conflict", "color_name": "Kuning", "color_hex": BREAKER_INVALID_COLOR},
             },
             "matrix": [
-                {"raw_yx": 0, "reverse": 0, "effective_yx": 0, "condition": "Open/Off", "color_name": "Merah"},
-                {"raw_yx": 1, "reverse": 0, "effective_yx": 1, "condition": "Closed/On", "color_name": "Hijau"},
-                {"raw_yx": 0, "reverse": 1, "effective_yx": 1, "condition": "Closed/On", "color_name": "Hijau"},
-                {"raw_yx": 1, "reverse": 1, "effective_yx": 0, "condition": "Open/Off", "color_name": "Merah"},
+                {"raw_yx": 0, "reverse": 0, "effective_yx": 0, "condition": "Open/Off", "color_name": "Hijau"},
+                {"raw_yx": 1, "reverse": 0, "effective_yx": 1, "condition": "Closed/On", "color_name": "Merah"},
+                {"raw_yx": 0, "reverse": 1, "effective_yx": 1, "condition": "Closed/On", "color_name": "Merah"},
+                {"raw_yx": 1, "reverse": 1, "effective_yx": 0, "condition": "Open/Off", "color_name": "Hijau"},
             ],
             "pair_rule": "CLOSE=1 and OPEN=0 => CLOSED; CLOSE=0 and OPEN=1 => OPEN; matching contacts => INVALID",
             "breakers": breakers,

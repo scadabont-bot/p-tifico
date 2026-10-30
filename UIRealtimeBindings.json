@@ -2839,8 +2839,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "run:brk_d2": {
       "page": "Run Monitor",
@@ -2863,8 +2863,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "run:brk_d3": {
       "page": "Run Monitor",
@@ -2887,8 +2887,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "run:brk_d4": {
       "page": "Run Monitor",
@@ -2911,8 +2911,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "run:brk_d5": {
       "page": "Run Monitor",
@@ -2935,8 +2935,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "run:brk_d6": {
       "page": "Run Monitor",
@@ -2959,8 +2959,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "run:brk_d7": {
       "page": "Run Monitor",
@@ -2983,8 +2983,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "run:brk_d8": {
       "page": "Run Monitor",
@@ -3007,8 +3007,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "run:brk_d9": {
       "page": "Run Monitor",
@@ -3031,8 +3031,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "run:brk_d10": {
       "page": "Run Monitor",
@@ -3055,8 +3055,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "run:brk_d11": {
       "page": "Run Monitor",
@@ -3079,8 +3079,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "run:brk_d12": {
       "page": "Run Monitor",
@@ -3103,8 +3103,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "run:brk_d13": {
       "page": "Run Monitor",
@@ -3127,8 +3127,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "run:brk_d14": {
       "page": "Run Monitor",
@@ -3151,8 +3151,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "system:breaker:feeder_01": {
       "page": "System Configuration",
@@ -3175,8 +3175,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "system:breaker:feeder_02": {
       "page": "System Configuration",
@@ -3199,8 +3199,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "system:breaker:feeder_03": {
       "page": "System Configuration",
@@ -3223,8 +3223,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "system:breaker:feeder_04": {
       "page": "System Configuration",
@@ -3247,8 +3247,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "system:breaker:feeder_05": {
       "page": "System Configuration",
@@ -3271,8 +3271,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "system:breaker:feeder_06": {
       "page": "System Configuration",
@@ -3295,8 +3295,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "system:breaker:feeder_07": {
       "page": "System Configuration",
@@ -3319,8 +3319,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "system:breaker:feeder_08": {
       "page": "System Configuration",
@@ -3343,8 +3343,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "system:breaker:feeder_09": {
       "page": "System Configuration",
@@ -3367,8 +3367,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "system:breaker:feeder_10": {
       "page": "System Configuration",
@@ -3391,8 +3391,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "system:breaker:feeder_11": {
       "page": "System Configuration",
@@ -3415,8 +3415,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "system:breaker:feeder_12": {
       "page": "System Configuration",
@@ -3439,8 +3439,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "system:breaker:feeder_13": {
       "page": "System Configuration",
@@ -3463,8 +3463,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "system:breaker:feeder_14": {
       "page": "System Configuration",
@@ -3487,8 +3487,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "aux:breaker:feeder_01": {
       "page": "Auxiliary System",
@@ -3511,8 +3511,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "aux:breaker:feeder_02": {
       "page": "Auxiliary System",
@@ -3535,8 +3535,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "aux:breaker:feeder_03": {
       "page": "Auxiliary System",
@@ -3559,8 +3559,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "aux:breaker:feeder_04": {
       "page": "Auxiliary System",
@@ -3583,8 +3583,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "aux:breaker:feeder_05": {
       "page": "Auxiliary System",
@@ -3607,8 +3607,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "aux:breaker:feeder_06": {
       "page": "Auxiliary System",
@@ -3631,8 +3631,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "aux:breaker:feeder_07": {
       "page": "Auxiliary System",
@@ -3655,8 +3655,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "aux:breaker:feeder_08": {
       "page": "Auxiliary System",
@@ -3679,8 +3679,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "aux:breaker:feeder_09": {
       "page": "Auxiliary System",
@@ -3703,8 +3703,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "aux:breaker:feeder_10": {
       "page": "Auxiliary System",
@@ -3727,8 +3727,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "aux:breaker:feeder_11": {
       "page": "Auxiliary System",
@@ -3751,8 +3751,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "aux:breaker:feeder_12": {
       "page": "Auxiliary System",
@@ -3775,8 +3775,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "aux:breaker:feeder_13": {
       "page": "Auxiliary System",
@@ -3799,8 +3799,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "aux:breaker:feeder_14": {
       "page": "Auxiliary System",
@@ -3823,8 +3823,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "aux:breaker:wire_1": {
       "page": "Auxiliary System",
@@ -3845,8 +3845,8 @@
       "ResetStr": "2",
       "Reverse": "0",
       "source_id": "wire_1",
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "aux:breaker:wire_2": {
       "page": "Auxiliary System",
@@ -3867,8 +3867,8 @@
       "ResetStr": "2",
       "Reverse": "0",
       "source_id": "wire_2",
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "aux:breaker:aux_1_hv": {
       "page": "Auxiliary System",
@@ -3890,8 +3890,8 @@
       "Reverse": "0",
       "contact_mode": "single",
       "source_id": "aux_1_hv",
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "aux:breaker:feed_water_3": {
       "page": "Auxiliary System",
@@ -3912,8 +3912,8 @@
       "ResetStr": "2",
       "Reverse": "0",
       "source_id": "feed_water_3",
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "aux:breaker:aux_2_hv": {
       "page": "Auxiliary System",
@@ -3935,8 +3935,8 @@
       "Reverse": "0",
       "contact_mode": "single",
       "source_id": "aux_2_hv",
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "aux:breaker:aux_1_lv": {
       "page": "Auxiliary System",
@@ -3958,8 +3958,8 @@
       "Reverse": "0",
       "contact_mode": "single",
       "source_id": "aux_1_lv",
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "aux:breaker:aux_2_lv": {
       "page": "Auxiliary System",
@@ -3981,8 +3981,8 @@
       "Reverse": "0",
       "contact_mode": "single",
       "source_id": "aux_2_lv",
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "system:breaker:wire_1": {
       "page": "System Configuration",
@@ -4003,8 +4003,8 @@
       "ResetStr": "2",
       "Reverse": "0",
       "source_id": "wire_1",
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "system:breaker:wire_2": {
       "page": "System Configuration",
@@ -4025,8 +4025,8 @@
       "ResetStr": "2",
       "Reverse": "0",
       "source_id": "wire_2",
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "system:breaker:generator_1": {
       "page": "System Configuration",
@@ -4048,8 +4048,8 @@
       "Reverse": "0",
       "contact_mode": "single",
       "source_id": "generator_1",
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "system:breaker:aux_1_hv": {
       "page": "System Configuration",
@@ -4071,8 +4071,8 @@
       "Reverse": "0",
       "contact_mode": "single",
       "source_id": "aux_1_hv",
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "system:breaker:feed_water_3": {
       "page": "System Configuration",
@@ -4093,8 +4093,8 @@
       "ResetStr": "2",
       "Reverse": "0",
       "source_id": "feed_water_3",
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "system:breaker:aux_2_hv": {
       "page": "System Configuration",
@@ -4116,8 +4116,8 @@
       "Reverse": "0",
       "contact_mode": "single",
       "source_id": "aux_2_hv",
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "system:breaker:generator_2": {
       "page": "System Configuration",
@@ -4139,8 +4139,8 @@
       "Reverse": "0",
       "contact_mode": "single",
       "source_id": "generator_2",
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "system:breaker:aux_1_lv": {
       "page": "System Configuration",
@@ -4162,8 +4162,8 @@
       "Reverse": "0",
       "contact_mode": "single",
       "source_id": "aux_1_lv",
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     },
     "system:breaker:aux_2_lv": {
       "page": "System Configuration",
@@ -4185,8 +4185,8 @@
       "Reverse": "0",
       "contact_mode": "single",
       "source_id": "aux_2_lv",
-      "on_color": "#14d84a",
-      "off_color": "#ff2020"
+      "on_color": "#ff2020",
+      "off_color": "#14d84a"
     }
   }
 }
