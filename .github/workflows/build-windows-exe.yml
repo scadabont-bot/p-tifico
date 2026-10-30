@@ -43,9 +43,11 @@ jobs:
             throw "Source self-test exited with code $selfTestExit."
           }
           $env:SCADA_UI_SELF_TEST = "1"
+          $env:SCADA_UI_TEST_PASSWORD = "123456"
           python $source
           $uiSmokeExit = $LASTEXITCODE
           Remove-Item Env:\SCADA_UI_SELF_TEST
+          Remove-Item Env:\SCADA_UI_TEST_PASSWORD
           if ($uiSmokeExit -ne 0) {
             throw "Source login UI smoke test exited with code $uiSmokeExit."
           }
