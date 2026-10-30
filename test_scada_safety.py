@@ -59,12 +59,12 @@ class BreakerMappingTests(unittest.TestCase):
 
     def test_monitor_breakers_match_authoritative_status_addresses(self):
         expected = {
-            ("G1", "j-main"): (258, 2, None, 1),
-            ("G1", "j-generator"): (1537, 2, 1, 1),
+            ("G1", "j-main"): (258, 2, None, 0),
+            ("G1", "j-generator"): (1537, 2, 1, 0),
             ("G1", "j-transformer"): (770, 4, 3, 0),
             ("G1", "j-transformer-bottom"): (770, 6, 5, 0),
-            ("G2", "j-main"): (514, 2, None, 1),
-            ("G2", "j-generator"): (2049, 2, 1, 1),
+            ("G2", "j-main"): (514, 2, None, 0),
+            ("G2", "j-generator"): (2049, 2, 1, 0),
             ("G2", "j-transformer"): (1026, 4, 3, 0),
             ("G2", "j-transformer-bottom"): (1026, 6, 5, 0),
         }
@@ -108,18 +108,18 @@ class BreakerMappingTests(unittest.TestCase):
                 f"persisted {panel} {rectangle}",
             )
 
-    def test_field_confirmed_active_low_generator_contacts_render_closed(self):
+    def test_authoritative_generator_contacts_render_closed(self):
         for panel in ("G1", "G2"):
             binding = self.config[panel]["rectangles"]["j-generator"]
             ip = binding["Device_Addr"]
             scada.VINCI_STATUS[ip] = True
             scada.STATUS_VALUE_STORE[
                 (ip, "info", binding["Info_Name"])
-            ] = 0
+            ] = 1
             open_binding = binding["open_binding"]
             scada.STATUS_VALUE_STORE[
                 (ip, "info", open_binding["Info_Name"])
-            ] = 1
+            ] = 0
 
             state = scada._digital_breaker_snapshot(binding)
 
@@ -132,10 +132,10 @@ class BreakerMappingTests(unittest.TestCase):
         ip = binding["Device_Addr"]
         open_binding = scada._companion_open_status_binding(binding)
         scada.VINCI_STATUS[ip] = True
-        scada.STATUS_VALUE_STORE[(ip, "info", binding["Info_Name"])] = 0
+        scada.STATUS_VALUE_STORE[(ip, "info", binding["Info_Name"])] = 1
         scada.STATUS_VALUE_STORE[
             (ip, "info", open_binding["Info_Name"])
-        ] = 1
+        ] = 0
         scada.DATA_STORE.setdefault(ip, {})["Ia"] = 0.0
 
         state_without_current = scada._run_monitor_breaker_snapshot("brk_g1")
@@ -149,6 +149,65 @@ class BreakerMappingTests(unittest.TestCase):
             state_with_current["effective_yx"],
         )
 
+
+
+class Iec104InterrogationTests(unittest.TestCase):
+    class RecordingSocket:
+        def __init__(self):
+            self.frames = []
+
+        def sendall(self, frame):
+            self.frames.append(bytes(frame))
+
+    def test_general_interrogation_targets_every_configured_station(self):
+        sock = self.RecordingSocket()
+
+        addresses = scada.send_gi(sock, "10.100.163.1")
+
+        self.assertTrue({258, 514, 770, 1026}.issubset(addresses))
+        self.assertEqual(len(sock.frames), len(addresses))
+        for sequence, (address, frame) in enumerate(
+            zip(addresses, sock.frames),
+        ):
+            self.assertEqual(frame[0], 0x68)
+            self.assertEqual(len(frame), frame[1] + 2)
+            self.assertEqual(
+                ((frame[3] << 8) | frame[2]) >> 1,
+                sequence,
+            )
+            self.assertEqual(frame[6:10], bytes((100, 1, 6, 0)))
+            self.assertEqual(frame[10] | (frame[11] << 8), address)
+            self.assertEqual(frame[12:15], b"\x00\x00\x00")
+            self.assertEqual(frame[15], 20)
+
+    def test_single_point_frame_reaches_digital_status_decoder(self):
+        captured = []
+        original = scada._set_status_raw_value
+        scada._set_status_raw_value = (
+            lambda *args, **kwargs: captured.append((args, kwargs))
+        )
+        try:
+            frame = bytes.fromhex(
+                "68 0E 00 00 00 00 01 01 03 00 02 01 02 00 00 01"
+            )
+            scada._parse_iec104_frame(
+                "10.100.163.1",
+                frame,
+                self.RecordingSocket(),
+                {
+                    "rx_count": 0,
+                    "next_rx_seq": 0,
+                    "testfr_pending_since": None,
+                },
+            )
+        finally:
+            scada._set_status_raw_value = original
+
+        self.assertEqual(len(captured), 1)
+        args, kwargs = captured[0]
+        self.assertEqual(args[:4], ("10.100.163.1", 258, 2, 1))
+        self.assertEqual(kwargs["type_id"], 1)
+        self.assertEqual(kwargs["cause"], 3)
 
 class BreakerReportTests(unittest.TestCase):
     def test_report_records_digital_state_and_quality(self):

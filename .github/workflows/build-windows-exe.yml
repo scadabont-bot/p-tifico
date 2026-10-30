@@ -42,6 +42,13 @@ jobs:
           if ($selfTestExit -ne 0) {
             throw "Source self-test exited with code $selfTestExit."
           }
+          $env:SCADA_UI_SELF_TEST = "1"
+          python $source
+          $uiSmokeExit = $LASTEXITCODE
+          Remove-Item Env:\SCADA_UI_SELF_TEST
+          if ($uiSmokeExit -ne 0) {
+            throw "Source login UI smoke test exited with code $uiSmokeExit."
+          }
 
       - name: Install Inno Setup
         shell: pwsh
@@ -151,6 +158,17 @@ jobs:
             if ($selfTest.ExitCode -ne 0) {
               throw "$installerName self-test exited with code $($selfTest.ExitCode)."
             }
+            $env:SCADA_UI_SELF_TEST = "1"
+            $uiSmoke = Start-Process `
+              -FilePath (Join-Path $installDir "p-tifico-backup.exe") `
+              -WorkingDirectory $installDir `
+              -PassThru `
+              -Wait
+            Remove-Item Env:\SCADA_UI_SELF_TEST
+            if ($uiSmoke.ExitCode -ne 0) {
+              throw "$installerName login UI smoke test exited with code $($uiSmoke.ExitCode)."
+            }
+
 
             $application = Start-Process `
               -FilePath (Join-Path $installDir "p-tifico-backup.exe") `

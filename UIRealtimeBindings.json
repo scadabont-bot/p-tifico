@@ -3843,7 +3843,7 @@
       "Source_Kind": "rectangle_status_csv",
       "SetStr": "1",
       "ResetStr": "2",
-      "Reverse": "1",
+      "Reverse": "0",
       "source_id": "wire_1"
     },
     "aux:breaker:wire_2": {
@@ -3863,7 +3863,7 @@
       "Source_Kind": "rectangle_status_csv",
       "SetStr": "1",
       "ResetStr": "2",
-      "Reverse": "1",
+      "Reverse": "0",
       "source_id": "wire_2"
     },
     "aux:breaker:aux_1_hv": {
@@ -3983,7 +3983,7 @@
       "Source_Kind": "rectangle_status_csv",
       "SetStr": "1",
       "ResetStr": "2",
-      "Reverse": "1",
+      "Reverse": "0",
       "source_id": "wire_1"
     },
     "system:breaker:wire_2": {
@@ -4003,7 +4003,7 @@
       "Source_Kind": "rectangle_status_csv",
       "SetStr": "1",
       "ResetStr": "2",
-      "Reverse": "1",
+      "Reverse": "0",
       "source_id": "wire_2"
     },
     "system:breaker:generator_1": {
@@ -4023,7 +4023,7 @@
       "Source_Kind": "rectangle_status_csv",
       "SetStr": "1",
       "ResetStr": "2",
-      "Reverse": "1",
+      "Reverse": "0",
       "source_id": "generator_1"
     },
     "system:breaker:aux_1_hv": {
@@ -4103,7 +4103,7 @@
       "Source_Kind": "rectangle_status_csv",
       "SetStr": "1",
       "ResetStr": "2",
-      "Reverse": "1",
+      "Reverse": "0",
       "source_id": "generator_2"
     },
     "system:breaker:aux_1_lv": {

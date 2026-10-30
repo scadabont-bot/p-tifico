@@ -344,7 +344,7 @@ IOA_MAP_STANDARD = {
     16411: "Uab_L", 16412: "Ubc_L", 16413: "Uca_L",
 }
 
-APP_VERSION = "2.6.1"
+APP_VERSION = "2.6.2"
 APP_DIR = (
     os.path.dirname(os.path.abspath(sys.executable))
     if getattr(sys, "frozen", False)
@@ -5604,8 +5604,9 @@ def iec104_client(rtu_info):
             _communication_log(ip, "CONNECTED", f"port={port}")
 
             send_startda(sock)
-            # EXACT GI packet used by SCADATIFICODEV02.py.
-            send_gi(sock)
+            # Query every logical station configured on this RTU. Digital
+            # points otherwise remain unknown until their next transition.
+            send_gi(sock, ip)
 
             buffer = b""
             rx_state = {"rx_count": 0, "next_rx_seq": 0, "testfr_pending_since": None}
@@ -5690,10 +5691,55 @@ def send_startda(sock):
     sock.sendall(bytes.fromhex("68 04 07 00 00 00"))
 
 
-def send_gi(sock):
-    # EXACT GI packet from SCADATIFICODEV02.py
-    gi = bytes.fromhex("68 0E 00 00 00 00 64 01 06 00 01 08 00 00 00")
-    sock.sendall(gi)
+def _gi_common_addresses(ip):
+    """Return every logical IEC station configured behind one RTU endpoint."""
+    endpoint = _norm_text(ip)
+    with SETTING_LOCK:
+        analog_rows = list(SETTING_REGISTRY)
+    with STATUS_LOCK:
+        status_rows = list(STATUS_REGISTRY)
+    with SOE_LOCK:
+        soe_rows = list(SOE_REGISTRY)
+
+    addresses = set()
+    for row in analog_rows + status_rows + soe_rows:
+        if _norm_text(row.get("Device_Addr")) != endpoint:
+            continue
+        for field in ("ASDU_INT", "Parsed_ASDU", "ASDU"):
+            try:
+                address = int(float(row.get(field)))
+            except (TypeError, ValueError):
+                continue
+            if 0 <= address < 0xFFFF:
+                addresses.add(address)
+                break
+    return sorted(addresses)
+
+
+def _build_gi_frame(common_address, tx_sequence=0):
+    """Build one valid C_IC_NA_1 station-interrogation I-frame."""
+    address = int(common_address)
+    if not 0 <= address <= 0xFFFF:
+        raise ValueError(f"IEC common address out of range: {address}")
+    sequence = int(tx_sequence) & 0x7FFF
+    control = (sequence << 1).to_bytes(2, "little") + b"\x00\x00"
+    asdu = bytes((
+        100, 1,             # C_IC_NA_1, one information object
+        6, 0,               # activation, originator address 0
+        address & 0xFF, (address >> 8) & 0xFF,
+        0, 0, 0,            # information object address 0
+        20,                 # QOI: station interrogation
+    ))
+    apdu = control + asdu
+    return bytes((0x68, len(apdu))) + apdu
+
+
+def send_gi(sock, ip):
+    """Interrogate all configured stations, not one malformed hard-coded ASDU."""
+    addresses = _gi_common_addresses(ip) or [0xFFFF]
+    for sequence, address in enumerate(addresses):
+        sock.sendall(_build_gi_frame(address, sequence))
+    return addresses
 
 
 def send_s_frame(sock, rx_num):
@@ -9603,12 +9649,20 @@ class SCADAMainUI:
         screen_width = login_win.winfo_screenwidth()
         screen_height = login_win.winfo_screenheight()
         win_width = min(660, max(580, int(screen_width * 0.40)))
-        win_height = min(660, max(610, int(screen_height * 0.62)))
-        center_x = max((screen_width - win_width) // 2, 0)
-        center_y = max((screen_height - win_height) // 2, 0)
-        login_win.geometry(
-            f"{win_width}x{win_height}+{center_x}+{center_y}"
-        )
+
+        def resize_login_window(enrolling):
+            requested_height = 630 if enrolling else 540
+            win_height = min(
+                requested_height,
+                max(480, screen_height - 60),
+            )
+            center_x = max((screen_width - win_width) // 2, 0)
+            center_y = max((screen_height - win_height) // 2, 0)
+            login_win.geometry(
+                f"{win_width}x{win_height}+{center_x}+{center_y}"
+            )
+
+        resize_login_window(initial_commissioning)
         if not required:
             login_win.transient(self.root)
 
@@ -9772,21 +9826,20 @@ class SCADAMainUI:
         )
         show_password = tk.BooleanVar(value=False)
 
-        tk.Label(
+        confirm_label = tk.Label(
             card,
             text="CONFIRM NEW PASSWORD",
             bg=colors["surface"],
             fg=colors["muted"],
             font=("Segoe UI", 9, "bold"),
             anchor="w",
-        ).pack(fill="x", pady=(3, 0))
+        )
         confirm_row = tk.Frame(
             card,
             bg="#163750",
             highlightbackground=colors["border"],
             highlightthickness=1,
         )
-        confirm_row.pack(fill="x", pady=(5, 6))
         confirm_var = tk.StringVar()
         confirm_entry = tk.Entry(
             confirm_row,
@@ -9869,11 +9922,18 @@ class SCADAMainUI:
             permission_label.configure(
                 fg=colors["success"] if configured else colors["accent"]
             )
-            confirm_entry.configure(
-                state="disabled" if configured else "normal",
-            )
             if configured:
+                confirm_label.pack_forget()
+                confirm_row.pack_forget()
                 confirm_var.set("")
+            else:
+                confirm_label.pack(
+                    fill="x", pady=(3, 0), before=status_label,
+                )
+                confirm_row.pack(
+                    fill="x", pady=(5, 6), before=status_label,
+                )
+            resize_login_window(not configured)
             primary = controls.get("primary")
             if primary is not None:
                 primary.configure(
@@ -22417,13 +22477,10 @@ def run_engineering_qc():
         "feeder_14": "06YX1702000002",
         "generator_2": "03YX0801000002",
     }
-    active_low_run_breakers = {
-        "wire_1", "wire_2", "generator_1", "generator_2",
-    }
     for breaker_key, expected_info_name in documented_run_breakers.items():
         bay, physical_names = SLD_BREAKER_SOURCE_BY_KEY[breaker_key]
         binding = _status_binding_for_bay(bay, physical_names)
-        expected_reverse = 1 if breaker_key in active_low_run_breakers else 0
+        expected_reverse = 0
         actual_reverse = int(
             str(binding.get("Reverse", 0) or "0").strip() in {
                 "-1", "1", "true", "yes", "on",
@@ -23061,11 +23118,96 @@ SETTING_VALIDATION_OK = validate_setting_files()
 ENGINEERING_QC_OK = run_engineering_qc()
 PC2_RELAY_QC_OK = run_pc2_relay_qc()
 
+def run_login_ui_smoke_test():
+    """Exercise the configured-role login surface without starting RTU workers."""
+    global AUTH_ACCOUNTS_PATH
+    original_accounts_path = AUTH_ACCOUNTS_PATH
+    root = None
+    login_win = None
+    try:
+        with tempfile.TemporaryDirectory() as temporary:
+            AUTH_ACCOUNTS_PATH = os.path.join(
+                temporary, "UserAccounts.json",
+            )
+            _auth_set_password("Admin", "Smoke-Admin-2026")
+            smoke_roles = _auth_configured_roles()
+            root = tk.Tk()
+            root.geometry("1x1+0+0")
+            root.update()
+            ui = SCADAMainUI.__new__(SCADAMainUI)
+            ui.root = root
+            ui.current_user = None
+            ui._login_window = None
+            ui._auth_failure_count = 0
+            ui._auth_locked_until = 0.0
+            ui.action_switch_user(required=False)
+            login_win = ui._login_window
+            root.update()
+
+            def descendants(widget):
+                result = []
+                for child in widget.winfo_children():
+                    result.append(child)
+                    result.extend(descendants(child))
+                return result
+
+            widgets = descendants(login_win)
+            confirm_labels = [
+                widget for widget in widgets
+                if isinstance(widget, tk.Label)
+                and str(widget.cget("text")) == "CONFIRM NEW PASSWORD"
+            ]
+            visible_entries = [
+                widget for widget in widgets
+                if widget.winfo_class() == "Entry"
+                and widget.winfo_ismapped()
+            ]
+            passed = (
+                login_win is not None
+                and smoke_roles == frozenset({"Admin"})
+                and len(confirm_labels) == 1
+                and not confirm_labels[0].winfo_ismapped()
+                and len(visible_entries) == 1
+                and login_win.winfo_height() <= 560
+            )
+            if not passed:
+                print(
+                    "[LOGIN UI SMOKE] FAILED - "
+                    f"roles={sorted(smoke_roles)}, "
+                    f"confirm_visible="
+                    f"{[item.winfo_ismapped() for item in confirm_labels]}, "
+                    f"visible_entries={len(visible_entries)}, "
+                    f"geometry={login_win.geometry()}"
+                )
+                return False
+            print(
+                "[LOGIN UI SMOKE] PASS - configured login surface verified"
+            )
+            return True
+    except Exception as exc:
+        print(f"[LOGIN UI SMOKE] FAILED - {type(exc).__name__}: {exc}")
+        return False
+    finally:
+        AUTH_ACCOUNTS_PATH = original_accounts_path
+        try:
+            if login_win is not None and login_win.winfo_exists():
+                login_win.destroy()
+        except tk.TclError:
+            pass
+        try:
+            if root is not None:
+                root.destroy()
+        except tk.TclError:
+            pass
+
+
 # ==============================================================================
 # BLOCK 9: APPLICATION ENTRY POINT
 # ==============================================================================
 if __name__ == "__main__":
-    if os.environ.get("SCADA_SELF_TEST") == "1":
+    if os.environ.get("SCADA_UI_SELF_TEST") == "1":
+        raise SystemExit(0 if run_login_ui_smoke_test() else 2)
+    elif os.environ.get("SCADA_SELF_TEST") == "1":
         # Safe packaged smoke test: validate required editable runtime assets
         # without opening IEC-104 sessions or starting the operator UI.
         required_assets = [

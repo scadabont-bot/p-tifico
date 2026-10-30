@@ -1,6 +1,6 @@
 Device Addres,Jian_Ge Id,PhysicalName,InfoName,Info_Index,Type,HissaveMode,Reverse,SetStr,ResetStr,SetVoice,ResetVoice,SetVoiceFile,ResetVoiceFile,AlertLevel,OpenAlertEnable,CloseAlertEnable,OpenRingEnable,CloseRingEnable,OpenFluteEnable,CloseFluteEnable,UseFlag,MansetFlag,Dummy0,Expression,Expression,eventype,ASDU,IOA
-8,8,1# G circuit breaker trip position,03YX0801000001,1,32,1,1,1,2,-1,-1,250,250,3,0,0,-1,-1,0,0,-1,0,0,,,0,2049,1
-8,8,1# G circuit breaker close position,03YX0801000002,2,143,1,1,1,2,-1,-1,0,0,3,-1,-1,-1,-1,0,0,-1,0,0,,,0,2049,2
+8,8,1# G circuit breaker trip position,03YX0801000001,1,32,1,0,1,2,-1,-1,250,250,3,0,0,-1,-1,0,0,-1,0,0,,,0,2049,1
+8,8,1# G circuit breaker close position,03YX0801000002,2,143,1,0,1,2,-1,-1,0,0,3,-1,-1,-1,-1,0,0,-1,0,0,,,0,2049,2
 8,8,excitation switch closing position,03YX0801000003,3,32,1,0,1,2,-1,-1,250,250,3,0,0,-1,-1,0,0,-1,0,0,,,0,2049,3
 8,8,excitation switch breaking position,03YX0801000004,4,32,1,0,1,2,-1,-1,250,250,3,0,0,-1,-1,0,0,-1,0,0,,,0,2049,4
 8,8,Control Circuit Fail,03YX0801000005,5,143,1,0,1,2,-1,-1,0,0,3,-1,-1,-1,-1,0,0,-1,0,0,,,0,2049,5
