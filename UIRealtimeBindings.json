@@ -14,7 +14,7 @@
       "IOA": 16388,
       "Coefficient": 0.00211438185,
       "CTPT": 0.10392,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "Add_Offset": "0",
       "Formula": "MULTIPLY_CTPT",
       "Unit": "kV",
@@ -36,7 +36,7 @@
       "IOA": 16389,
       "Coefficient": 0.00211438185,
       "CTPT": 0.10392,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "Add_Offset": "0",
       "Formula": "MULTIPLY_CTPT",
       "Unit": "kV",
@@ -58,7 +58,7 @@
       "IOA": 16390,
       "Coefficient": 0.00211438185,
       "CTPT": 0.10392,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "Add_Offset": "0",
       "Formula": "MULTIPLY_CTPT",
       "Unit": "kV",
@@ -80,7 +80,7 @@
       "IOA": 16388,
       "Coefficient": 0.00211438185,
       "CTPT": 0.10392,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "Add_Offset": "0",
       "Formula": "MULTIPLY_CTPT",
       "Unit": "kV",
@@ -102,7 +102,7 @@
       "IOA": 16389,
       "Coefficient": 0.00211438185,
       "CTPT": 0.10392,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "Add_Offset": "0",
       "Formula": "MULTIPLY_CTPT",
       "Unit": "kV",
@@ -124,7 +124,7 @@
       "IOA": 16390,
       "Coefficient": 0.00211438185,
       "CTPT": 0.10392,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "Add_Offset": "0",
       "Formula": "MULTIPLY_CTPT",
       "Unit": "kV",
@@ -146,7 +146,7 @@
       "IOA": 16388,
       "Coefficient": 0.00211438185,
       "CTPT": 0.10392,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "Add_Offset": "0",
       "Formula": "MULTIPLY_CTPT",
       "Unit": "kV",
@@ -167,8 +167,8 @@
       "ASDU": 257,
       "IOA": 16385,
       "Coefficient": 0.000183,
-      "CTPT": 500,
-      "Tolerance": 0,
+      "CTPT": 500.0,
+      "Tolerance": 0.0,
       "Add_Offset": "0",
       "Formula": "MULTIPLY_CTPT",
       "Unit": "A",
@@ -189,8 +189,8 @@
       "ASDU": 257,
       "IOA": 16391,
       "Coefficient": 0.03171386718,
-      "CTPT": 30,
-      "Tolerance": 0,
+      "CTPT": 30.0,
+      "Tolerance": 0.0,
       "Add_Offset": "0",
       "Formula": "MULTIPLY_CTPT",
       "Unit": "kW",
@@ -211,8 +211,8 @@
       "ASDU": 257,
       "IOA": 16392,
       "Coefficient": 0.03171386718,
-      "CTPT": 30,
-      "Tolerance": 0,
+      "CTPT": 30.0,
+      "Tolerance": 0.0,
       "Add_Offset": "0",
       "Formula": "MULTIPLY_CTPT",
       "Unit": "kVar",
@@ -234,7 +234,7 @@
       "IOA": 16388,
       "Coefficient": 0.00211438185,
       "CTPT": 0.10392,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "Add_Offset": "0",
       "Formula": "MULTIPLY_CTPT",
       "Unit": "kV",
@@ -255,8 +255,8 @@
       "ASDU": 513,
       "IOA": 16385,
       "Coefficient": 0.000183,
-      "CTPT": 500,
-      "Tolerance": 0,
+      "CTPT": 500.0,
+      "Tolerance": 0.0,
       "Add_Offset": "0",
       "Formula": "MULTIPLY_CTPT",
       "Unit": "A",
@@ -277,8 +277,8 @@
       "ASDU": 513,
       "IOA": 16391,
       "Coefficient": 0.03171386718,
-      "CTPT": 30,
-      "Tolerance": 0,
+      "CTPT": 30.0,
+      "Tolerance": 0.0,
       "Add_Offset": "0",
       "Formula": "MULTIPLY_CTPT",
       "Unit": "kW",
@@ -299,8 +299,8 @@
       "ASDU": 513,
       "IOA": 16392,
       "Coefficient": 0.03171386718,
-      "CTPT": 30,
-      "Tolerance": 0,
+      "CTPT": 30.0,
+      "Tolerance": 0.0,
       "Add_Offset": "0",
       "Formula": "MULTIPLY_CTPT",
       "Unit": "kVar",
@@ -322,7 +322,7 @@
       "IOA": 16395,
       "Coefficient": 0.0036619999999,
       "CTPT": 0.06,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "Add_Offset": "0.0",
       "Formula": "LINE_VOLTAGE",
       "Unit": "kV",
@@ -344,7 +344,7 @@
       "IOA": 16396,
       "Coefficient": 0.0036619999999,
       "CTPT": 0.06,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "Add_Offset": "0.0",
       "Formula": "LINE_VOLTAGE",
       "Unit": "kV",
@@ -366,7 +366,7 @@
       "IOA": 16397,
       "Coefficient": 0.0036619999999,
       "CTPT": 0.06,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "Add_Offset": "0.0",
       "Formula": "LINE_VOLTAGE",
       "Unit": "kV",
@@ -387,8 +387,8 @@
       "ASDU": 1537,
       "IOA": 16385,
       "Coefficient": 0.000183,
-      "CTPT": 500,
-      "Tolerance": 0,
+      "CTPT": 500.0,
+      "Tolerance": 0.0,
       "Add_Offset": "0.0",
       "Formula": "CURRENT_CT",
       "Unit": "A",
@@ -409,8 +409,8 @@
       "ASDU": 1537,
       "IOA": 16386,
       "Coefficient": 0.000183,
-      "CTPT": 500,
-      "Tolerance": 0,
+      "CTPT": 500.0,
+      "Tolerance": 0.0,
       "Add_Offset": "0.0",
       "Formula": "CURRENT_CT",
       "Unit": "A",
@@ -431,8 +431,8 @@
       "ASDU": 1537,
       "IOA": 16387,
       "Coefficient": 0.000183,
-      "CTPT": 500,
-      "Tolerance": 0,
+      "CTPT": 500.0,
+      "Tolerance": 0.0,
       "Add_Offset": "0.0",
       "Formula": "CURRENT_CT",
       "Unit": "A",
@@ -453,8 +453,8 @@
       "ASDU": 1537,
       "IOA": 16398,
       "Coefficient": 0.031713999999,
-      "CTPT": 30,
-      "Tolerance": 0,
+      "CTPT": 30.0,
+      "Tolerance": 0.0,
       "Add_Offset": "0.0",
       "Formula": "POWER",
       "Unit": "kW",
@@ -475,8 +475,8 @@
       "ASDU": 1537,
       "IOA": 16399,
       "Coefficient": 0.031713999999,
-      "CTPT": 30,
-      "Tolerance": 0,
+      "CTPT": 30.0,
+      "Tolerance": 0.0,
       "Add_Offset": "0.0",
       "Formula": "POWER",
       "Unit": "kVar",
@@ -496,9 +496,9 @@
       "Type": 5,
       "ASDU": 1537,
       "IOA": 16419,
-      "Coefficient": 0.000073242187497,
-      "CTPT": 1,
-      "Tolerance": 0,
+      "Coefficient": 7.3242187497e-05,
+      "CTPT": 1.0,
+      "Tolerance": 0.0,
       "Add_Offset": "50.0",
       "Formula": "FREQUENCY_OFFSET",
       "Unit": "Hz",
@@ -651,8 +651,8 @@
       "ASDU": 2049,
       "IOA": 16385,
       "Coefficient": 0.000183,
-      "CTPT": 500,
-      "Tolerance": 0,
+      "CTPT": 500.0,
+      "Tolerance": 0.0,
       "Add_Offset": "0.0",
       "Formula": "CURRENT_CT",
       "Unit": "A",
@@ -854,7 +854,7 @@
       "Decimals": "",
       "Info_Index": 4,
       "Type": 1,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -870,13 +870,13 @@
       "IOA": 16385,
       "Unit": "A",
       "Coefficient": 0.000183,
-      "CTPT": 15,
+      "CTPT": 15.0,
       "Formula": "CURRENT_CT",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 1,
       "Type": 1,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -898,7 +898,7 @@
       "Decimals": "",
       "Info_Index": 7,
       "Type": 3,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -920,7 +920,7 @@
       "Decimals": "",
       "Info_Index": 8,
       "Type": 4,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -942,7 +942,7 @@
       "Decimals": "",
       "Info_Index": 4,
       "Type": 1,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -958,13 +958,13 @@
       "IOA": 16385,
       "Unit": "A",
       "Coefficient": 0.000183,
-      "CTPT": 15,
+      "CTPT": 15.0,
       "Formula": "CURRENT_CT",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 1,
       "Type": 1,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -986,7 +986,7 @@
       "Decimals": "",
       "Info_Index": 7,
       "Type": 3,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1008,7 +1008,7 @@
       "Decimals": "",
       "Info_Index": 8,
       "Type": 4,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1074,7 +1074,7 @@
       "Decimals": "",
       "Info_Index": 7,
       "Type": 3,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1096,7 +1096,7 @@
       "Decimals": "",
       "Info_Index": 8,
       "Type": 4,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1118,7 +1118,7 @@
       "Decimals": "",
       "Info_Index": 4,
       "Type": 1,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1134,13 +1134,13 @@
       "IOA": 16385,
       "Unit": "A",
       "Coefficient": 0.000183,
-      "CTPT": 15,
+      "CTPT": 15.0,
       "Formula": "CURRENT_CT",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 1,
       "Type": 1,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1162,7 +1162,7 @@
       "Decimals": "",
       "Info_Index": 7,
       "Type": 3,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1184,7 +1184,7 @@
       "Decimals": "",
       "Info_Index": 8,
       "Type": 4,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1206,7 +1206,7 @@
       "Decimals": "",
       "Info_Index": 4,
       "Type": 1,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1222,13 +1222,13 @@
       "IOA": 16385,
       "Unit": "A",
       "Coefficient": 0.000183,
-      "CTPT": 15,
+      "CTPT": 15.0,
       "Formula": "CURRENT_CT",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 1,
       "Type": 1,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1250,7 +1250,7 @@
       "Decimals": "",
       "Info_Index": 7,
       "Type": 3,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1272,7 +1272,7 @@
       "Decimals": "",
       "Info_Index": 8,
       "Type": 4,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1294,7 +1294,7 @@
       "Decimals": "",
       "Info_Index": 4,
       "Type": 1,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1310,13 +1310,13 @@
       "IOA": 16385,
       "Unit": "A",
       "Coefficient": 0.000183,
-      "CTPT": 15,
+      "CTPT": 15.0,
       "Formula": "CURRENT_CT",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 1,
       "Type": 1,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1338,7 +1338,7 @@
       "Decimals": "",
       "Info_Index": 7,
       "Type": 3,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1354,13 +1354,13 @@
       "IOA": 16392,
       "Unit": "kVar",
       "Coefficient": 0.031713999999,
-      "CTPT": 1,
+      "CTPT": 1.0,
       "Formula": "POWER",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 8,
       "Type": 4,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1376,13 +1376,13 @@
       "IOA": 16388,
       "Unit": "kV",
       "Coefficient": 0.00211438185,
-      "CTPT": 1,
+      "CTPT": 1.0,
       "Formula": "LINE_VOLTAGE",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 4,
       "Type": 1,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1398,13 +1398,13 @@
       "IOA": 16385,
       "Unit": "A",
       "Coefficient": 0.000183,
-      "CTPT": 1,
+      "CTPT": 1.0,
       "Formula": "CURRENT_CT",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 1,
       "Type": 1,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1420,13 +1420,13 @@
       "IOA": 16391,
       "Unit": "kW",
       "Coefficient": 0.031713999999,
-      "CTPT": 1,
+      "CTPT": 1.0,
       "Formula": "POWER",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 7,
       "Type": 3,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1442,13 +1442,13 @@
       "IOA": 16392,
       "Unit": "kVar",
       "Coefficient": 0.031713999999,
-      "CTPT": 1,
+      "CTPT": 1.0,
       "Formula": "POWER",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 8,
       "Type": 4,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1464,13 +1464,13 @@
       "IOA": 16388,
       "Unit": "kV",
       "Coefficient": 0.00211438185,
-      "CTPT": 1,
+      "CTPT": 1.0,
       "Formula": "LINE_VOLTAGE",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 4,
       "Type": 1,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1486,13 +1486,13 @@
       "IOA": 16385,
       "Unit": "A",
       "Coefficient": 0.000183,
-      "CTPT": 1,
+      "CTPT": 1.0,
       "Formula": "CURRENT_CT",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 1,
       "Type": 1,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1508,13 +1508,13 @@
       "IOA": 16391,
       "Unit": "kW",
       "Coefficient": 0.031713999999,
-      "CTPT": 1,
+      "CTPT": 1.0,
       "Formula": "POWER",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 7,
       "Type": 3,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1530,13 +1530,13 @@
       "IOA": 16392,
       "Unit": "kVar",
       "Coefficient": 0.031713999999,
-      "CTPT": 1,
+      "CTPT": 1.0,
       "Formula": "POWER",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 8,
       "Type": 4,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1552,13 +1552,13 @@
       "IOA": 16388,
       "Unit": "kV",
       "Coefficient": 0.00211438185,
-      "CTPT": 1,
+      "CTPT": 1.0,
       "Formula": "LINE_VOLTAGE",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 4,
       "Type": 1,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1574,13 +1574,13 @@
       "IOA": 16385,
       "Unit": "A",
       "Coefficient": 0.000183,
-      "CTPT": 1,
+      "CTPT": 1.0,
       "Formula": "CURRENT_CT",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 1,
       "Type": 1,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1596,13 +1596,13 @@
       "IOA": 16391,
       "Unit": "kW",
       "Coefficient": 0.031713999999,
-      "CTPT": 1,
+      "CTPT": 1.0,
       "Formula": "POWER",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 7,
       "Type": 3,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1618,13 +1618,13 @@
       "IOA": 16392,
       "Unit": "kVar",
       "Coefficient": 0.031713999999,
-      "CTPT": 1,
+      "CTPT": 1.0,
       "Formula": "POWER",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 8,
       "Type": 4,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1640,13 +1640,13 @@
       "IOA": 16388,
       "Unit": "kV",
       "Coefficient": 0.00211438185,
-      "CTPT": 1,
+      "CTPT": 1.0,
       "Formula": "LINE_VOLTAGE",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 4,
       "Type": 1,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1662,13 +1662,13 @@
       "IOA": 16385,
       "Unit": "A",
       "Coefficient": 0.000183,
-      "CTPT": 1,
+      "CTPT": 1.0,
       "Formula": "CURRENT_CT",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 1,
       "Type": 1,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1684,13 +1684,13 @@
       "IOA": 16391,
       "Unit": "kW",
       "Coefficient": 0.031713999999,
-      "CTPT": 1,
+      "CTPT": 1.0,
       "Formula": "POWER",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 7,
       "Type": 3,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1706,13 +1706,13 @@
       "IOA": 16392,
       "Unit": "kVar",
       "Coefficient": 0.031713999999,
-      "CTPT": 1,
+      "CTPT": 1.0,
       "Formula": "POWER",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 8,
       "Type": 4,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1728,13 +1728,13 @@
       "IOA": 16388,
       "Unit": "kV",
       "Coefficient": 0.00211438185,
-      "CTPT": 1,
+      "CTPT": 1.0,
       "Formula": "LINE_VOLTAGE",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 4,
       "Type": 1,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1750,13 +1750,13 @@
       "IOA": 16385,
       "Unit": "A",
       "Coefficient": 0.000183,
-      "CTPT": 1,
+      "CTPT": 1.0,
       "Formula": "CURRENT_CT",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 1,
       "Type": 1,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1772,13 +1772,13 @@
       "IOA": 16391,
       "Unit": "kW",
       "Coefficient": 0.031713999999,
-      "CTPT": 1,
+      "CTPT": 1.0,
       "Formula": "POWER",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 7,
       "Type": 3,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1794,13 +1794,13 @@
       "IOA": 16392,
       "Unit": "kVar",
       "Coefficient": 0.031713999999,
-      "CTPT": 1,
+      "CTPT": 1.0,
       "Formula": "POWER",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 8,
       "Type": 4,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1822,7 +1822,7 @@
       "Decimals": "",
       "Info_Index": 4,
       "Type": 1,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1838,13 +1838,13 @@
       "IOA": 16385,
       "Unit": "A",
       "Coefficient": 0.000183,
-      "CTPT": 1,
+      "CTPT": 1.0,
       "Formula": "CURRENT_CT",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 1,
       "Type": 1,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1860,13 +1860,13 @@
       "IOA": 16391,
       "Unit": "kW",
       "Coefficient": 0.031713999999,
-      "CTPT": 1,
+      "CTPT": 1.0,
       "Formula": "POWER",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 7,
       "Type": 3,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1882,13 +1882,13 @@
       "IOA": 16392,
       "Unit": "kVar",
       "Coefficient": 0.031713999999,
-      "CTPT": 1,
+      "CTPT": 1.0,
       "Formula": "POWER",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 8,
       "Type": 4,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1904,13 +1904,13 @@
       "IOA": 16388,
       "Unit": "kV",
       "Coefficient": 0.00211438185,
-      "CTPT": 1,
+      "CTPT": 1.0,
       "Formula": "LINE_VOLTAGE",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 4,
       "Type": 1,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1926,13 +1926,13 @@
       "IOA": 16385,
       "Unit": "A",
       "Coefficient": 0.000183,
-      "CTPT": 1,
+      "CTPT": 1.0,
       "Formula": "CURRENT_CT",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 1,
       "Type": 1,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1948,13 +1948,13 @@
       "IOA": 16391,
       "Unit": "kW",
       "Coefficient": 0.031713999999,
-      "CTPT": 1,
+      "CTPT": 1.0,
       "Formula": "POWER",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 7,
       "Type": 3,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1970,13 +1970,13 @@
       "IOA": 16392,
       "Unit": "kVar",
       "Coefficient": 0.031713999999,
-      "CTPT": 1,
+      "CTPT": 1.0,
       "Formula": "POWER",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 8,
       "Type": 4,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -1998,7 +1998,7 @@
       "Decimals": "",
       "Info_Index": 4,
       "Type": 1,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -2014,13 +2014,13 @@
       "IOA": 16385,
       "Unit": "A",
       "Coefficient": 0.000183,
-      "CTPT": 1,
+      "CTPT": 1.0,
       "Formula": "CURRENT_CT",
       "Add_Offset": "0.0",
       "Decimals": "",
       "Info_Index": 1,
       "Type": 1,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -2042,7 +2042,7 @@
       "Decimals": "",
       "Info_Index": 7,
       "Type": 3,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -2064,7 +2064,7 @@
       "Decimals": "",
       "Info_Index": 8,
       "Type": 4,
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "CTPT_Source": "Parameter Setting",
       "Engineering_Source": "Parameter Setting"
     },
@@ -2784,10 +2784,10 @@
       "Type": 1,
       "ASDU": 257,
       "IOA": 16393,
-      "Coefficient": 0.000073242187496,
-      "CTPT": 1,
+      "Coefficient": 7.3242187496e-05,
+      "CTPT": 1.0,
       "CTPT_Source": "Parameter Setting",
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "Add_Offset": "50",
       "Formula": "FREQUENCY_OFFSET",
       "Unit": "Hz",
@@ -2806,10 +2806,10 @@
       "Type": 1,
       "ASDU": 513,
       "IOA": 16393,
-      "Coefficient": 0.000073242187496,
-      "CTPT": 1,
+      "Coefficient": 7.3242187496e-05,
+      "CTPT": 1.0,
       "CTPT_Source": "Parameter Setting",
-      "Tolerance": 0,
+      "Tolerance": 0.0,
       "Add_Offset": "50",
       "Formula": "FREQUENCY_OFFSET",
       "Unit": "Hz",
@@ -2839,8 +2839,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "run:brk_d2": {
       "page": "Run Monitor",
@@ -2863,8 +2863,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "run:brk_d3": {
       "page": "Run Monitor",
@@ -2887,8 +2887,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "run:brk_d4": {
       "page": "Run Monitor",
@@ -2911,8 +2911,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "run:brk_d5": {
       "page": "Run Monitor",
@@ -2935,8 +2935,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "run:brk_d6": {
       "page": "Run Monitor",
@@ -2959,8 +2959,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "run:brk_d7": {
       "page": "Run Monitor",
@@ -2983,8 +2983,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "run:brk_d8": {
       "page": "Run Monitor",
@@ -3007,8 +3007,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "run:brk_d9": {
       "page": "Run Monitor",
@@ -3031,8 +3031,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "run:brk_d10": {
       "page": "Run Monitor",
@@ -3055,8 +3055,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "run:brk_d11": {
       "page": "Run Monitor",
@@ -3079,8 +3079,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "run:brk_d12": {
       "page": "Run Monitor",
@@ -3103,8 +3103,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "run:brk_d13": {
       "page": "Run Monitor",
@@ -3127,8 +3127,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "run:brk_d14": {
       "page": "Run Monitor",
@@ -3151,8 +3151,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "system:breaker:feeder_01": {
       "page": "System Configuration",
@@ -3175,8 +3175,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "system:breaker:feeder_02": {
       "page": "System Configuration",
@@ -3199,8 +3199,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "system:breaker:feeder_03": {
       "page": "System Configuration",
@@ -3223,8 +3223,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "system:breaker:feeder_04": {
       "page": "System Configuration",
@@ -3247,8 +3247,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "system:breaker:feeder_05": {
       "page": "System Configuration",
@@ -3271,8 +3271,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "system:breaker:feeder_06": {
       "page": "System Configuration",
@@ -3295,8 +3295,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "system:breaker:feeder_07": {
       "page": "System Configuration",
@@ -3319,8 +3319,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "system:breaker:feeder_08": {
       "page": "System Configuration",
@@ -3343,8 +3343,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "system:breaker:feeder_09": {
       "page": "System Configuration",
@@ -3367,8 +3367,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "system:breaker:feeder_10": {
       "page": "System Configuration",
@@ -3391,8 +3391,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "system:breaker:feeder_11": {
       "page": "System Configuration",
@@ -3415,8 +3415,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "system:breaker:feeder_12": {
       "page": "System Configuration",
@@ -3439,8 +3439,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "system:breaker:feeder_13": {
       "page": "System Configuration",
@@ -3463,8 +3463,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "system:breaker:feeder_14": {
       "page": "System Configuration",
@@ -3487,8 +3487,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "aux:breaker:feeder_01": {
       "page": "Auxiliary System",
@@ -3511,8 +3511,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "aux:breaker:feeder_02": {
       "page": "Auxiliary System",
@@ -3535,8 +3535,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "aux:breaker:feeder_03": {
       "page": "Auxiliary System",
@@ -3559,8 +3559,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "aux:breaker:feeder_04": {
       "page": "Auxiliary System",
@@ -3583,8 +3583,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "aux:breaker:feeder_05": {
       "page": "Auxiliary System",
@@ -3607,8 +3607,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "aux:breaker:feeder_06": {
       "page": "Auxiliary System",
@@ -3631,8 +3631,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "aux:breaker:feeder_07": {
       "page": "Auxiliary System",
@@ -3655,8 +3655,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "aux:breaker:feeder_08": {
       "page": "Auxiliary System",
@@ -3679,8 +3679,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "aux:breaker:feeder_09": {
       "page": "Auxiliary System",
@@ -3703,8 +3703,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "aux:breaker:feeder_10": {
       "page": "Auxiliary System",
@@ -3727,8 +3727,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "aux:breaker:feeder_11": {
       "page": "Auxiliary System",
@@ -3751,8 +3751,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "aux:breaker:feeder_12": {
       "page": "Auxiliary System",
@@ -3775,8 +3775,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "aux:breaker:feeder_13": {
       "page": "Auxiliary System",
@@ -3799,8 +3799,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "aux:breaker:feeder_14": {
       "page": "Auxiliary System",
@@ -3823,8 +3823,8 @@
       "Reverse": "0",
       "operator": "=",
       "threshold": 1,
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "aux:breaker:wire_1": {
       "page": "Auxiliary System",
@@ -3845,8 +3845,9 @@
       "ResetStr": "2",
       "Reverse": "0",
       "source_id": "wire_1",
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020",
+      "contact_mode": "single"
     },
     "aux:breaker:wire_2": {
       "page": "Auxiliary System",
@@ -3867,31 +3868,32 @@
       "ResetStr": "2",
       "Reverse": "0",
       "source_id": "wire_2",
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020",
+      "contact_mode": "single"
     },
     "aux:breaker:aux_1_hv": {
       "page": "Auxiliary System",
       "element": "Auxiliary Transformer 1 HV breaker",
       "mode": "default",
       "source_type": "status",
-      "field": "breaker position",
+      "field": "HV breaker close position",
       "Device_Addr": "10.100.163.1",
       "Bay_Name": "1# Auxiliary Transformer",
-      "Physical_Name": "breaker position",
-      "Info_Name": "01YX0302000002",
-      "Info_Index": "35",
+      "Physical_Name": "HV breaker close position",
+      "Info_Name": "01YX0302000004",
+      "Info_Index": "37",
       "Jian_Ge_Id": "3",
       "ASDU": 770,
-      "IOA": 2,
+      "IOA": 4,
       "Source_Kind": "rectangle_status_csv",
       "SetStr": "1",
       "ResetStr": "2",
       "Reverse": "0",
       "contact_mode": "single",
       "source_id": "aux_1_hv",
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "aux:breaker:feed_water_3": {
       "page": "Auxiliary System",
@@ -3912,31 +3914,31 @@
       "ResetStr": "2",
       "Reverse": "0",
       "source_id": "feed_water_3",
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "aux:breaker:aux_2_hv": {
       "page": "Auxiliary System",
       "element": "Auxiliary Transformer 2 HV breaker",
       "mode": "default",
       "source_type": "status",
-      "field": "breaker position",
+      "field": "HV breaker close position",
       "Device_Addr": "10.100.163.1",
       "Bay_Name": "2# Auxiliary Transformer",
-      "Physical_Name": "breaker position",
-      "Info_Name": "01YX0402000002",
-      "Info_Index": "35",
+      "Physical_Name": "HV breaker close position",
+      "Info_Name": "01YX0402000004",
+      "Info_Index": "37",
       "Jian_Ge_Id": "4",
       "ASDU": 1026,
-      "IOA": 2,
+      "IOA": 4,
       "Source_Kind": "rectangle_status_csv",
       "SetStr": "1",
       "ResetStr": "2",
       "Reverse": "0",
       "contact_mode": "single",
       "source_id": "aux_2_hv",
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "aux:breaker:aux_1_lv": {
       "page": "Auxiliary System",
@@ -3956,10 +3958,24 @@
       "SetStr": "1",
       "ResetStr": "2",
       "Reverse": "0",
-      "contact_mode": "single",
+      "contact_mode": "paired",
       "source_id": "aux_1_lv",
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020",
+      "open_binding": {
+        "Device_Addr": "10.100.163.1",
+        "Bay_Name": "1# Auxiliary Transformer",
+        "Physical_Name": "UV breaker trip position",
+        "Info_Name": "01YX0302000005",
+        "Info_Index": "38",
+        "Jian_Ge_Id": "3",
+        "ASDU": 770,
+        "IOA": 5,
+        "Source_Kind": "rectangle_status_csv",
+        "SetStr": "1",
+        "ResetStr": "2",
+        "Reverse": "0"
+      }
     },
     "aux:breaker:aux_2_lv": {
       "page": "Auxiliary System",
@@ -3979,10 +3995,24 @@
       "SetStr": "1",
       "ResetStr": "2",
       "Reverse": "0",
-      "contact_mode": "single",
+      "contact_mode": "paired",
       "source_id": "aux_2_lv",
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020",
+      "open_binding": {
+        "Device_Addr": "10.100.163.1",
+        "Bay_Name": "2# Auxiliary Transformer",
+        "Physical_Name": "UV breaker trip position",
+        "Info_Name": "01YX0402000005",
+        "Info_Index": "38",
+        "Jian_Ge_Id": "4",
+        "ASDU": 1026,
+        "IOA": 5,
+        "Source_Kind": "rectangle_status_csv",
+        "SetStr": "1",
+        "ResetStr": "2",
+        "Reverse": "0"
+      }
     },
     "system:breaker:wire_1": {
       "page": "System Configuration",
@@ -4003,8 +4033,9 @@
       "ResetStr": "2",
       "Reverse": "0",
       "source_id": "wire_1",
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020",
+      "contact_mode": "single"
     },
     "system:breaker:wire_2": {
       "page": "System Configuration",
@@ -4025,8 +4056,9 @@
       "ResetStr": "2",
       "Reverse": "0",
       "source_id": "wire_2",
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020",
+      "contact_mode": "single"
     },
     "system:breaker:generator_1": {
       "page": "System Configuration",
@@ -4046,33 +4078,47 @@
       "SetStr": "1",
       "ResetStr": "2",
       "Reverse": "0",
-      "contact_mode": "single",
+      "contact_mode": "paired",
       "source_id": "generator_1",
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020",
+      "open_binding": {
+        "Device_Addr": "10.100.163.2",
+        "Bay_Name": "1# Measure Control Box",
+        "Physical_Name": "1# G circuit breaker trip position",
+        "Info_Name": "02YX0601000001",
+        "Info_Index": "1",
+        "Jian_Ge_Id": "6",
+        "ASDU": 1537,
+        "IOA": 1,
+        "Source_Kind": "rectangle_status_csv",
+        "SetStr": "1",
+        "ResetStr": "2",
+        "Reverse": "0"
+      }
     },
     "system:breaker:aux_1_hv": {
       "page": "System Configuration",
       "element": "Auxiliary Transformer 1 HV breaker",
       "mode": "default",
       "source_type": "status",
-      "field": "breaker position",
+      "field": "HV breaker close position",
       "Device_Addr": "10.100.163.1",
       "Bay_Name": "1# Auxiliary Transformer",
-      "Physical_Name": "breaker position",
-      "Info_Name": "01YX0302000002",
-      "Info_Index": "35",
+      "Physical_Name": "HV breaker close position",
+      "Info_Name": "01YX0302000004",
+      "Info_Index": "37",
       "Jian_Ge_Id": "3",
       "ASDU": 770,
-      "IOA": 2,
+      "IOA": 4,
       "Source_Kind": "rectangle_status_csv",
       "SetStr": "1",
       "ResetStr": "2",
       "Reverse": "0",
       "contact_mode": "single",
       "source_id": "aux_1_hv",
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "system:breaker:feed_water_3": {
       "page": "System Configuration",
@@ -4093,31 +4139,31 @@
       "ResetStr": "2",
       "Reverse": "0",
       "source_id": "feed_water_3",
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "system:breaker:aux_2_hv": {
       "page": "System Configuration",
       "element": "Auxiliary Transformer 2 HV breaker",
       "mode": "default",
       "source_type": "status",
-      "field": "breaker position",
+      "field": "HV breaker close position",
       "Device_Addr": "10.100.163.1",
       "Bay_Name": "2# Auxiliary Transformer",
-      "Physical_Name": "breaker position",
-      "Info_Name": "01YX0402000002",
-      "Info_Index": "35",
+      "Physical_Name": "HV breaker close position",
+      "Info_Name": "01YX0402000004",
+      "Info_Index": "37",
       "Jian_Ge_Id": "4",
       "ASDU": 1026,
-      "IOA": 2,
+      "IOA": 4,
       "Source_Kind": "rectangle_status_csv",
       "SetStr": "1",
       "ResetStr": "2",
       "Reverse": "0",
       "contact_mode": "single",
       "source_id": "aux_2_hv",
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020"
     },
     "system:breaker:generator_2": {
       "page": "System Configuration",
@@ -4137,10 +4183,24 @@
       "SetStr": "1",
       "ResetStr": "2",
       "Reverse": "0",
-      "contact_mode": "single",
+      "contact_mode": "paired",
       "source_id": "generator_2",
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020",
+      "open_binding": {
+        "Device_Addr": "10.100.163.3",
+        "Bay_Name": "2# Measure Control Box",
+        "Physical_Name": "1# G circuit breaker trip position",
+        "Info_Name": "03YX0801000001",
+        "Info_Index": "1",
+        "Jian_Ge_Id": "8",
+        "ASDU": 2049,
+        "IOA": 1,
+        "Source_Kind": "rectangle_status_csv",
+        "SetStr": "1",
+        "ResetStr": "2",
+        "Reverse": "0"
+      }
     },
     "system:breaker:aux_1_lv": {
       "page": "System Configuration",
@@ -4160,10 +4220,24 @@
       "SetStr": "1",
       "ResetStr": "2",
       "Reverse": "0",
-      "contact_mode": "single",
+      "contact_mode": "paired",
       "source_id": "aux_1_lv",
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020",
+      "open_binding": {
+        "Device_Addr": "10.100.163.1",
+        "Bay_Name": "1# Auxiliary Transformer",
+        "Physical_Name": "UV breaker trip position",
+        "Info_Name": "01YX0302000005",
+        "Info_Index": "38",
+        "Jian_Ge_Id": "3",
+        "ASDU": 770,
+        "IOA": 5,
+        "Source_Kind": "rectangle_status_csv",
+        "SetStr": "1",
+        "ResetStr": "2",
+        "Reverse": "0"
+      }
     },
     "system:breaker:aux_2_lv": {
       "page": "System Configuration",
@@ -4183,10 +4257,24 @@
       "SetStr": "1",
       "ResetStr": "2",
       "Reverse": "0",
-      "contact_mode": "single",
+      "contact_mode": "paired",
       "source_id": "aux_2_lv",
-      "on_color": "#ff2020",
-      "off_color": "#14d84a"
+      "on_color": "#14d84a",
+      "off_color": "#ff2020",
+      "open_binding": {
+        "Device_Addr": "10.100.163.1",
+        "Bay_Name": "2# Auxiliary Transformer",
+        "Physical_Name": "UV breaker trip position",
+        "Info_Name": "01YX0402000005",
+        "Info_Index": "38",
+        "Jian_Ge_Id": "4",
+        "ASDU": 1026,
+        "IOA": 5,
+        "Source_Kind": "rectangle_status_csv",
+        "SetStr": "1",
+        "ResetStr": "2",
+        "Reverse": "0"
+      }
     }
   }
 }

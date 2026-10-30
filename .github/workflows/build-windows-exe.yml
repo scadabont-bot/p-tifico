@@ -2,6 +2,16 @@ name: Build Windows installer
 
 on:
   workflow_dispatch:
+    inputs:
+      target:
+        description: Installer target
+        required: true
+        default: pc1
+        type: choice
+        options:
+          - pc1
+          - pc2
+          - both
   push:
     branches: [main, master]
   pull_request:
@@ -11,6 +21,8 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      BUILD_TARGET: "${{ github.event_name == 'workflow_dispatch' && inputs.target || 'both' }}"
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -70,18 +82,31 @@ jobs:
         shell: pwsh
         run: |
           $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          & $compiler "installer\p-tifico-backup.iss"
-          & $compiler `
-            "/DMyOutputBaseFilename=p-tifico-backup-PC2-Setup" `
-            "installer\p-tifico-backup.iss"
+          if ($env:BUILD_TARGET -in @("pc1", "both")) {
+            & $compiler "installer\p-tifico-backup.iss"
+            if ($LASTEXITCODE -ne 0) {
+              throw "PC1 installer build failed."
+            }
+          }
+          if ($env:BUILD_TARGET -in @("pc2", "both")) {
+            & $compiler `
+              "/DMyOutputBaseFilename=p-tifico-backup-PC2-Setup" `
+              "installer\p-tifico-backup.iss"
+            if ($LASTEXITCODE -ne 0) {
+              throw "PC2 installer build failed."
+            }
+          }
 
-      - name: Install and verify both packaged applications
+      - name: Install and verify selected packaged applications
         shell: pwsh
         run: |
-          $installerNames = @(
-            "p-tifico-backup-Setup.exe",
-            "p-tifico-backup-PC2-Setup.exe"
-          )
+          $installerNames = @()
+          if ($env:BUILD_TARGET -in @("pc1", "both")) {
+            $installerNames += "p-tifico-backup-Setup.exe"
+          }
+          if ($env:BUILD_TARGET -in @("pc2", "both")) {
+            $installerNames += "p-tifico-backup-PC2-Setup.exe"
+          }
           foreach ($installerName in $installerNames) {
             $installer = Resolve-Path (Join-Path "dist" $installerName)
             $installDir = Join-Path `
@@ -223,10 +248,13 @@ jobs:
       - name: Create checksums
         shell: pwsh
         run: |
-          $installers = @(
-            "p-tifico-backup-Setup.exe",
-            "p-tifico-backup-PC2-Setup.exe"
-          )
+          $installers = @()
+          if ($env:BUILD_TARGET -in @("pc1", "both")) {
+            $installers += "p-tifico-backup-Setup.exe"
+          }
+          if ($env:BUILD_TARGET -in @("pc2", "both")) {
+            $installers += "p-tifico-backup-PC2-Setup.exe"
+          }
           foreach ($name in $installers) {
             $path = Join-Path "dist" $name
             $hash = (Get-FileHash $path -Algorithm SHA256).Hash.ToLowerInvariant()

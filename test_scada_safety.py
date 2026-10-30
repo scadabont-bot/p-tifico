@@ -248,13 +248,13 @@ class BreakerMappingTests(unittest.TestCase):
     def test_monitor_breakers_match_authoritative_status_addresses(self):
         expected = {
             ("G1", "j-main"): (258, 2, None, 0),
-            ("G1", "j-generator"): (1537, 2, None, 0),
+            ("G1", "j-generator"): (1537, 2, 1, 0),
             ("G1", "j-transformer"): (770, 2, None, 0),
-            ("G1", "j-transformer-bottom"): (770, 6, None, 0),
+            ("G1", "j-transformer-bottom"): (770, 6, 5, 0),
             ("G2", "j-main"): (514, 2, None, 0),
-            ("G2", "j-generator"): (2049, 2, None, 0),
+            ("G2", "j-generator"): (2049, 2, 1, 0),
             ("G2", "j-transformer"): (1026, 2, None, 0),
-            ("G2", "j-transformer-bottom"): (1026, 6, None, 0),
+            ("G2", "j-transformer-bottom"): (1026, 6, 5, 0),
         }
         persisted_keys = {
             ("G1", "j-main"): (
@@ -301,6 +301,16 @@ class BreakerMappingTests(unittest.TestCase):
                 self.assertEqual(
                     binding["false_color"], scada.BREAKER_OPEN_COLOR,
                 )
+                self.assertEqual(
+                    binding["contact_mode"],
+                    "paired" if wanted[2] is not None else "single",
+                )
+            persisted_wanted = (
+                wanted[0],
+                4 if rectangle == "j-transformer" else wanted[1],
+                wanted[2],
+                wanted[3],
+            )
             for persisted_key in persisted_keys[(panel, rectangle)]:
                 persisted = self.persisted_statuses[persisted_key]
                 self.assertEqual(
@@ -309,8 +319,22 @@ class BreakerMappingTests(unittest.TestCase):
                         int(persisted["IOA"]),
                         int(persisted["Reverse"]),
                     ),
-                    (wanted[0], wanted[1], wanted[3]),
+                    (
+                        persisted_wanted[0],
+                        persisted_wanted[1],
+                        persisted_wanted[3],
+                    ),
                     f"persisted {persisted_key}",
+                )
+                persisted_open = persisted.get("open_binding", {})
+                self.assertEqual(
+                    int(persisted_open["IOA"]) if persisted_open else None,
+                    persisted_wanted[2],
+                    f"persisted open contact {persisted_key}",
+                )
+                self.assertEqual(
+                    persisted["contact_mode"],
+                    "paired" if persisted_wanted[2] is not None else "single",
                 )
                 self.assertEqual(
                     persisted["on_color"], scada.BREAKER_CLOSED_COLOR,
@@ -319,46 +343,90 @@ class BreakerMappingTests(unittest.TestCase):
                     persisted["off_color"], scada.BREAKER_OPEN_COLOR,
                 )
 
-    def test_authoritative_breaker_points_use_red_closed_green_open(self):
+    def test_paired_breaker_contacts_cover_all_four_combinations(self):
+        binding = self.config["G1"]["rectangles"]["j-generator"]
+        open_binding = scada._companion_open_status_binding(binding)
+        self.assertEqual(binding["contact_mode"], "paired")
+        self.assertEqual(open_binding["Info_Name"], "02YX0601000001")
+        ip = binding["Device_Addr"]
+        close_key = (ip, "info", binding["Info_Name"])
+        open_key = (ip, "info", open_binding["Info_Name"])
+        scada.VINCI_STATUS[ip] = True
+
+        cases = {
+            (1, 0): ("CLOSED", True, scada.BREAKER_CLOSED_COLOR, "GOOD"),
+            (0, 1): ("OPEN", False, scada.BREAKER_OPEN_COLOR, "GOOD"),
+            (0, 0): (
+                "UNKNOWN", None, scada.BREAKER_UNKNOWN_COLOR,
+                "CONTACT INDETERMINATE",
+            ),
+            (1, 1): (
+                "INVALID", None, scada.BREAKER_INVALID_COLOR,
+                "CONTACT CONFLICT",
+            ),
+        }
+        for contacts, wanted in cases.items():
+            with self.subTest(close=contacts[0], opened=contacts[1]):
+                scada.STATUS_VALUE_STORE[close_key] = contacts[0]
+                scada.STATUS_VALUE_STORE[open_key] = contacts[1]
+                state = scada._digital_breaker_snapshot(binding)
+                self.assertEqual(
+                    (
+                        state["state"], state["active"],
+                        state["color"], state["quality"],
+                    ),
+                    wanted,
+                )
+
+    def test_main_and_high_voltage_breakers_remain_single_contact(self):
         for panel in ("G1", "G2"):
-            for rectangle, binding in self.config[panel]["rectangles"].items():
+            for rectangle in ("j-main", "j-transformer"):
+                binding = self.config[panel]["rectangles"][rectangle]
                 with self.subTest(panel=panel, rectangle=rectangle):
-                    ip = binding["Device_Addr"]
                     self.assertEqual(binding["contact_mode"], "single")
                     self.assertFalse(
                         scada._companion_open_status_binding(binding)
                     )
-                    scada.VINCI_STATUS[ip] = True
-                    scada.STATUS_VALUE_STORE.clear()
 
-                    scada.STATUS_VALUE_STORE[
-                        (ip, "info", binding["Info_Name"])
-                    ] = 1
-                    closed = scada._digital_breaker_snapshot(binding)
+    def test_textual_close_and_open_values_drive_actual_breaker_state(self):
+        binding = self.config["G1"]["rectangles"]["j-main"]
+        ip = binding["Device_Addr"]
+        key = (ip, "info", binding["Info_Name"])
+        scada.VINCI_STATUS[ip] = True
 
-                    scada.STATUS_VALUE_STORE[
-                        (ip, "info", binding["Info_Name"])
-                    ] = 0
-                    opened = scada._digital_breaker_snapshot(binding)
+        scada.STATUS_VALUE_STORE[key] = "Close"
+        closed = scada._digital_breaker_snapshot(binding)
+        self.assertEqual(
+            (closed["raw_yx"], closed["state"], closed["color"]),
+            ("Close", "CLOSED", scada.BREAKER_CLOSED_COLOR),
+        )
 
-                    self.assertEqual(
-                        (
-                            closed["state"],
-                            closed["color"],
-                            closed["quality"],
-                        ),
-                        ("CLOSED", scada.BREAKER_CLOSED_COLOR, "GOOD"),
-                    )
-                    self.assertEqual(
-                        (
-                            opened["state"],
-                            opened["color"],
-                            opened["quality"],
-                        ),
-                        ("OPEN", scada.BREAKER_OPEN_COLOR, "GOOD"),
-                    )
+        scada.STATUS_VALUE_STORE[key] = "Open"
+        opened = scada._digital_breaker_snapshot(binding)
+        self.assertEqual(
+            (opened["raw_yx"], opened["state"], opened["color"]),
+            ("Open", "OPEN", scada.BREAKER_OPEN_COLOR),
+        )
 
-    def test_offline_breaker_is_unknown_not_green_open(self):
+    def test_unrecognized_text_is_unknown_not_open(self):
+        binding = self.config["G1"]["rectangles"]["j-main"]
+        ip = binding["Device_Addr"]
+        scada.VINCI_STATUS[ip] = True
+        scada.STATUS_VALUE_STORE[
+            (ip, "info", binding["Info_Name"])
+        ] = "Not Available"
+        state = scada._digital_breaker_snapshot(binding)
+        self.assertEqual(
+            (
+                state["state"],
+                state["active"],
+                state["color"],
+                state["quality"],
+            ),
+            ("UNKNOWN", None, scada.BREAKER_UNKNOWN_COLOR, "INVALID VALUE"),
+        )
+
+    def test_offline_breaker_is_unknown_not_open(self):
         binding = self.config["G1"]["rectangles"]["j-main"]
         scada.VINCI_STATUS[binding["Device_Addr"]] = False
         state = scada._digital_breaker_snapshot(binding)
@@ -375,9 +443,11 @@ class BreakerMappingTests(unittest.TestCase):
     def test_run_monitor_uses_same_digital_generator_state(self):
         binding = scada._run_monitor_breaker_binding("brk_g1")
         ip = binding["Device_Addr"]
-        self.assertFalse(scada._companion_open_status_binding(binding))
+        open_binding = scada._companion_open_status_binding(binding)
+        self.assertEqual(open_binding["Info_Name"], "02YX0601000001")
         scada.VINCI_STATUS[ip] = True
         scada.STATUS_VALUE_STORE[(ip, "info", binding["Info_Name"])] = 1
+        scada.STATUS_VALUE_STORE[(ip, "info", open_binding["Info_Name"])] = 0
         scada.DATA_STORE.setdefault(ip, {})["Ia"] = 0.0
 
         state_without_current = scada._run_monitor_breaker_snapshot("brk_g1")
@@ -391,9 +461,9 @@ class BreakerMappingTests(unittest.TestCase):
             state_with_current["effective_yx"],
         )
 
-    def test_all_breaker_surfaces_use_red_closed_green_open(self):
-        self.assertEqual(scada.BREAKER_CLOSED_COLOR, "#ff2020")
-        self.assertEqual(scada.BREAKER_OPEN_COLOR, "#14d84a")
+    def test_all_breaker_surfaces_use_green_closed_red_open(self):
+        self.assertEqual(scada.BREAKER_CLOSED_COLOR, "#14d84a")
+        self.assertEqual(scada.BREAKER_OPEN_COLOR, "#ff2020")
         surfaces = []
         for display_key in scada.RUN_MONITOR_BREAKER_SOURCE_BY_KEY:
             surfaces.append((
