@@ -1,5 +1,5 @@
 #define MyAppName "p-tifico-backup"
-#define MyAppVersion "2.6.5"
+#define MyAppVersion "2.6.6"
 #define MyAppPublisher "TIFICO"
 #define MyAppExeName "p-tifico-backup.exe"
 
@@ -60,7 +60,8 @@ Source: "..\CommunicationConfig.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\MQTTConfig.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\UIRealtimeBindings.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\MonitorTVConfig.json"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\UserAccounts.json"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\UserAccounts.json"; DestDir: "{app}"; Flags: onlyifdoesntexist
+Source: "..\UserAccounts.seed.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\CBZ8000AppData.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\ListSetting *.csv"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\StatusSetting *.csv"; DestDir: "{app}"; Flags: ignoreversion

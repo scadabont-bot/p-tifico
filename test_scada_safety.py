@@ -249,22 +249,34 @@ class BreakerMappingTests(unittest.TestCase):
         expected = {
             ("G1", "j-main"): (258, 2, None, 0),
             ("G1", "j-generator"): (1537, 2, None, 0),
-            ("G1", "j-transformer"): (770, 4, 3, 0),
-            ("G1", "j-transformer-bottom"): (770, 6, 5, 0),
+            ("G1", "j-transformer"): (770, 2, None, 0),
+            ("G1", "j-transformer-bottom"): (770, 6, None, 0),
             ("G2", "j-main"): (514, 2, None, 0),
             ("G2", "j-generator"): (2049, 2, None, 0),
-            ("G2", "j-transformer"): (1026, 4, 3, 0),
-            ("G2", "j-transformer-bottom"): (1026, 6, 5, 0),
+            ("G2", "j-transformer"): (1026, 2, None, 0),
+            ("G2", "j-transformer-bottom"): (1026, 6, None, 0),
         }
         persisted_keys = {
-            ("G1", "j-main"): "system:breaker:wire_1",
-            ("G1", "j-generator"): "system:breaker:generator_1",
-            ("G1", "j-transformer"): "system:breaker:aux_1_hv",
-            ("G1", "j-transformer-bottom"): "system:breaker:aux_1_lv",
-            ("G2", "j-main"): "system:breaker:wire_2",
-            ("G2", "j-generator"): "system:breaker:generator_2",
-            ("G2", "j-transformer"): "system:breaker:aux_2_hv",
-            ("G2", "j-transformer-bottom"): "system:breaker:aux_2_lv",
+            ("G1", "j-main"): (
+                "system:breaker:wire_1", "aux:breaker:wire_1",
+            ),
+            ("G1", "j-generator"): ("system:breaker:generator_1",),
+            ("G1", "j-transformer"): (
+                "system:breaker:aux_1_hv", "aux:breaker:aux_1_hv",
+            ),
+            ("G1", "j-transformer-bottom"): (
+                "system:breaker:aux_1_lv", "aux:breaker:aux_1_lv",
+            ),
+            ("G2", "j-main"): (
+                "system:breaker:wire_2", "aux:breaker:wire_2",
+            ),
+            ("G2", "j-generator"): ("system:breaker:generator_2",),
+            ("G2", "j-transformer"): (
+                "system:breaker:aux_2_hv", "aux:breaker:aux_2_hv",
+            ),
+            ("G2", "j-transformer-bottom"): (
+                "system:breaker:aux_2_lv", "aux:breaker:aux_2_lv",
+            ),
         }
         for (panel, rectangle), wanted in expected.items():
             configured = self.config[panel]["rectangles"][rectangle]
@@ -289,50 +301,62 @@ class BreakerMappingTests(unittest.TestCase):
                 self.assertEqual(
                     binding["false_color"], scada.BREAKER_OPEN_COLOR,
                 )
-            persisted = self.persisted_statuses[
-                persisted_keys[(panel, rectangle)]
-            ]
-            self.assertEqual(
-                (
-                    int(persisted["ASDU"]),
-                    int(persisted["IOA"]),
-                    int(persisted["Reverse"]),
-                ),
-                (wanted[0], wanted[1], wanted[3]),
-                f"persisted {panel} {rectangle}",
-            )
-            self.assertEqual(
-                persisted["on_color"], scada.BREAKER_CLOSED_COLOR,
-            )
-            self.assertEqual(
-                persisted["off_color"], scada.BREAKER_OPEN_COLOR,
-            )
+            for persisted_key in persisted_keys[(panel, rectangle)]:
+                persisted = self.persisted_statuses[persisted_key]
+                self.assertEqual(
+                    (
+                        int(persisted["ASDU"]),
+                        int(persisted["IOA"]),
+                        int(persisted["Reverse"]),
+                    ),
+                    (wanted[0], wanted[1], wanted[3]),
+                    f"persisted {persisted_key}",
+                )
+                self.assertEqual(
+                    persisted["on_color"], scada.BREAKER_CLOSED_COLOR,
+                )
+                self.assertEqual(
+                    persisted["off_color"], scada.BREAKER_OPEN_COLOR,
+                )
 
-    def test_authoritative_generator_contact_uses_green_closed_red_open(self):
+    def test_authoritative_breaker_points_use_green_closed_red_open(self):
         for panel in ("G1", "G2"):
-            binding = self.config[panel]["rectangles"]["j-generator"]
-            ip = binding["Device_Addr"]
-            self.assertFalse(scada._companion_open_status_binding(binding))
-            scada.VINCI_STATUS[ip] = True
+            for rectangle, binding in self.config[panel]["rectangles"].items():
+                with self.subTest(panel=panel, rectangle=rectangle):
+                    ip = binding["Device_Addr"]
+                    self.assertEqual(binding["contact_mode"], "single")
+                    self.assertFalse(
+                        scada._companion_open_status_binding(binding)
+                    )
+                    scada.VINCI_STATUS[ip] = True
+                    scada.STATUS_VALUE_STORE.clear()
 
-            scada.STATUS_VALUE_STORE[
-                (ip, "info", binding["Info_Name"])
-            ] = 1
-            closed = scada._digital_breaker_snapshot(binding)
+                    scada.STATUS_VALUE_STORE[
+                        (ip, "info", binding["Info_Name"])
+                    ] = 1
+                    closed = scada._digital_breaker_snapshot(binding)
 
-            scada.STATUS_VALUE_STORE[
-                (ip, "info", binding["Info_Name"])
-            ] = 0
-            opened = scada._digital_breaker_snapshot(binding)
+                    scada.STATUS_VALUE_STORE[
+                        (ip, "info", binding["Info_Name"])
+                    ] = 0
+                    opened = scada._digital_breaker_snapshot(binding)
 
-            self.assertEqual(
-                (closed["state"], closed["color"], closed["quality"]),
-                ("CLOSED", scada.BREAKER_CLOSED_COLOR, "GOOD"),
-            )
-            self.assertEqual(
-                (opened["state"], opened["color"], opened["quality"]),
-                ("OPEN", scada.BREAKER_OPEN_COLOR, "GOOD"),
-            )
+                    self.assertEqual(
+                        (
+                            closed["state"],
+                            closed["color"],
+                            closed["quality"],
+                        ),
+                        ("CLOSED", scada.BREAKER_CLOSED_COLOR, "GOOD"),
+                    )
+                    self.assertEqual(
+                        (
+                            opened["state"],
+                            opened["color"],
+                            opened["quality"],
+                        ),
+                        ("OPEN", scada.BREAKER_OPEN_COLOR, "GOOD"),
+                    )
 
     def test_run_monitor_uses_same_digital_generator_state(self):
         binding = scada._run_monitor_breaker_binding("brk_g1")
@@ -513,12 +537,27 @@ class CredentialSecurityTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.original_path = scada.AUTH_ACCOUNTS_PATH
+        self.original_seed_path = scada.AUTH_CREDENTIAL_SEED_PATH
         scada.AUTH_ACCOUNTS_PATH = os.path.join(
             self.temporary.name, "UserAccounts.json",
         )
+        scada.AUTH_CREDENTIAL_SEED_PATH = os.path.join(
+            self.temporary.name, "UserAccounts.seed.json",
+        )
+        with open(
+            os.path.join(scada.APP_DIR, "UserAccounts.seed.json"),
+            "r",
+            encoding="utf-8",
+        ) as handle:
+            seed = json.load(handle)
+        with open(
+            scada.AUTH_CREDENTIAL_SEED_PATH, "w", encoding="utf-8",
+        ) as handle:
+            json.dump(seed, handle)
 
     def tearDown(self):
         scada.AUTH_ACCOUNTS_PATH = self.original_path
+        scada.AUTH_CREDENTIAL_SEED_PATH = self.original_seed_path
         self.temporary.cleanup()
 
     def test_passwords_are_salted_hashed_and_verified(self):
@@ -550,6 +589,28 @@ class CredentialSecurityTests(unittest.TestCase):
             set(scada.AUTH_ROLES),
         )
 
+    def test_versioned_seed_replaces_legacy_passwords_exactly_once(self):
+        legacy_password = "Legacy-Password-2026"
+        for role in scada.AUTH_ROLES:
+            scada._auth_set_password(role, legacy_password)
+        self.assertTrue(scada._auth_apply_credential_seed())
+        for role in scada.AUTH_ROLES:
+            self.assertTrue(scada._auth_verify_password(role, "123456"))
+            self.assertFalse(
+                scada._auth_verify_password(role, legacy_password)
+            )
+
+        replacement = "654321"
+        scada._auth_set_password("Operator", replacement)
+        self.assertFalse(scada._auth_apply_credential_seed())
+        self.assertTrue(
+            scada._auth_verify_password("Operator", replacement)
+        )
+        self.assertFalse(
+            scada._auth_verify_password("Operator", "123456")
+        )
+
+
     def test_packaged_credentials_reset_every_role_to_requested_password(self):
         temporary_path = scada.AUTH_ACCOUNTS_PATH
         scada.AUTH_ACCOUNTS_PATH = os.path.join(
@@ -570,6 +631,17 @@ class CredentialSecurityTests(unittest.TestCase):
             ) as handle:
                 payload = json.load(handle)
             self.assertNotIn("123456", json.dumps(payload))
+            with open(
+                scada.AUTH_CREDENTIAL_SEED_PATH,
+                "r",
+                encoding="utf-8",
+            ) as handle:
+                seed = json.load(handle)
+            self.assertNotIn("123456", json.dumps(seed))
+            self.assertEqual(
+                payload[scada.AUTH_APPLIED_SEED_FIELD],
+                seed["revision"],
+            )
         finally:
             scada.AUTH_ACCOUNTS_PATH = temporary_path
 

@@ -350,7 +350,7 @@ IOA_MAP_STANDARD = {
     16411: "Uab_L", 16412: "Ubc_L", 16413: "Uca_L",
 }
 
-APP_VERSION = "2.6.5"
+APP_VERSION = "2.6.6"
 APP_DIR = (
     os.path.dirname(os.path.abspath(sys.executable))
     if getattr(sys, "frozen", False)
@@ -414,6 +414,12 @@ AUTH_ACCOUNTS_PATH = os.environ.get(
     "SCADA_AUTH_ACCOUNTS_PATH",
     os.path.join(APP_DIR, "UserAccounts.json"),
 )
+AUTH_CREDENTIAL_SEED_PATH = os.environ.get(
+    "SCADA_AUTH_CREDENTIAL_SEED_PATH",
+    os.path.join(APP_DIR, "UserAccounts.seed.json"),
+)
+AUTH_CREDENTIAL_SEED_SCHEMA = "SCADA-BONT-AUTH-SEED-1"
+AUTH_APPLIED_SEED_FIELD = "applied_seed_revision"
 AUTH_ACCOUNT_SCHEMA = "SCADA-BONT-AUTH-1"
 AUTH_ROLES = ("Operator", "Admin", "Developer")
 AUTH_MIN_PASSWORD_LENGTH = 6
@@ -426,6 +432,49 @@ def _auth_empty_accounts():
         "schema": AUTH_ACCOUNT_SCHEMA,
         "roles": {},
     }
+
+
+def _auth_normalize_roles(records):
+    """Validate and normalize salted role records from a trusted JSON object."""
+    if not isinstance(records, dict):
+        raise RuntimeError("Credential roles are malformed.")
+    roles = {}
+    for role in AUTH_ROLES:
+        record = records.get(role)
+        if record is None:
+            continue
+        if not isinstance(record, dict):
+            raise RuntimeError(
+                f"Credential record for {role} is malformed."
+            )
+        try:
+            iterations = int(record.get("iterations", 0))
+            salt = base64.b64decode(
+                str(record.get("salt", "")), validate=True,
+            )
+            digest = base64.b64decode(
+                str(record.get("hash", "")), validate=True,
+            )
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"Credential record for {role} is malformed."
+            ) from exc
+        if (
+            iterations < 100_000
+            or len(salt) < 16
+            or len(digest) != hashlib.sha256().digest_size
+        ):
+            raise RuntimeError(
+                f"Credential record for {role} is incomplete."
+            )
+        roles[role] = {
+            "algorithm": "PBKDF2-HMAC-SHA256",
+            "iterations": iterations,
+            "salt": base64.b64encode(salt).decode("ascii"),
+            "hash": base64.b64encode(digest).decode("ascii"),
+            "updated_at": str(record.get("updated_at", "")),
+        }
+    return roles
 
 
 def _auth_load_accounts():
@@ -448,46 +497,16 @@ def _auth_load_accounts():
             raise RuntimeError(
                 "Credential store has an invalid schema; access is locked."
             )
-        roles = {}
-        for role in AUTH_ROLES:
-            record = payload["roles"].get(role)
-            if record is None:
-                continue
-            if not isinstance(record, dict):
-                raise RuntimeError(
-                    f"Credential record for {role} is malformed."
-                )
-            try:
-                iterations = int(record.get("iterations", 0))
-                salt = base64.b64decode(
-                    str(record.get("salt", "")), validate=True,
-                )
-                digest = base64.b64decode(
-                    str(record.get("hash", "")), validate=True,
-                )
-            except (TypeError, ValueError) as exc:
-                raise RuntimeError(
-                    f"Credential record for {role} is malformed."
-                ) from exc
-            if (
-                iterations < 100_000
-                or len(salt) < 16
-                or len(digest) != hashlib.sha256().digest_size
-            ):
-                raise RuntimeError(
-                    f"Credential record for {role} is incomplete."
-                )
-            roles[role] = {
-                "algorithm": "PBKDF2-HMAC-SHA256",
-                "iterations": iterations,
-                "salt": base64.b64encode(salt).decode("ascii"),
-                "hash": base64.b64encode(digest).decode("ascii"),
-                "updated_at": str(record.get("updated_at", "")),
-            }
-        return {
+        result = {
             "schema": AUTH_ACCOUNT_SCHEMA,
-            "roles": roles,
+            "roles": _auth_normalize_roles(payload["roles"]),
         }
+        applied_revision = str(
+            payload.get(AUTH_APPLIED_SEED_FIELD, "")
+        ).strip()
+        if applied_revision:
+            result[AUTH_APPLIED_SEED_FIELD] = applied_revision
+        return result
 
 
 def _auth_write_accounts(payload):
@@ -511,6 +530,50 @@ def _auth_write_accounts(payload):
     finally:
         if os.path.exists(temporary):
             os.remove(temporary)
+
+
+def _auth_load_credential_seed():
+    """Load the immutable, versioned credential seed shipped by the installer."""
+    try:
+        with open(
+            AUTH_CREDENTIAL_SEED_PATH, "r", encoding="utf-8",
+        ) as handle:
+            payload = json.load(handle)
+    except (OSError, ValueError, TypeError) as exc:
+        raise RuntimeError(
+            f"Credential seed cannot be read: {exc}"
+        ) from exc
+    revision = str(
+        payload.get("revision", "") if isinstance(payload, dict) else ""
+    ).strip()
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema") != AUTH_CREDENTIAL_SEED_SCHEMA
+        or not revision
+        or not isinstance(payload.get("roles"), dict)
+    ):
+        raise RuntimeError("Credential seed has an invalid schema.")
+    roles = _auth_normalize_roles(payload["roles"])
+    if set(roles) != set(AUTH_ROLES):
+        raise RuntimeError("Credential seed does not configure every role.")
+    return {"revision": revision, "roles": roles}
+
+
+def _auth_apply_credential_seed():
+    """Apply each shipped credential reset exactly once per seed revision."""
+    with AUTH_ACCOUNT_LOCK:
+        seed = _auth_load_credential_seed()
+        accounts = _auth_load_accounts()
+        if accounts.get(AUTH_APPLIED_SEED_FIELD) == seed["revision"]:
+            return False
+        _auth_write_accounts({
+            "schema": AUTH_ACCOUNT_SCHEMA,
+            AUTH_APPLIED_SEED_FIELD: seed["revision"],
+            "roles": seed["roles"],
+        })
+        return True
+
+
 
 
 def _auth_role_configured(role):
@@ -3668,9 +3731,15 @@ def _status_binding_for_bay(bay_name, preferred_physical_names):
                 if _norm_text(row.get("Bay_Name")).casefold() == bay_key]
     selected = None
     for physical_name in preferred_physical_names:
-        wanted = _norm_text(physical_name).casefold()
-        selected = next((row for row in bay_rows
-                         if _norm_text(row.get("PhysicalName")).casefold() == wanted), None)
+        wanted = " ".join(
+            _norm_text(physical_name).casefold().split()
+        )
+        selected = next((
+            row for row in bay_rows
+            if " ".join(
+                _norm_text(row.get("PhysicalName")).casefold().split()
+            ) == wanted
+        ), None)
         if selected is not None:
             break
     if selected is None:
@@ -3719,6 +3788,7 @@ GENERATOR_BREAKER_SPECS = {
             "bay": "Connection Wire I",
             "close": ("breaker position",),
             "open": (),
+            "contact_mode": "single",
         },
         "j-generator": {
             "label": "GENERATOR 1",
@@ -3730,14 +3800,16 @@ GENERATOR_BREAKER_SPECS = {
         "j-transformer": {
             "label": "AUX TRANSFORMER 1 HV",
             "bay": "1# Auxiliary Transformer",
-            "close": ("HV breaker close position",),
-            "open": ("HV breaker trip position",),
+            "close": ("breaker position",),
+            "open": (),
+            "contact_mode": "single",
         },
         "j-transformer-bottom": {
             "label": "AUX TRANSFORMER 1 LV",
             "bay": "1# Auxiliary Transformer",
             "close": ("UV breaker close position",),
-            "open": ("UV breaker trip position",),
+            "open": (),
+            "contact_mode": "single",
         },
     },
     "G2": {
@@ -3746,6 +3818,7 @@ GENERATOR_BREAKER_SPECS = {
             "bay": "Connection Wire II",
             "close": ("breaker position",),
             "open": (),
+            "contact_mode": "single",
         },
         "j-generator": {
             "label": "GENERATOR 2",
@@ -3757,14 +3830,16 @@ GENERATOR_BREAKER_SPECS = {
         "j-transformer": {
             "label": "AUX TRANSFORMER 2 HV",
             "bay": "2# Auxiliary Transformer",
-            "close": ("HV breaker close position",),
-            "open": ("HV breaker trip position",),
+            "close": ("breaker position",),
+            "open": (),
+            "contact_mode": "single",
         },
         "j-transformer-bottom": {
             "label": "AUX TRANSFORMER 2 LV",
             "bay": "2# Auxiliary Transformer",
             "close": ("UV breaker close position",),
-            "open": ("UV breaker trip position",),
+            "open": (),
+            "contact_mode": "single",
         },
     },
 }
@@ -4012,11 +4087,21 @@ def _run_monitor_breaker_snapshot(display_key):
 
 
 def _normalize_monitor_breaker_binding(binding, fallback):
-    """Keep one Monitor-TV breaker digital and attach its open contact."""
+    """Keep each fixed Monitor-TV breaker on its authoritative RTU point."""
     selected = binding if isinstance(binding, dict) else {}
     normalized = dict(fallback)
     if selected.get("Source_Kind") == "rectangle_status_csv":
         normalized.update(selected)
+    identity_fields = (
+        "Device_Addr", "Bay_Name", "Physical_Name", "Info_Name",
+        "Info_Index", "Jian_Ge_Id", "ASDU", "IOA", "SetStr",
+        "ResetStr", "Reverse", "contact_mode",
+    )
+    for field in identity_fields:
+        if field in fallback:
+            normalized[field] = fallback[field]
+        else:
+            normalized.pop(field, None)
     normalized.update({
         "mode": "selected",
         "source": "status",
@@ -23127,6 +23212,7 @@ def run_login_ui_smoke_test():
                 temporary, "UserAccounts.json",
             )
             _auth_write_accounts(packaged_accounts)
+            _auth_apply_credential_seed()
             smoke_roles = _auth_configured_roles()
             smoke_password = os.environ.get("SCADA_UI_TEST_PASSWORD", "")
             password_valid = bool(smoke_password) and all(
@@ -23217,6 +23303,7 @@ if __name__ == "__main__":
         required_assets = [
             os.path.join(APP_DIR, "UIRealtimeBindings.json"),
             os.path.join(APP_DIR, "UserAccounts.json"),
+            os.path.join(APP_DIR, "UserAccounts.seed.json"),
             os.path.join(APP_DIR, "MONITOR V55.html"),
             os.path.join(APP_DIR, "MANUAL_MAPPING_G1_G2.png"),
             os.path.join(APP_DIR, "MANUAL_COMMUNICATION_SETTINGS.png"),
@@ -23255,6 +23342,16 @@ if __name__ == "__main__":
             root.tk.call("tk", "appname", "SCADA BONT")
         except tk.TclError:
             pass
+        try:
+            _auth_apply_credential_seed()
+        except RuntimeError as auth_seed_error:
+            messagebox.showerror(
+                "Credential Update Error",
+                str(auth_seed_error),
+                parent=root,
+            )
+            root.destroy()
+            raise SystemExit(2)
         scada_app_instance = SCADAMainUI(root)
         startup_lock = tk.Frame(root, bg="#020b13")
         startup_lock.place(x=0, y=0, relwidth=1, relheight=1)

@@ -1,5 +1,6 @@
 {
   "schema": "SCADA-BONT-AUTH-1",
+  "applied_seed_revision": "2026-10-30-all-role-reset-1",
   "roles": {
     "Operator": {
       "algorithm": "PBKDF2-HMAC-SHA256",
