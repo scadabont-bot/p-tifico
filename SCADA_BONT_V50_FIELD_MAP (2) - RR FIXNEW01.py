@@ -23128,8 +23128,9 @@ def run_login_ui_smoke_test():
             )
             _auth_write_accounts(packaged_accounts)
             smoke_roles = _auth_configured_roles()
-            password_valid = all(
-                _auth_verify_password(role, "123456")
+            smoke_password = os.environ.get("SCADA_UI_TEST_PASSWORD", "")
+            password_valid = bool(smoke_password) and all(
+                _auth_verify_password(role, smoke_password)
                 for role in AUTH_ROLES
             )
             root = tk.Tk()
