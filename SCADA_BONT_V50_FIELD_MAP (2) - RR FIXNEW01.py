@@ -344,7 +344,7 @@ IOA_MAP_STANDARD = {
     16411: "Uab_L", 16412: "Ubc_L", 16413: "Uca_L",
 }
 
-APP_VERSION = "2.6.0"
+APP_VERSION = "2.6.1"
 APP_DIR = (
     os.path.dirname(os.path.abspath(sys.executable))
     if getattr(sys, "frozen", False)
@@ -1756,7 +1756,7 @@ SLD_BREAKER_SPECS = (
     ("generator_1", "Generator 1 breaker", "1# Measure Control Box",
      ("1# G circuit breaker close position", "G circuit breaker close position"), 58.5, 351.5),
     ("aux_1_hv", "Auxiliary Transformer 1 HV breaker", "1# Auxiliary Transformer",
-     ("hv breaker close",), 176.5, 351.5),
+     ("HV breaker close position",), 176.5, 351.5),
     ("feeder_01", "11# Circulating Water Pump breaker", "11# Circulating Water Pump",
      ("breaker position",), 245.5, 351.5),
     ("feeder_02", "12# Circulating Water Pump breaker", "12# Circulating Water Pump",
@@ -1788,14 +1788,14 @@ SLD_BREAKER_SPECS = (
     ("feeder_14", "23# Circulating Water Pump breaker", "23# Circulating Water Pump",
      ("breaker position",), 1315.5, 351.5),
     ("aux_2_hv", "Auxiliary Transformer 2 HV breaker", "2# Auxiliary Transformer",
-     ("hv breaker close",), 1396.0, 351.5),
+     ("HV breaker close position",), 1396.0, 351.5),
     ("generator_2", "Generator 2 breaker", "2# Measure Control Box",
      ("2# G circuit breaker close position", "1# G circuit breaker close position",
       "G circuit breaker close position"), 1478.5, 351.5),
     ("aux_1_lv", "Auxiliary Transformer 1 LV breaker", "1# Auxiliary Transformer",
-     ("UV breaker close",), 176.0, 664.5),
+     ("UV breaker close position",), 176.0, 664.5),
     ("aux_2_lv", "Auxiliary Transformer 2 LV breaker", "2# Auxiliary Transformer",
-     ("UV breaker close",), 1395.0, 664.5),
+     ("UV breaker close position",), 1395.0, 664.5),
 )
 AUXILIARY_BREAKER_SPECS = tuple(
     spec
@@ -1806,6 +1806,21 @@ SLD_BREAKER_SOURCE_BY_KEY = {
     key: (bay, physical_names)
     for key, _element, bay, physical_names, _x, _y in SLD_BREAKER_SPECS
 }
+SLD_BREAKER_LABEL_BY_KEY = {
+    key: element
+    for key, element, _bay, _physical_names, _x, _y in SLD_BREAKER_SPECS
+}
+RUN_MONITOR_BREAKER_SOURCE_BY_KEY = {
+    **{
+        f"brk_d{index}": f"feeder_{index:02d}"
+        for index in range(1, 15)
+    },
+    "brk_wire1": "wire_1",
+    "brk_wire2": "wire_2",
+    "brk_g1": "generator_1",
+    "brk_g2": "generator_2",
+}
+
 
 FORMULA_PRESETS = {
     "DIRECT": "Raw",
@@ -3214,23 +3229,6 @@ def _to_float(value, default=0.0):
         return default
 
 
-FEEDER_BREAKER_ON_COLOR = "#ff2020"
-FEEDER_BREAKER_OFF_COLOR = "#14d84a"
-
-
-def _feeder_breaker_visual(ia_value):
-    """Return the feeder breaker state from the IA value shown to two decimals."""
-    current = _to_float(ia_value, 0.0)
-    if not math.isfinite(current):
-        current = 0.0
-    displayed_current = round(current, 2)
-    active = displayed_current > 0.0
-    return (
-        displayed_current,
-        active,
-        FEEDER_BREAKER_ON_COLOR if active else FEEDER_BREAKER_OFF_COLOR,
-        "1" if active else "0",
-    )
 
 
 
@@ -3736,13 +3734,13 @@ GENERATOR_BREAKER_SPECS = {
         "j-transformer": {
             "label": "AUX TRANSFORMER 1 HV",
             "bay": "1# Auxiliary Transformer",
-            "close": ("hv breaker close",),
-            "open": ("hv breaker trip position",),
+            "close": ("HV breaker close position",),
+            "open": ("HV breaker trip position",),
         },
         "j-transformer-bottom": {
             "label": "AUX TRANSFORMER 1 LV",
             "bay": "1# Auxiliary Transformer",
-            "close": ("UV breaker close",),
+            "close": ("UV breaker close position",),
             "open": ("UV breaker trip position",),
         },
     },
@@ -3762,13 +3760,13 @@ GENERATOR_BREAKER_SPECS = {
         "j-transformer": {
             "label": "AUX TRANSFORMER 2 HV",
             "bay": "2# Auxiliary Transformer",
-            "close": ("hv breaker close",),
-            "open": ("hv breaker trip position",),
+            "close": ("HV breaker close position",),
+            "open": ("HV breaker trip position",),
         },
         "j-transformer-bottom": {
             "label": "AUX TRANSFORMER 2 LV",
             "bay": "2# Auxiliary Transformer",
-            "close": ("UV breaker close",),
+            "close": ("UV breaker close position",),
             "open": ("UV breaker trip position",),
         },
     },
@@ -3965,6 +3963,47 @@ def _digital_breaker_snapshot(binding):
             "quality": "GOOD",
         })
     return base
+def _run_monitor_breaker_binding(display_key):
+    """Resolve one Run Monitor breaker from the shared StatusSetting map."""
+    source_key = RUN_MONITOR_BREAKER_SOURCE_BY_KEY.get(str(display_key), "")
+    source = SLD_BREAKER_SOURCE_BY_KEY.get(source_key)
+    if not source:
+        return {}
+    bay_name, physical_names = source
+    binding = _status_binding_for_bay(bay_name, physical_names)
+    if not binding:
+        return {}
+    binding.update({
+        "page": "Run Monitor",
+        "element": str(display_key),
+        "label": SLD_BREAKER_LABEL_BY_KEY.get(source_key, str(display_key)),
+        "operator": "=",
+        "threshold": 1,
+        "true_color": "#ff2020",
+        "false_color": "#14d84a",
+        "unknown_color": "#808080",
+        "invalid_color": "#ffb020",
+    })
+    return binding
+
+
+def _run_monitor_breaker_snapshot(display_key):
+    """Return the authoritative digital state used by Run Monitor and reports."""
+    binding = _run_monitor_breaker_binding(display_key)
+    if not binding:
+        return {
+            "state": "UNKNOWN",
+            "condition": "UNKNOWN",
+            "active": None,
+            "color": "#808080",
+            "quality": "CONFIG INVALID",
+            "effective_yx": None,
+        }
+    state = _digital_breaker_snapshot(binding)
+    state["binding"] = binding
+    return state
+
+
 
 
 def _normalize_monitor_breaker_binding(binding, fallback):
@@ -16556,8 +16595,8 @@ class SCADAMainUI:
     # cover the complete triangle footprint after responsive downscaling.
     RUN_STATUS_Y_OFFSET = 164.0
 
-    def add_status_breaker(self, canvas, x, y, key, initial_color="#ff0000"):
-        """Overlay a live red/green rectangle exactly on the SLD breaker body."""
+    def add_status_breaker(self, canvas, x, y, key, initial_color="#808080"):
+        """Overlay a digital YX breaker exactly on the Run Monitor SLD body."""
         # A 23x22 overlay covers the filled body and its antialiased side
         # pixels even on compact laptop screens.
         breaker = canvas.create_rectangle(
@@ -16568,11 +16607,11 @@ class SCADAMainUI:
             tags=("run_status",)
         )
 
-        # The rectangle displays the binary result of the feeder IA rule:
-        # 0.00 A or below is green/0; any positive displayed IA is red/1.
+        # The rectangle displays authoritative StatusSetting YX. Unknown or
+        # invalid digital quality is never rendered as an open breaker.
         value_item = canvas.create_text(
             x, y,
-            text="0",
+            text="?",
             fill="#ffffff",
             font=("Arial", 8, "bold"),
             anchor="center",
@@ -16580,8 +16619,8 @@ class SCADAMainUI:
         )
         self.status_indicators.setdefault(key, []).append(breaker)
         self.status_indicator_value_items.setdefault(key, []).append(value_item)
-        # Feeder breaker colour is fixed to the IA rule. It is intentionally
-        # not editable through the generic digital-status binding dialog.
+        # Run Monitor, Generator Monitor, Monitor TV, and reports share this
+        # same digital binding; analog current never determines breaker state.
         self._run_status_specs.append({
             "item": breaker,
             "value_item": value_item,
@@ -16604,7 +16643,7 @@ class SCADAMainUI:
         )
 
         self.status_indicators.setdefault(key, []).append(circle)
-        # The lower lamp mirrors the same fixed IA rule as the rectangle.
+        # The lower lamp mirrors the same authoritative digital YX state.
         self._run_status_specs.append({
             "item": circle,
             "kind": "circle",
@@ -16956,17 +16995,17 @@ class SCADAMainUI:
                 right_edge_x=x_coord - 22
             )
 
-        # Breaker rectangles cover the red body; status circles cover the blue
-        # terminal triangle lower on the same feeder centreline.
+        # Breaker rectangles and lower lamps start UNKNOWN until a valid
+        # StatusSetting YX sample is received.
         bottom_breakers = [
-            (x_coord, 279.5, f"brk_d{idx}", "#ff0000")
+            (x_coord, 279.5, f"brk_d{idx}", "#808080")
             for idx, x_coord in enumerate(param_positions, start=1)
         ]
         for bx, by, bid, bcolor in bottom_breakers:
             self.add_status_breaker(canvas, bx, by, bid, bcolor)
             self.add_status_circle(canvas, bx, by, bid, bcolor)
 
-        # Four additional red breaker bodies outside the fourteen-feeder row.
+        # Four additional digital breaker bodies outside the feeder row.
         additional_breakers = [
             (55.5, 279.5, "brk_g1"),
             (784.5, 193.5, "brk_wire1"),
@@ -16974,9 +17013,7 @@ class SCADAMainUI:
             (1862.5, 279.5, "brk_g2"),
         ]
         for bx, by, bid in additional_breakers:
-            self.add_status_breaker(
-                canvas, bx, by, bid, FEEDER_BREAKER_OFF_COLOR,
-            )
+            self.add_status_breaker(canvas, bx, by, bid, "#808080")
 
         canvas.bind("<Configure>", self._schedule_run_monitor_resize)
         canvas.after(100, self._resize_run_monitor)
@@ -19320,19 +19357,18 @@ class SCADAMainUI:
                 )
 
         breaker_sources = [
-            ("brk_g1", "Breaker Generator 1", "g1_ia"),
-            ("brk_wire1", "Breaker Connection Wire I", "wire1_ia"),
-            ("brk_wire2", "Breaker Connection Wire II", "wire2_ia"),
-            ("brk_g2", "Breaker Generator 2", "g2_ia"),
+            ("brk_g1", "Breaker Generator 1"),
+            ("brk_wire1", "Breaker Connection Wire I"),
+            ("brk_wire2", "Breaker Connection Wire II"),
+            ("brk_g2", "Breaker Generator 2"),
         ]
         breaker_sources.extend(
-            (f"brk_d{card_no}", f"Breaker {bay}", f"p{card_no}_ia")
+            (f"brk_d{card_no}", f"Breaker {bay}")
             for card_no, bay, _ip, _points in CARD_POINT_MAP
         )
-        for key, name, value_key in breaker_sources:
+        for key, name in breaker_sources:
             add(
-                "Breaker Indicators", name, "BRK", key,
-                value_key=value_key, kind="breaker",
+                "Breaker Indicators", name, "BRK", key, kind="breaker",
             )
         return specs
 
@@ -19480,6 +19516,57 @@ class SCADAMainUI:
         rows = []
         source_cache = {}
         for spec in self._run_monitor_mapping_specs():
+            if spec["kind"] == "breaker":
+                state = _run_monitor_breaker_snapshot(spec["key"])
+                binding = state.get("binding", {})
+                open_binding = state.get("open_binding", {})
+                active = state.get("active")
+                color_label = (
+                    "MERAH"
+                    if active is True
+                    else "HIJAU"
+                    if active is False
+                    else "KUNING"
+                    if state.get("state") == "INVALID"
+                    else "ABU-ABU"
+                )
+                raw_text = f"CLOSE {self._run_monitor_number(state.get('raw_yx'))}"
+                if open_binding:
+                    raw_text += (
+                        " / TRIP "
+                        + self._run_monitor_number(state.get("open_raw_yx"))
+                    )
+                calculation = "Effective YX = RAW XOR Reverse"
+                if open_binding:
+                    calculation = (
+                        "CLOSE=1 / TRIP=0 → CLOSED; "
+                        "CLOSE=0 / TRIP=1 → OPEN"
+                    )
+                bay = _norm_text(binding.get("Bay_Name"))
+                rows.append({
+                    "key": spec["key"],
+                    "group": spec["group"],
+                    "name": spec["name"],
+                    "symbol": spec["symbol"],
+                    "unit": "status",
+                    "actual": f"{state.get('state', 'UNKNOWN')} / {color_label}",
+                    "raw": raw_text,
+                    "source": (
+                        f"StatusSetting {bay}.csv (digital YX)"
+                        if bay else "Mapping tidak ditemukan"
+                    ),
+                    "ip": _norm_text(binding.get("Device_Addr")) or "-",
+                    "infoname": _norm_text(binding.get("Info_Name")) or "-",
+                    "asdu": self._run_monitor_number(binding.get("ASDU")),
+                    "ioa": self._run_monitor_number(binding.get("IOA")),
+                    "coefficient": "-",
+                    "ctpt": "-",
+                    "offset": "-",
+                    "formula": "DIGITAL_YX",
+                    "calculation": calculation,
+                    "quality": _norm_text(state.get("quality")) or "NO DATA",
+                })
+                continue
             value_key = spec["value_key"]
             if value_key not in source_cache:
                 request = self._run_monitor_point_request(value_key)
@@ -19536,18 +19623,6 @@ class SCADAMainUI:
             calculation = self._run_monitor_formula_text(binding)
             if raw_value is None:
                 actual_text = "--"
-            elif spec["kind"] == "breaker":
-                _current, active, _color, state_label = _feeder_breaker_visual(
-                    actual_value
-                )
-                actual_text = (
-                    f"{state_label} / {'MERAH' if active else 'HIJAU'}"
-                )
-                formula_name = "IA_THRESHOLD"
-                calculation = (
-                    f"round(Ia, 2) > 0; Ia = {calculation}"
-                )
-                unit = "status"
             else:
                 try:
                     actual_text = f"{float(actual_value):.2f}"
@@ -20604,7 +20679,6 @@ class SCADAMainUI:
             # ---------------------------
             # Bottom parameter panels: canonical 14-card order.
             # Values come from each card's own IP + ASDU + IOA point map.
-            feeder_currents = {}
             for panel_idx, bay_name, ip, points in CARD_POINT_MAP:
                 # BAY_VALUE_STORE is updated from the exact full IEC address
                 # (IP + ASDU + IOA). It is authoritative for a named bay and
@@ -20616,7 +20690,6 @@ class SCADAMainUI:
                             CARD_VALUE_STORE.get(panel_idx, {})
                         )
                     )
-                feeder_currents[panel_idx] = vals.get("Ia", 0.0)
                 self._set_realtime(f"p{panel_idx}_uab", vals.get("Uab", 0.0), 2)
                 self._set_realtime(f"p{panel_idx}_ia", vals.get("Ia", 0.0), 2)
                 self._set_realtime(f"p{panel_idx}_p", vals.get("P", 0.0), 2)
@@ -20639,18 +20712,8 @@ class SCADAMainUI:
                 2, breaker_config.get("G2", {})
             )
             if hasattr(self, "status_indicators") and hasattr(self, "run_canvas"):
-                for panel_idx, _bay_name, _ip, _points in CARD_POINT_MAP:
-                    self._set_breaker_current(
-                        f"brk_d{panel_idx}",
-                        feeder_currents.get(panel_idx, 0.0),
-                    )
-                for key, ia_value in (
-                    ("brk_wire1", rtu1.get("W1_Ia", 0.0)),
-                    ("brk_wire2", rtu1.get("W2_Ia", 0.0)),
-                    ("brk_g1", rtu2.get("Ia", 0.0)),
-                    ("brk_g2", rtu3.get("Ia", 0.0)),
-                ):
-                    self._set_breaker_current(key, ia_value)
+                for key in RUN_MONITOR_BREAKER_SOURCE_BY_KEY:
+                    self._set_breaker_status(key)
 
             self.update_system_config_cards()
             self._update_auxiliary_realtime()
@@ -20716,17 +20779,29 @@ class SCADAMainUI:
         self._record_rectangle_transition(binding_key, effective_config, value, active)
         return active, color, label
 
-    def _record_rectangle_transition(self, binding_key, config, value, active):
-        """Write ON/OFF only when a rectangle changes state; never drop a transition."""
+    def _record_rectangle_transition(
+            self, binding_key, config, value, active, *,
+            state=None, quality=""):
+        """Write each breaker state/quality transition without losing failures."""
+        state_text = (
+            str(state).strip().upper()
+            if state
+            else "ON"
+            if active is True
+            else "OFF"
+            if active is False
+            else "UNKNOWN"
+        )
+        transition = (state_text, str(quality or ""))
         previous = self.rectangle_report_states.get(binding_key)
-        if previous is not None and previous == active:
+        if previous is not None and previous == transition:
             return
-        self.rectangle_report_states[binding_key] = active
+        self.rectangle_report_states[binding_key] = transition
         try:
             now = datetime.datetime.now()
             header = [
                 "Date", "Time", "Page", "Rectangle", "Binding",
-                "State", "Value", "Operator", "Threshold",
+                "State", "Quality", "Value", "Operator", "Threshold",
                 "Device_Addr", "Bay_Name", "Physical_Name",
                 "ASDU", "IOA",
             ]
@@ -20741,10 +20816,11 @@ class SCADAMainUI:
                     "label", config.get("element", binding_key),
                 ),
                 binding_key,
-                "ON" if active else "OFF",
+                state_text,
+                quality,
                 value,
-                config.get("operator", ">"),
-                config.get("threshold", 0),
+                config.get("operator", "="),
+                config.get("threshold", 1),
                 config.get("Device_Addr", ""),
                 config.get("Bay_Name", ""),
                 config.get("Physical_Name", ""),
@@ -20769,30 +20845,26 @@ class SCADAMainUI:
                 f"rectangle {binding_key}: {type(exc).__name__}: {exc}",
                 f"rectangle:{binding_key}",
             )
-
-    def _set_breaker_current(self, key, ia_value):
-        """Colour any Run Monitor breaker from its displayed IA value."""
+    def _set_breaker_status(self, key):
+        """Render and report one Run Monitor breaker from digital YX only."""
         items = self.status_indicators.get(key, [])
         if not isinstance(items, (list, tuple)):
             items = [items]
         if not hasattr(self, "run_canvas"):
             return
 
-        current, active, color, label = _feeder_breaker_visual(ia_value)
-        binding_key = f"run:{key}"
+        state = _run_monitor_breaker_snapshot(key)
+        binding = state.get("binding", {})
+        active = state.get("active")
+        color = state.get("color", "#808080")
+        label = "1" if active is True else "0" if active is False else "?"
         self._record_rectangle_transition(
-            binding_key,
-            {
-                "page": "Run Monitor",
-                "element": key,
-                "label": key,
-                "Physical_Name": "Ia",
-                "Unit": "A",
-                "operator": ">",
-                "threshold": 0.0,
-            },
-            current,
+            f"run:{key}",
+            binding,
+            state.get("effective_yx"),
             active,
+            state=state.get("state"),
+            quality=state.get("quality", ""),
         )
         for item in items:
             self.run_canvas.itemconfig(item, fill=color)
@@ -22345,17 +22417,25 @@ def run_engineering_qc():
         "feeder_14": "06YX1702000002",
         "generator_2": "03YX0801000002",
     }
+    active_low_run_breakers = {
+        "wire_1", "wire_2", "generator_1", "generator_2",
+    }
     for breaker_key, expected_info_name in documented_run_breakers.items():
         bay, physical_names = SLD_BREAKER_SOURCE_BY_KEY[breaker_key]
         binding = _status_binding_for_bay(bay, physical_names)
+        expected_reverse = 1 if breaker_key in active_low_run_breakers else 0
+        actual_reverse = int(
+            str(binding.get("Reverse", 0) or "0").strip() in {
+                "-1", "1", "true", "yes", "on",
+            }
+        )
         if (
             binding.get("Info_Name") != expected_info_name
-            or _cbz_breaker_state(1, binding.get("Reverse", 0)) != 1
-            or _cbz_breaker_state(0, binding.get("Reverse", 0)) != 0
+            or actual_reverse != expected_reverse
         ):
             failures.append(
                 f"Breaker {breaker_key}: expected primary YX "
-                f"{expected_info_name} with Reverse=0"
+                f"{expected_info_name} with Reverse={expected_reverse}"
             )
     unresolved_sld_breakers = [
         breaker_key

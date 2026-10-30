@@ -21,6 +21,12 @@ with contextlib.redirect_stdout(io.StringIO()):
 
 class ConfigSyncTests(unittest.TestCase):
     def setUp(self):
+        self.originals = {
+            "APP_DIR": scada.APP_DIR,
+            "CONFIG_SYNC_STATE_PATH": scada.CONFIG_SYNC_STATE_PATH,
+            "_local_scada_ip": scada._local_scada_ip,
+            "_communication_config": scada._communication_config,
+        }
         self.active = {"ip": "10.100.163.150"}
         scada._local_scada_ip = lambda: self.active["ip"]
         scada._communication_config = lambda: {
@@ -29,6 +35,10 @@ class ConfigSyncTests(unittest.TestCase):
             "relay_port": 5001,
             "relay_token": "test-token",
         }
+
+    def tearDown(self):
+        for name, value in self.originals.items():
+            setattr(scada, name, value)
 
     def select(self, directory, ip):
         self.active["ip"] = ip
