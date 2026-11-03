@@ -440,36 +440,24 @@ class BreakerMappingTests(unittest.TestCase):
             ("UNKNOWN", None, scada.BREAKER_UNKNOWN_COLOR, "RTU OFFLINE"),
         )
 
-    def test_run_monitor_uses_same_digital_generator_state(self):
-        binding = scada._run_monitor_breaker_binding("brk_g1")
-        ip = binding["Device_Addr"]
-        open_binding = scada._companion_open_status_binding(binding)
-        self.assertEqual(open_binding["Info_Name"], "02YX0601000001")
-        scada.VINCI_STATUS[ip] = True
-        scada.STATUS_VALUE_STORE[(ip, "info", binding["Info_Name"])] = 1
-        scada.STATUS_VALUE_STORE[(ip, "info", open_binding["Info_Name"])] = 0
-        scada.DATA_STORE.setdefault(ip, {})["Ia"] = 0.0
-
-        state_without_current = scada._run_monitor_breaker_snapshot("brk_g1")
-        scada.DATA_STORE[ip]["Ia"] = 1000.0
-        state_with_current = scada._run_monitor_breaker_snapshot("brk_g1")
-
-        self.assertEqual(state_without_current["state"], "CLOSED")
-        self.assertEqual(state_with_current["state"], "CLOSED")
-        self.assertEqual(
-            state_without_current["effective_yx"],
-            state_with_current["effective_yx"],
+    def test_run_monitor_current_rule_uses_displayed_ampere_boundary(self):
+        cases = (
+            (5.87, (5.87, True, "#ff2020", "1")),
+            (0.006, (0.01, True, "#ff2020", "1")),
+            (0.004, (0.0, False, "#14d84a", "0")),
+            (0.0, (0.0, False, "#14d84a", "0")),
+            (-1.0, (-1.0, False, "#14d84a", "0")),
+            (None, (0.0, False, "#14d84a", "0")),
+            (float("nan"), (0.0, False, "#14d84a", "0")),
         )
+        for current, wanted in cases:
+            with self.subTest(current=current):
+                self.assertEqual(scada._feeder_breaker_visual(current), wanted)
 
-    def test_all_breaker_surfaces_use_green_closed_red_open(self):
+    def test_digital_breaker_surfaces_use_green_closed_red_open(self):
         self.assertEqual(scada.BREAKER_CLOSED_COLOR, "#14d84a")
         self.assertEqual(scada.BREAKER_OPEN_COLOR, "#ff2020")
         surfaces = []
-        for display_key in scada.RUN_MONITOR_BREAKER_SOURCE_BY_KEY:
-            surfaces.append((
-                f"Run Monitor {display_key}",
-                scada._run_monitor_breaker_binding(display_key),
-            ))
         for binding_key, binding in self.persisted_statuses.items():
             if binding.get("Source_Kind") == "rectangle_status_csv":
                 surfaces.append((binding_key, dict(binding)))
@@ -579,6 +567,32 @@ class Iec104InterrogationTests(unittest.TestCase):
         self.assertEqual(kwargs["cause"], 3)
 
 class BreakerReportTests(unittest.TestCase):
+    def test_run_monitor_reports_current_transitions_as_on_off(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            ui = scada.SCADAMainUI.__new__(scada.SCADAMainUI)
+            ui.status_indicators = {}
+            ui.status_indicator_value_items = {}
+            ui.run_canvas = object()
+            ui.rectangle_report_states = {}
+            ui.rectangle_report_file = os.path.join(
+                temporary, "Report_Rectangle_Status.csv",
+            )
+            for current in (0.0, 0.004, 0.006, 0.0):
+                ui._set_breaker_current("brk_g1", current)
+            with open(
+                ui.rectangle_report_file,
+                "r",
+                encoding="utf-8-sig",
+                newline="",
+            ) as handle:
+                rows = list(csv.DictReader(handle))
+        self.assertEqual([row["State"] for row in rows], ["OFF", "ON", "OFF"])
+        self.assertEqual([float(row["Value"]) for row in rows], [0.0, 0.01, 0.0])
+        for row in rows:
+            self.assertEqual(row["Physical_Name"], "Ia")
+            self.assertEqual(row["Operator"], ">")
+            self.assertEqual(float(row["Threshold"]), 0.0)
+
     def test_report_records_digital_state_and_quality(self):
         with tempfile.TemporaryDirectory() as temporary:
             ui = scada.SCADAMainUI.__new__(scada.SCADAMainUI)
