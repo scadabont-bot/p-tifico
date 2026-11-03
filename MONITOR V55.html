@@ -3041,7 +3041,7 @@ window.updateJunctionStatus = function(p){
         return Number.isFinite(number) ? number : null;
     };
     // G1/G2 visual rule: above threshold = red; at/below = green; unknown = gray.
-    // Use each section's A value (ct3, ll3, rr1 > 1.00 A), except rr3 > 0.00 kV.
+    // Sources: ct3/ll3 > 1.00 A; rr2 > 0.00 MW; rr3 > 0.00 kV.
     const breakerRules={
         "j-main":{
             field:"ct3", threshold:1.00, onlineField:"wire_online"
@@ -3050,7 +3050,7 @@ window.updateJunctionStatus = function(p){
             field:"ll3", threshold:1.00, onlineField:"online"
         },
         "j-transformer":{
-            field:"rr1", threshold:1.00, onlineField:"wire_online"
+            field:"rr2", threshold:0.00, onlineField:"wire_online"
         },
         "j-transformer-bottom":{
             field:"rr3", threshold:0.00, onlineField:"online"
