@@ -5,6 +5,13 @@
 /ConfigSyncState.json
 /MonitorTV.json
 /Report_*.csv
+/ActualHistory.sqlite3
+/ActualHistory.sqlite3-*
+/TrendHistory.sqlite3
+/TrendHistory.sqlite3-*
+/SCADAEvents.db
+/SCADAEvents.db-*
+/Backup/
 
 # Local Python/packaging output.
 /__pycache__/
@@ -13,8 +20,14 @@
 /dist/
 /dist_mqtt/
 /release/
+/release.zip
 /p-tifico-backup.exe
 /p-tifico-backup-Setup.exe
 
 # Local compiled artifacts.
 *.pyc
+
+# Local macOS metadata and generated audit workbooks.
+.DS_Store
+/Analisa_Bug_G1_G2_*.xlsx
+/Temuan_Audit_Menu_*.xlsx
