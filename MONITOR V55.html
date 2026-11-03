@@ -3040,15 +3040,17 @@ window.updateJunctionStatus = function(p){
             :Number(String(value).trim().replace(/,/g,"."));
         return Number.isFinite(number) ? number : null;
     };
+    // G1/G2 visual rule: above threshold = red; at/below = green; unknown = gray.
+    // Use each section's A value (ct3, ll3, rr1 > 1.00 A), except rr3 > 0.00 kV.
     const breakerRules={
         "j-main":{
             field:"ct3", threshold:1.00, onlineField:"wire_online"
         },
         "j-generator":{
-            field:"ll1", threshold:1.00, onlineField:"online"
+            field:"ll3", threshold:1.00, onlineField:"online"
         },
         "j-transformer":{
-            field:"rr2", threshold:1.00, onlineField:"wire_online"
+            field:"rr1", threshold:1.00, onlineField:"wire_online"
         },
         "j-transformer-bottom":{
             field:"rr3", threshold:0.00, onlineField:"online"
@@ -3067,8 +3069,8 @@ window.updateJunctionStatus = function(p){
         window.setJunctionState(
             id,
             active,
-            "#14d84a",
             "#ff2020",
+            "#14d84a",
             "none",
             active===null ? "?" : ""
         );
@@ -3087,7 +3089,7 @@ window.updateJunctionStatus = function(p){
 // No telemetry must never look like an open breaker.
 document.addEventListener("DOMContentLoaded",function(){
     ["j-main","j-generator","j-transformer","j-transformer-bottom"].forEach(id=>{
-        window.setJunctionState(id,null,"#14d84a","#ff2020","none","?");
+        window.setJunctionState(id,null,"#ff2020","#14d84a","none","?");
     });
 });
 </script>
