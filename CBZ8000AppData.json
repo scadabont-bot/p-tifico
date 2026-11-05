@@ -46856,10 +46856,10 @@
               "UseFlag": true,
               "Cof": 0.00211438185,
               "tolerance": 0.0,
-              "UpLimit": 999999.9999999999,
-              "DownLimit": -999999.9999999999,
-              "UUpLimit": 999999.9999999999,
-              "DDownLimit": -999999.9999999999,
+              "UpLimit": 1000000.0,
+              "DownLimit": -1000000.0,
+              "UUpLimit": 1000000.0,
+              "DDownLimit": -1000000.0,
               "UpVoice": 250,
               "DownVoice": 250,
               "UUpVoice": 250,
@@ -46877,7 +46877,7 @@
               "AlertLevel": 3,
               "GradAlert": null,
               "GradValue": null,
-              "Dummy0": false,
+              "Dummy0": true,
               "Expression": "",
               "Hissavemode": 4,
               "JianGe_id": 16,
@@ -46898,7 +46898,7 @@
               "OverHFlag": false,
               "OverLFlag": false,
               "DataTime": "1999-12-30 00:00:00",
-              "CTPT": 1.0
+              "CTPT": 0.10392
             },
             {
               "device_addr": 16,
@@ -49829,10 +49829,10 @@
               "UseFlag": true,
               "Cof": 0.00211438185,
               "tolerance": 0.0,
-              "UpLimit": 999999.9999999999,
-              "DownLimit": -999999.9999999999,
-              "UUpLimit": 999999.9999999999,
-              "DDownLimit": -999999.9999999999,
+              "UpLimit": 1000000.0,
+              "DownLimit": -1000000.0,
+              "UUpLimit": 1000000.0,
+              "DDownLimit": -1000000.0,
               "UpVoice": 250,
               "DownVoice": 250,
               "UUpVoice": 250,
@@ -49841,7 +49841,7 @@
               "DownEnable": null,
               "UUpEnable": null,
               "DDownEnable": null,
-              "UpBellEnable": false,
+              "UpBellEnable": true,
               "DownBellEnable": false,
               "UUpBellEnable": false,
               "DDownBellEnable": true,
@@ -49871,7 +49871,7 @@
               "OverHFlag": false,
               "OverLFlag": false,
               "DataTime": "1999-12-30 00:00:00",
-              "CTPT": 1.0
+              "CTPT": 0.10392
             },
             {
               "device_addr": 17,
@@ -52802,10 +52802,10 @@
               "UseFlag": true,
               "Cof": 0.00211438185,
               "tolerance": 0.0,
-              "UpLimit": 999999.9999999999,
-              "DownLimit": -999999.9999999999,
-              "UUpLimit": 999999.9999999999,
-              "DDownLimit": -999999.9999999999,
+              "UpLimit": 1000000.0,
+              "DownLimit": -1000000.0,
+              "UUpLimit": 1000000.0,
+              "DDownLimit": -1000000.0,
               "UpVoice": 250,
               "DownVoice": 250,
               "UUpVoice": 250,
@@ -52844,7 +52844,7 @@
               "OverHFlag": false,
               "OverLFlag": false,
               "DataTime": "1999-12-30 00:00:00",
-              "CTPT": 1.0
+              "CTPT": 0.10392
             },
             {
               "device_addr": 18,
@@ -55775,10 +55775,10 @@
               "UseFlag": true,
               "Cof": 0.00211438185,
               "tolerance": 0.0,
-              "UpLimit": 999999.9999999999,
-              "DownLimit": -999999.9999999999,
-              "UUpLimit": 999999.9999999999,
-              "DDownLimit": -999999.9999999999,
+              "UpLimit": 1000000.0,
+              "DownLimit": -1000000.0,
+              "UUpLimit": 1000000.0,
+              "DDownLimit": -1000000.0,
               "UpVoice": 250,
               "DownVoice": 250,
               "UUpVoice": 250,
@@ -55817,7 +55817,7 @@
               "OverHFlag": false,
               "OverLFlag": false,
               "DataTime": "1999-12-30 00:00:00",
-              "CTPT": 1.0
+              "CTPT": 0.10392
             },
             {
               "device_addr": 19,
@@ -58748,10 +58748,10 @@
               "UseFlag": true,
               "Cof": 0.00211438185,
               "tolerance": 0.0,
-              "UpLimit": 999999.9999999999,
-              "DownLimit": -999999.9999999999,
-              "UUpLimit": 999999.9999999999,
-              "DDownLimit": -999999.9999999999,
+              "UpLimit": 1000000.0,
+              "DownLimit": -1000000.0,
+              "UUpLimit": 1000000.0,
+              "DDownLimit": -1000000.0,
               "UpVoice": 250,
               "DownVoice": 250,
               "UUpVoice": 250,
@@ -58790,7 +58790,7 @@
               "OverHFlag": false,
               "OverLFlag": false,
               "DataTime": "1999-12-30 00:00:00",
-              "CTPT": 1.0
+              "CTPT": 0.10392
             },
             {
               "device_addr": 20,
@@ -64694,10 +64694,10 @@
               "UseFlag": true,
               "Cof": 0.00211438185,
               "tolerance": 0.0,
-              "UpLimit": 999999.9999999999,
-              "DownLimit": -999999.9999999999,
-              "UUpLimit": 999999.9999999999,
-              "DDownLimit": -999999.9999999999,
+              "UpLimit": 1000000.0,
+              "DownLimit": -1000000.0,
+              "UUpLimit": 1000000.0,
+              "DDownLimit": -1000000.0,
               "UpVoice": 250,
               "DownVoice": 250,
               "UUpVoice": 250,
@@ -64736,7 +64736,7 @@
               "OverHFlag": false,
               "OverLFlag": false,
               "DataTime": "1999-12-30 00:00:00",
-              "CTPT": 1.0
+              "CTPT": 0.10392
             },
             {
               "device_addr": 22,
@@ -73507,10 +73507,10 @@
               "UseFlag": true,
               "Cof": 0.00366210937,
               "tolerance": 0.0,
-              "UpLimit": 999999.9999999999,
-              "DownLimit": -999999.9999999999,
-              "UUpLimit": 999999.9999999999,
-              "DDownLimit": -999999.9999999999,
+              "UpLimit": 1000000.0,
+              "DownLimit": -1000000.0,
+              "UUpLimit": 1000000.0,
+              "DDownLimit": -1000000.0,
               "UpVoice": 250,
               "DownVoice": 250,
               "UUpVoice": 250,
@@ -73549,7 +73549,7 @@
               "OverHFlag": false,
               "OverLFlag": false,
               "DataTime": "2008-04-04 13:42:06",
-              "CTPT": 0.06
+              "CTPT": 0.0346420323326
             },
             {
               "device_addr": 25,

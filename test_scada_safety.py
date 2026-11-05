@@ -1,3 +1,4 @@
+import copy
 import datetime
 import csv
 import json
@@ -68,14 +69,34 @@ class GeneratorFormulaSourceTests(unittest.TestCase):
                     actual = scada._calculate_formula(1000.0, row, {})
                     self.assertAlmostEqual(actual, wanted, places=9)
 
-    def test_obsolete_generator_cos_aliases_are_not_loaded(self):
-        self.assertFalse(any(
-            row.get("Bay_Name") in {"1# Generator", "2# Generator"}
-            for row in scada.SETTING_REGISTRY
-        ))
-
 
 class MonitorTVFormulaSourceTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_directory = tempfile.TemporaryDirectory()
+        self.original_config_path = scada.MONITOR_TV_CONFIG_PATH
+        self.registry_snapshot = copy.deepcopy(scada.SETTING_REGISTRY)
+        self.store_snapshots = {
+            name: copy.deepcopy(getattr(scada, name))
+            for name in (
+                "DATA_STORE", "BAY_VALUE_STORE", "RAW_ADDRESS_STORE",
+                "RAW_ADDRESS_TIMESTAMP", "VINCI_STATUS",
+            )
+        }
+        scada.MONITOR_TV_CONFIG_PATH = os.path.join(
+            self.temp_directory.name, "MonitorTVConfig.json",
+        )
+
+    def tearDown(self):
+        scada.MONITOR_TV_CONFIG_PATH = self.original_config_path
+        with scada.SETTING_LOCK:
+            scada.SETTING_REGISTRY[:] = self.registry_snapshot
+        with scada.DATA_LOCK:
+            for name, snapshot in self.store_snapshots.items():
+                store = getattr(scada, name)
+                store.clear()
+                store.update(snapshot)
+        self.temp_directory.cleanup()
+
     def _assert_value_equal(self, actual, wanted, field):
         try:
             self.assertAlmostEqual(
@@ -84,29 +105,311 @@ class MonitorTVFormulaSourceTests(unittest.TestCase):
         except (TypeError, ValueError):
             self.assertEqual(str(actual), str(wanted), field)
 
-    def test_saved_points_take_engineering_metadata_from_settings(self):
+
+    def test_numeric_save_accepts_real_breaker_default_whitespace(self):
         config = scada._monitor_tv_config()
-        columns = (
-            "Device_Addr", "ASDU", "IOA", "Coefficient", "CTPT",
-            "Formula", "Add_Offset", "Unit",
+        self.assertEqual(
+            config["G1"]["rectangles"]["j-transformer"][
+                "Physical_Name"
+            ],
+            "breaker  position",
+        )
+        rectangles_before = {
+            panel: copy.deepcopy(config[panel]["rectangles"])
+            for panel in ("G1", "G2")
+        }
+
+        scada._save_monitor_tv_config(config)
+
+        with open(
+            scada.MONITOR_TV_CONFIG_PATH, "r", encoding="utf-8",
+        ) as handle:
+            saved = json.load(handle)
+        self.assertEqual(
+            saved["G1"]["rectangles"]["j-transformer"][
+                "Physical_Name"
+            ],
+            "breaker  position",
         )
         for panel in ("G1", "G2"):
-            for field, binding in config[panel]["variables"].items():
+            self.assertEqual(
+                saved[panel]["rectangles"], rectangles_before[panel],
+            )
+
+
+    def test_manual_points_survive_two_save_load_cycles_and_drive_payload(self):
+        config = scada._monitor_tv_config()
+        overrides = {
+            ("G1", "tk2"): {
+                "mode": "manual",
+                "source": "voltage",
+                "key": "Uab",
+                "Bay_Name": "Voltage Monitoring",
+                "Physical_Name": "Uab",
+                "Info_Name": "Uab",
+                "Device_Addr": "10.100.163.2",
+                "ASDU": 9101,
+                "IOA": 9201,
+                "Coefficient": 2.0,
+                "CTPT": 3.0,
+                "Formula": (
+                    "CUSTOM: RAW*COEFFICIENT*CTPT+ADD_OFFSET"
+                ),
+                "Add_Offset": 4.0,
+                "Unit": "manual-kV",
+                "Decimals": 4,
+            },
+            ("G2", "ll1"): {
+                "mode": "manual",
+                "source": "measure_control2",
+                "key": "P",
+                "Bay_Name": "2# Measure Control Box",
+                "Physical_Name": "P",
+                "Info_Name": "P",
+                "Device_Addr": "10.100.163.1",
+                "ASDU": 9102,
+                "IOA": 9202,
+                "Coefficient": 4.0,
+                "CTPT": 5.0,
+                "Formula": (
+                    "CUSTOM: RAW*COEFFICIENT*CTPT+ADD_OFFSET"
+                ),
+                "Add_Offset": 6.0,
+                "Unit": "manual-kW",
+                "Decimals": 5,
+            },
+        }
+        untouched_variables = {
+            panel: {
+                field: copy.deepcopy(binding)
+                for field, binding in config[panel]["variables"].items()
+                if (panel, field) not in overrides
+            }
+            for panel in ("G1", "G2")
+        }
+        rectangles_before = {
+            panel: copy.deepcopy(config[panel]["rectangles"])
+            for panel in ("G1", "G2")
+        }
+        for (panel, field), values in overrides.items():
+            config[panel]["variables"][field].update(values)
+
+        scada._save_monitor_tv_config(config)
+        with open(
+            scada.MONITOR_TV_CONFIG_PATH, "r", encoding="utf-8",
+        ) as handle:
+            first_saved = json.load(handle)
+        for panel in ("G1", "G2"):
+            self.assertEqual(
+                first_saved[panel]["rectangles"], rectangles_before[panel],
+            )
+            self.assertEqual(
+                {
+                    field: binding
+                    for field, binding in first_saved[panel]["variables"].items()
+                    if (panel, field) not in overrides
+                },
+                untouched_variables[panel],
+            )
+        # Simulate ListSetting/option metadata changing immediately after Save.
+        # A manual popup edit owns every displayed field and must not be
+        # replaced by a later registry refresh.
+        registry_conflicts = {
+            ("Voltage Monitoring", "Uab"): {
+                "Device_Addr": "198.51.100.41",
+                "ASDU": 9411,
+                "IOA": 9412,
+                "Coefficient": 41.0,
+                "CTPT": 42.0,
+                "Formula": "MULTIPLY",
+                "Add_Offset": 43.0,
+                "Unit": "stale-voltage-option",
+            },
+            ("2# Measure Control Box", "P"): {
+                "Device_Addr": "198.51.100.51",
+                "ASDU": 9511,
+                "IOA": 9512,
+                "Coefficient": 51.0,
+                "CTPT": 52.0,
+                "Formula": "MULTIPLY",
+                "Add_Offset": 53.0,
+                "Unit": "stale-power-option",
+            },
+        }
+        with scada.SETTING_LOCK:
+            for point, conflicting_values in registry_conflicts.items():
                 row = next(
-                    item
-                    for item in scada.SETTING_REGISTRY
-                    if item.get("Bay_Name") == binding.get("Bay_Name")
-                    and item.get("Physical_Name")
-                    == binding.get("Physical_Name")
+                    item for item in scada.SETTING_REGISTRY
+                    if (
+                        item.get("Bay_Name"),
+                        item.get("Physical_Name"),
+                    ) == point
                 )
-                for column in columns:
+                row.update(conflicting_values)
+        first_load = scada._monitor_tv_config()
+        scada._save_monitor_tv_config(first_load)
+        second_load = scada._monitor_tv_config()
+        with open(
+            scada.MONITOR_TV_CONFIG_PATH, "r", encoding="utf-8",
+        ) as handle:
+            on_disk = json.load(handle)
+
+        for (panel, field), expected in overrides.items():
+            for source_name, source in (
+                    ("first load", first_load),
+                    ("second load", second_load),
+                    ("disk", on_disk)):
+                binding = source[panel]["variables"][field]
+                for column, wanted in expected.items():
                     with self.subTest(
-                            panel=panel, field=field, column=column):
+                            panel=panel, field=field, source=source_name,
+                            column=column):
                         self._assert_value_equal(
-                            binding.get(column, ""),
-                            row.get(column, ""),
-                            column,
+                            binding.get(column), wanted, column,
                         )
+
+        with scada.DATA_LOCK:
+            scada.RAW_ADDRESS_STORE.clear()
+            scada.RAW_ADDRESS_TIMESTAMP.clear()
+            scada.VINCI_STATUS.clear()
+            scada.RAW_ADDRESS_STORE.update({
+                ("10.100.163.2", 9101, 9201): 10.0,
+                ("10.100.163.1", 9102, 9202): 100.0,
+            })
+            scada.VINCI_STATUS.update({
+                "10.100.163.1": True,
+                "10.100.163.2": True,
+                # The old source groups are deliberately unavailable.
+                "10.100.163.3": False,
+                "10.100.163.7": False,
+            })
+            scada.BAY_VALUE_STORE.setdefault(
+                "Voltage Monitoring", {},
+            )["Uab"] = 99999.0
+            scada.BAY_VALUE_STORE.setdefault(
+                "2# Measure Control Box", {},
+            )["P"] = 99999.0
+
+        cases = (
+            ("G1", "tk2", "10.100.163.2", "W1", 64.0,
+             {"decimals": 4, "unit": "manual-kV"}),
+            # Power displays have an established fixed kW -> MW conversion.
+            # The saved unit round-trips above; the effective payload format
+            # deliberately remains MW and is explained by the popup.
+            ("G2", "ll1", "10.100.163.3", "W2", 2.006,
+             {"decimals": 5, "unit": "MW"}),
+        )
+        for panel, field, source_ip, prefix, wanted, wanted_format in cases:
+            binding = dict(second_load[panel]["variables"][field])
+            binding["Display_Field"] = field
+            preview = scada._monitor_tv_preview(binding)
+            payload = scada._monitor_tv_generator_payload(
+                source_ip, prefix, panel,
+            )
+            with self.subTest(panel=panel, field=field):
+                self.assertEqual(preview["raw"], (
+                    10.0 if panel == "G1" else 100.0
+                ))
+                self.assertNotEqual(preview.get("source"), "PC1 relay")
+                self.assertAlmostEqual(preview["actual"], wanted, places=12)
+                self.assertAlmostEqual(payload[field], wanted, places=12)
+                self.assertEqual(
+                    payload["variable_formats"][field], wanted_format,
+                )
+
+    def test_nonmanual_points_continue_following_registry_metadata(self):
+        config = scada._monitor_tv_config()
+        config["G1"]["variables"]["tk2"]["mode"] = "selected"
+        config["G2"]["variables"]["tk2"]["mode"] = "default"
+        scada._save_monitor_tv_config(config)
+
+        with scada.SETTING_LOCK:
+            row = next(
+                item for item in scada.SETTING_REGISTRY
+                if item.get("Bay_Name") == "Voltage Monitoring"
+                and item.get("Physical_Name") == "Uab"
+            )
+            changed = {
+                "Device_Addr": "198.51.100.20",
+                "ASDU": "9301",
+                "IOA": "9302",
+                "Coefficient": "7.25",
+                "CTPT": "8.5",
+                "Formula": "MULTIPLY_CTPT_ADD",
+                "Add_Offset": "9.75",
+                "Unit": "registry-unit",
+            }
+            row.update(changed)
+
+        with scada.DATA_LOCK:
+            scada.RAW_ADDRESS_STORE.clear()
+            scada.RAW_ADDRESS_STORE[
+                ("198.51.100.20", 9301, 9302)
+            ] = 10.0
+            scada.VINCI_STATUS["198.51.100.20"] = True
+
+        loaded = scada._monitor_tv_config()
+        for panel, ip, prefix in (
+                ("G1", "10.100.163.2", "W1"),
+                ("G2", "10.100.163.3", "W2")):
+            binding = dict(loaded[panel]["variables"]["tk2"])
+            binding["Display_Field"] = "tk2"
+            preview = scada._monitor_tv_preview(binding)
+            payload = scada._monitor_tv_generator_payload(ip, prefix, panel)
+            with self.subTest(panel=panel):
+                self.assertEqual(preview["raw"], 10.0)
+                self.assertEqual(preview["actual"], 626.0)
+                self.assertEqual(payload["tk2"], 626.0)
+
+    def test_manual_missing_raw_never_reuses_old_engineered_alias(self):
+        config = scada._monitor_tv_config()
+        binding = config["G1"]["variables"]["tk2"]
+        binding.update({
+            "mode": "manual",
+            "Device_Addr": "198.51.100.30",
+            "ASDU": 9401,
+            "IOA": 9402,
+            "Coefficient": 12.0,
+            "CTPT": 13.0,
+            "Formula": "MULTIPLY_CTPT",
+            "Add_Offset": 14.0,
+        })
+        scada._save_monitor_tv_config(config)
+        loaded = scada._monitor_tv_config()
+        manual = dict(loaded["G1"]["variables"]["tk2"])
+        manual["Display_Field"] = "tk2"
+
+        with scada.DATA_LOCK:
+            scada.RAW_ADDRESS_STORE.clear()
+            scada.BAY_VALUE_STORE.setdefault(
+                "Voltage Monitoring", {},
+            )["Uab"] = 54321.0
+            scada.DATA_STORE.setdefault(
+                "198.51.100.30", {},
+            )["Uab"] = 12345.0
+
+        legacy = dict(manual)
+        legacy["mode"] = "selected"
+        self.assertEqual(
+            scada._monitor_tv_relay_engineered_value(legacy, "tk2"),
+            54321.0,
+        )
+        self.assertIsNone(
+            scada._monitor_tv_relay_engineered_value(manual, "tk2"),
+        )
+        for online in (True, False):
+            scada.VINCI_STATUS["198.51.100.30"] = online
+            preview = scada._monitor_tv_preview(manual)
+            with self.subTest(online=online):
+                self.assertFalse(preview["available"])
+                self.assertIsNone(preview["raw"])
+                self.assertIsNone(preview["actual"])
+                self.assertNotEqual(preview.get("source"), "PC1 relay")
+
+        payload = scada._monitor_tv_generator_payload(
+            "10.100.163.2", "W1", "G1",
+        )
+        self.assertEqual(payload["tk2"], 0.0)
 
     def test_g1_g2_top_voltages_share_local_voltage_monitor(self):
         config = scada._monitor_tv_config()

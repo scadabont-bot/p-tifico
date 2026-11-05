@@ -3280,7 +3280,7 @@ function setLarge(id,v){
    SMALL VALUE
    ========================================================= */
 
-function setSmall(id,v){
+function setSmall(id,v,decimals=2){
     const e=document.getElementById(id);
     if(!e) return;
 
@@ -3294,18 +3294,22 @@ function setSmall(id,v){
         1,
         Math.floor(Number(DIGIT_MAP[id] ?? 5))
     );
+    const decimalPlaces=Math.min(
+        6,
+        Math.max(0,Math.floor(Number(decimals) || 0))
+    );
 
     let n=Number(safeValue);
     if(!Number.isFinite(n)) n=0;
 
     const negative=n<0;
-    const fixed=Math.abs(n).toFixed(2);
+    const fixed=Math.abs(n).toFixed(decimalPlaces);
     const parts=fixed.split(".");
     let integerDigits=parts[0].replace(/[^0-9]/g,"");
-    const decimalDigits=parts[1] || "00";
     integerDigits=integerDigits.padStart(maxDigits,"0");
 
-    let displayValue=integerDigits+"."+decimalDigits;
+    let displayValue=integerDigits;
+    if(decimalPlaces>0) displayValue+="."+parts[1];
     if(negative) displayValue="-"+displayValue;
 
     let seg=e.querySelector(".small-seven");
@@ -3316,8 +3320,12 @@ function setSmall(id,v){
         e.appendChild(seg);
     }
 
+    /*
+       Include the formatted string in the cache key. Decimal precision and
+       sign changes then rebuild only the affected segment nodes.
+    */
     if(e.dataset.sevenSegmentValue!==displayValue){
-        updateSegmentChildren(seg, displayValue, smallChar);
+        updateSegmentChildren(seg,displayValue,smallChar);
         e.dataset.sevenSegmentValue=displayValue;
     }
 
@@ -3338,8 +3346,8 @@ function setSmall(id,v){
 /* =========================================================
    NUMBER FORMAT
    ---------------------------------------------------------
-   Decimal TIDAK PERNAH ditampilkan pada Seven Segment kecil.
-   Fungsi ini hanya menjaga kompatibilitas pemanggilan lama.
+   Helper lama untuk pemanggil yang membutuhkan angka bulat tanpa tanda.
+   Presisi tampilan telemetry diatur oleh variable_formats pada setSmall().
    ========================================================= */
 function num(v,d=2){
 
@@ -3357,14 +3365,14 @@ function num(v,d=2){
    INDIVIDUAL SEVEN SEGMENT SETTINGS
    ---------------------------------------------------------
    DIGIT_MAP:
-       JUMLAH DIGIT FISIK yang selalu tampil.
-       Decimal / koma TIDAK dihitung dan TIDAK ditampilkan.
+       JUMLAH DIGIT FISIK minimum sebelum tanda desimal.
+       Tanda desimal dan digit pecahan mengikuti variable_formats.
 
-       5 = 00000
-       4 = 0000
-       3 = 000
-       2 = 00
-       1 = 0
+       5 = 00000.xx
+       4 = 0000.xx
+       3 = 000.xx
+       2 = 00.xx
+       1 = 0.xx
 
    FONT_SIZE_MAP:
        ukuran Seven Segment masing-masing display seperti font-size.
@@ -3600,10 +3608,15 @@ function updatePanel(p){
        CT : ct1 - ct5
        IL : ll1 - ll5
        CM : cm1 - cm5
-       RR : rr1 - rr2
+       RR : rr1 - rr3
 
-       Semua nilai Seven Segment di atas dibatasi MAX 5 karakter.
+       Digit integer minimum mengikuti DIGIT_MAP; pecahan mengikuti payload.
     */
+    const variableFormats=(
+        p.variable_formats &&
+        typeof p.variable_formats==="object"
+    ) ? p.variable_formats : {};
+
     [
         "tk1",
         "tk2",
@@ -3657,12 +3670,24 @@ function updatePanel(p){
            modal. Jangan lakukan scaling tersembunyi berdasarkan label satuan;
            G1 dan G2 harus menampilkan angka yang persis sama dengan preview.
         */
+        const format=(
+            variableFormats[id] &&
+            typeof variableFormats[id]==="object"
+        ) ? variableFormats[id] : null;
+        const decimals=format?format.decimals:2;
 
         // TAMPILKAN ANGKA TERLEBIH DAHULU.
-        setSmall(
-            id,
-            v
-        );
+        setSmall(id,v,decimals);
+
+        /*
+           Tanpa variable_formats, label HTML lama tetap dipakai. Jika format
+           tersedia, termasuk unit kosong, backend menjadi sumber label.
+        */
+        if(format&&Object.prototype.hasOwnProperty.call(format,"unit")){
+            const parameter=document.getElementById(id+"-parameter");
+            const unit=parameter&&parameter.querySelector(".unit,.meter-unit");
+            if(unit)unit.textContent=String(format.unit??"");
+        }
 
     });
 
@@ -4074,31 +4099,49 @@ initializeSevenSegments();
    JSON TELEMETRY POLLING - NO FLASK / NO SOCKET.IO
    ========================================================= */
 
-let telemetryRefreshInFlight=false;
+let telemetryRefreshInFlight=null;
 
-async function refreshTelemetry(){
-    if(telemetryRefreshInFlight) return;
-    telemetryRefreshInFlight=true;
+async function refreshTelemetry(options={}){
+    const afterCurrent=options.afterCurrent===true;
+    const throwOnError=options.throwOnError===true;
+
+    if(telemetryRefreshInFlight){
+        if(!afterCurrent)return telemetryRefreshInFlight;
+        await telemetryRefreshInFlight;
+    }
 
     const status=document.getElementById("status");
+    const request=(async()=>{
+        try{
+            const response=await fetch(
+                "/MonitorTV.json?t="+Date.now(),
+                {cache:"no-store"}
+            );
+            if(!response.ok) throw new Error("HTTP "+response.status);
+            const data=await response.json();
+            /*
+               updatePanel owns the IEC-104 ONLINE/OFFLINE state. A successful
+               HTTP request only proves that the local web server is reachable;
+               it must not replace an OFFLINE RTU state with ONLINE.
+            */
+            updatePanel(data[monitorId==="G2" ? "p2" : "p1"] || {});
+            return {error:null};
+        }catch(error){
+            status.textContent="OFFLINE // "+monitorId+" LIVE TELEMETRY";
+            status.className="status offline";
+            return {error};
+        }
+    })();
+
+    telemetryRefreshInFlight=request;
     try{
-        const response=await fetch(
-            "/MonitorTV.json?t="+Date.now(),
-            {cache:"no-store"}
-        );
-        if(!response.ok) throw new Error("HTTP "+response.status);
-        const data=await response.json();
-        /*
-           updatePanel owns the IEC-104 ONLINE/OFFLINE state. A successful HTTP
-           request only proves that the local web server is reachable; it must
-           not overwrite an OFFLINE RTU state with ONLINE.
-        */
-        updatePanel(data[monitorId==="G2" ? "p2" : "p1"] || {});
-    }catch(error){
-        status.textContent="OFFLINE // "+monitorId+" LIVE TELEMETRY";
-        status.className="status offline";
+        const result=await request;
+        if(result.error&&throwOnError)throw result.error;
+        return result;
     }finally{
-        telemetryRefreshInFlight=false;
+        if(telemetryRefreshInFlight===request){
+            telemetryRefreshInFlight=null;
+        }
     }
 }
 
@@ -4165,6 +4208,9 @@ const TV_DEFAULTS={
     rr3:["measure_control1","Uab_L"]
 };
 const TV_RECTANGLES=["j-main","j-generator","j-transformer","j-transformer-bottom"];
+const TV_FIXED_POWER_UNITS={
+    ct4:"MW",ct5:"Mvar",ll1:"MW",ll2:"Mvar",rr2:"MW"
+};
 const TV_EDITOR_IDS=[
     "tv-setting-option","tv-device","tv-asdu","tv-ioa",
     "tv-coefficient","tv-ctpt","tv-formula","tv-offset",
@@ -4225,6 +4271,7 @@ function ensureEditor(){
             <label><span>Unit</span><input id="tv-unit" autocomplete="off"></label>
             <label><span>Decimal</span><input id="tv-decimal" type="number" min="0" max="6" value="2"></label>
           </div>
+          <div class="tv-unit-constraint" id="tv-unit-constraint" hidden></div>
         </section>
 
         <section class="tv-variable-only tv-preview-card" id="tv-value-preview">
@@ -4392,6 +4439,7 @@ function collectTvAddress(){
     }
     return {
         ...binding,
+        mode:"manual",
         Device_Addr:document.getElementById("tv-device").value.trim(),
         ASDU:editorNumber("tv-asdu",0),
         IOA:editorNumber("tv-ioa",0),
@@ -4400,7 +4448,10 @@ function collectTvAddress(){
         Formula:document.getElementById("tv-formula").value.trim(),
         Add_Offset:editorNumber("tv-offset",0),
         Unit:document.getElementById("tv-unit").value.trim(),
-        Decimals:editorNumber("tv-decimal",2)
+        Decimals:Math.min(
+            6,
+            Math.max(0,Math.floor(editorNumber("tv-decimal",2)))
+        )
     };
 }
 
@@ -4592,6 +4643,13 @@ async function openTvEditor(kind,name){
     document.getElementById("tv-operator").value="=";
     document.getElementById("tv-threshold").value=1;
     if(kind==="variable")fillVariableInputs(cfg);
+    const fixedPowerUnit=TV_FIXED_POWER_UNITS[name];
+    const unitConstraint=document.getElementById("tv-unit-constraint");
+    unitConstraint.hidden=!fixedPowerUnit;
+    unitConstraint.textContent=fixedPowerUnit
+        ?`Field daya ini memakai konversi output tetap ke ${fixedPowerUnit}. `+
+            "Unit yang disimpan tidak mengubah skala atau label layar."
+        :"";
     updateTvSourceSummary(cfg);
 
     document.querySelectorAll(".tv-rect-only").forEach(
@@ -4637,22 +4695,41 @@ async function saveTvEditor(){
     const message=document.getElementById("tv-editor-message");
     message.textContent="Menyimpan...";
     setEditorDisabled(true);
+    let result;
     try{
         const response=await fetch("/MonitorTVConfig.json",{
             method:"POST",
             headers:{"Content-Type":"application/json"},
             body:JSON.stringify(tvConfig)
         });
-        const result=await responseJson(response);
-        message.textContent=result.message||"Save berhasil";
-        setTimeout(
-            ()=>document.getElementById("tv-editor").classList.remove("open"),
-            700
-        );
+        result=await responseJson(response);
     }catch(error){
         message.textContent=error.message||"Save gagal";
         setEditorDisabled(false);
+        return;
     }
+
+    message.textContent=(result.message||"Save berhasil")+" Memuat telemetry...";
+    try{
+        /*
+           Wait for any older poll, then request a snapshot started after the
+           save so the visible value, decimals, and unit use the saved binding.
+        */
+        await refreshTelemetry({afterCurrent:true,throwOnError:true});
+    }catch(error){
+        message.textContent=
+            (result.message||"Save berhasil")+
+            " Namun refresh telemetry gagal: "+
+            (error.message||"kesalahan tidak diketahui");
+        setEditorDisabled(false);
+        return;
+    }
+
+    message.textContent=result.message||"Save berhasil";
+    setTimeout(
+        ()=>document.getElementById("tv-editor").classList.remove("open"),
+        700
+    );
 }
 
 document.addEventListener("click",event=>{
@@ -4815,6 +4892,16 @@ document.addEventListener("click",event=>{
     gap:5px;
 }
 .tv-calculation-grid{grid-template-columns:repeat(3,minmax(0,1fr))}
+.tv-unit-constraint{
+    margin-top:10px;
+    padding:9px 10px;
+    color:#fde68a;
+    background:#221707;
+    border-left:3px solid #f59e0b;
+    border-radius:6px;
+    font-size:11px;
+    line-height:1.4;
+}
 .tv-breaker-grid{grid-template-columns:repeat(2,minmax(0,1fr))}
 .tv-breaker-grid input[type="color"]{
     padding:4px;

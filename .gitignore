@@ -3,6 +3,7 @@
 /AlarmHistory.csv
 /CommunicationLog.csv
 /ConfigSyncState.json
+/TrendDisplayConfig.json
 /MonitorTV.json
 /Report_*.csv
 /ActualHistory.sqlite3

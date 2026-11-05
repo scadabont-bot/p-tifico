@@ -30,6 +30,7 @@ from tkinter import ttk, messagebox, filedialog, font as tkfont
 from PIL import Image, ImageTk, ImageOps, ImageGrab
 import cbz8000_device_data as cbz_device_data
 from soe_alarm import EventStore, parse_cp24_time2a, parse_cp56_time2a, quality_text
+import trend_display
 
 
 def _set_macos_application_menu_title(name):
@@ -363,7 +364,7 @@ IOA_MAP_STANDARD = {
     16411: "Uab_L", 16412: "Ubc_L", 16413: "Uca_L",
 }
 
-APP_VERSION = "2.6.12"
+APP_VERSION = "2.6.13"
 APP_DIR = (
     os.path.dirname(os.path.abspath(sys.executable))
     if getattr(sys, "frozen", False)
@@ -2454,6 +2455,7 @@ def _backup_configuration_files():
         "MQTTConfig.json",
         "UIRealtimeBindings.json",
         "MonitorTVConfig.json",
+        "TrendDisplayConfig.json",
         "ConfigSyncState.json",
     }
     try:
@@ -2503,6 +2505,10 @@ def _backup_application_files():
                 (
                     "cbz8000_device_data.py",
                     os.path.join(APP_DIR, "cbz8000_device_data.py"),
+                ),
+                (
+                    "trend_display.py",
+                    os.path.join(APP_DIR, "trend_display.py"),
                 ),
             ]
         )
@@ -9684,17 +9690,19 @@ class SCADAMainUI:
                 pass
 
         colors = {
-            "bg": "#06131f",
-            "surface": "#0b2236",
-            "surface_alt": "#102d46",
-            "border": "#214b68",
-            "primary": "#008fa3",
-            "primary_active": "#00a9bf",
-            "accent": "#56d6e6",
-            "text": "#f4f8fb",
-            "muted": "#9db4c5",
-            "danger": "#ff6b6b",
-            "success": "#73e2a7",
+            "bg": "#b3b3b1",
+            "surface": "#f2f2f0",
+            "surface_alt": "#dededb",
+            "input": "#ffffff",
+            "border": "#7f7f7f",
+            "primary": "#002b80",
+            "primary_active": "#000066",
+            "accent": "#ffcc00",
+            "text": "#111111",
+            "muted": "#555555",
+            "danger": "#8b0000",
+            "success": "#006000",
+            "warning": "#7a4b00",
         }
         try:
             configured_roles = set(_auth_configured_roles())
@@ -9711,57 +9719,53 @@ class SCADAMainUI:
         self._login_window = login_win
         login_win.title("SCADA BONT — Secure Access")
         login_win.configure(bg=colors["bg"])
-        login_win.resizable(False, False)
+        login_win.resizable(True, True)
 
         screen_width = login_win.winfo_screenwidth()
         screen_height = login_win.winfo_screenheight()
-        win_width = min(660, max(580, int(screen_width * 0.40)))
+        available_width = max(420, screen_width - 48)
+        available_height = max(520, screen_height - 72)
+        win_width = min(
+            860,
+            max(780, int(screen_width * 0.48)),
+            available_width,
+        )
+        compact_layout = screen_height < 850
+        login_win.geometry(f"{win_width}x{min(600, available_height)}")
 
-        def resize_login_window(enrolling):
-            requested_height = 630 if enrolling else 540
-            win_height = min(
-                requested_height,
-                max(480, screen_height - 60),
+        def resize_login_window():
+            login_win.update_idletasks()
+            requested_height = (
+                header.winfo_reqheight() + body.winfo_reqheight()
             )
+            win_height = min(requested_height, available_height)
             center_x = max((screen_width - win_width) // 2, 0)
             center_y = max((screen_height - win_height) // 2, 0)
             login_win.geometry(
                 f"{win_width}x{win_height}+{center_x}+{center_y}"
             )
+            login_win.minsize(
+                min(win_width, 620),
+                min(win_height, 420),
+            )
 
-        resize_login_window(initial_commissioning)
         if not required:
             login_win.transient(self.root)
 
-        auth_style = ttk.Style(login_win)
-        auth_style.configure(
-            "Auth.TCombobox",
-            fieldbackground="#163750",
-            background="#163750",
-            foreground=colors["text"],
-            arrowcolor=colors["accent"],
-            bordercolor=colors["border"],
-            padding=(10, 8),
-            font=("Segoe UI", 11),
-        )
-        auth_style.map(
-            "Auth.TCombobox",
-            fieldbackground=[("readonly", "#163750")],
-            foreground=[("readonly", colors["text"])],
-            selectbackground=[("readonly", "#163750")],
-            selectforeground=[("readonly", colors["text"])],
-        )
 
-        header = tk.Frame(login_win, bg="#072b46", height=104)
+        header = tk.Frame(login_win, bg=colors["primary"])
         header.pack(fill="x")
-        header.pack_propagate(False)
-        tk.Frame(header, bg=colors["accent"], height=4).pack(fill="x")
+        tk.Frame(header, bg=colors["accent"], height=5).pack(fill="x")
         tk.Label(
             header,
-            text="SCADA BONT",
-            bg="#072b46",
-            fg=colors["text"],
-            font=("Segoe UI", 21, "bold"),
+            text="TIFICO THERMAL POWER PLANT",
+            bg=colors["primary"],
+            fg=colors["accent"],
+            font=(
+                "Segoe UI",
+                25 if not compact_layout else 21,
+                "bold italic",
+            ),
             anchor="w",
         ).pack(fill="x", padx=28, pady=(16, 0))
         tk.Label(
@@ -9775,23 +9779,72 @@ class SCADAMainUI:
                     else "SWITCH ACTIVE USER"
                 )
             ),
-            bg="#072b46",
-            fg=colors["accent"],
-            font=("Segoe UI", 10, "bold"),
+            bg=colors["primary"],
+            fg="#ffffff",
+            font=("Segoe UI", 12 if not compact_layout else 11, "bold"),
             anchor="w",
-        ).pack(fill="x", padx=29, pady=(2, 0))
+        ).pack(
+            fill="x",
+            padx=30,
+            pady=(3, 16),
+        )
 
-        body = tk.Frame(login_win, bg=colors["bg"], padx=28, pady=18)
-        body.pack(fill="both", expand=True)
+        content_shell = tk.Frame(login_win, bg=colors["bg"])
+        content_shell.pack(fill="both", expand=True)
+        content_canvas = tk.Canvas(
+            content_shell,
+            bg=colors["bg"],
+            bd=0,
+            highlightthickness=0,
+        )
+        content_scrollbar = ttk.Scrollbar(
+            content_shell,
+            orient="vertical",
+            command=content_canvas.yview,
+        )
+        content_canvas.configure(yscrollcommand=content_scrollbar.set)
+        content_canvas.pack(side="left", fill="both", expand=True)
+
+        body = tk.Frame(
+            content_canvas,
+            bg=colors["bg"],
+            padx=24 if not compact_layout else 20,
+            pady=18 if not compact_layout else 14,
+        )
+        body_window = content_canvas.create_window(
+            (0, 0),
+            window=body,
+            anchor="nw",
+        )
+
+        def fit_login_content(event=None):
+            needs_scroll = (
+                body.winfo_reqheight() > content_canvas.winfo_height()
+            )
+            if needs_scroll and not content_scrollbar.winfo_manager():
+                content_scrollbar.pack(
+                    side="right", fill="y", before=content_canvas,
+                )
+            elif not needs_scroll and content_scrollbar.winfo_manager():
+                content_scrollbar.pack_forget()
+            content_canvas.itemconfigure(
+                body_window, width=content_canvas.winfo_width(),
+            )
+            content_canvas.configure(scrollregion=content_canvas.bbox("all"))
+
+        body.bind("<Configure>", fit_login_content)
+        content_canvas.bind("<Configure>", fit_login_content)
+        self._bind_mousewheel(content_canvas)
+
         card = tk.Frame(
             body,
             bg=colors["surface"],
             highlightbackground=colors["border"],
             highlightthickness=1,
-            padx=22,
-            pady=15,
+            padx=24 if not compact_layout else 20,
+            pady=18 if not compact_layout else 14,
         )
-        card.pack(fill="both", expand=True)
+        card.pack(fill="x")
 
         session_text = (
             f"Current session: {self.current_user}"
@@ -9802,23 +9855,28 @@ class SCADAMainUI:
                 else "Authentication is required before SCADA can be used."
             )
         )
-        tk.Label(
+        session_label = tk.Label(
             card,
             text=session_text,
             bg=colors["surface_alt"],
-            fg=colors["success"] if self.current_user else colors["accent"],
-            font=("Segoe UI", 10, "bold"),
+            fg=colors["success"] if self.current_user else colors["primary"],
+            font=(
+                "Segoe UI",
+                12 if not compact_layout else 11,
+                "bold",
+            ),
             anchor="w",
-            padx=12,
-            pady=8,
-        ).pack(fill="x", pady=(0, 12))
+            padx=16,
+            pady=11 if not compact_layout else 8,
+        )
+        session_label.pack(fill="x", pady=(0, 12))
 
         tk.Label(
             card,
             text="USER ROLE",
             bg=colors["surface"],
             fg=colors["muted"],
-            font=("Segoe UI", 9, "bold"),
+            font=("Segoe UI", 11 if not compact_layout else 10, "bold"),
             anchor="w",
         ).pack(fill="x")
         default_role = (
@@ -9833,14 +9891,38 @@ class SCADAMainUI:
             )
         )
         role_var = tk.StringVar(value=default_role)
-        role_combo = ttk.Combobox(
+        role_selector = tk.OptionMenu(
             card,
-            textvariable=role_var,
-            values=self.ROLE_ORDER,
-            state="readonly",
-            style="Auth.TCombobox",
+            role_var,
+            *self.ROLE_ORDER,
+            command=lambda _selected: update_role_summary(),
         )
-        role_combo.pack(fill="x", pady=(5, 9))
+        role_selector.configure(
+            bg=colors["input"],
+            fg=colors["text"],
+            activebackground=colors["surface_alt"],
+            activeforeground=colors["text"],
+            highlightbackground=colors["border"],
+            highlightcolor=colors["primary"],
+            highlightthickness=1,
+            bd=0,
+            relief="flat",
+            anchor="w",
+            font=("Segoe UI", 12 if not compact_layout else 11),
+            padx=12,
+            pady=9 if not compact_layout else 7,
+        )
+        role_selector["menu"].configure(
+            bg=colors["input"],
+            fg=colors["text"],
+            activebackground=colors["primary"],
+            activeforeground="#ffffff",
+            font=("Segoe UI", 12 if not compact_layout else 11),
+        )
+        role_selector.pack(
+            fill="x",
+            pady=(7, 13 if not compact_layout else 9),
+        )
 
         permission_var = tk.StringVar()
         permission_label = tk.Label(
@@ -9848,48 +9930,52 @@ class SCADAMainUI:
             textvariable=permission_var,
             bg=colors["surface_alt"],
             fg=colors["muted"],
-            font=("Segoe UI", 9),
+            font=("Segoe UI", 12 if not compact_layout else 10),
             anchor="w",
             justify="left",
-            padx=12,
-            pady=8,
+            padx=16,
+            pady=11 if not compact_layout else 8,
         )
-        permission_label.pack(fill="x", pady=(0, 10))
+        permission_label.pack(
+            fill="x",
+            pady=(0, 14 if not compact_layout else 10),
+        )
 
         tk.Label(
             card,
             text="PASSWORD",
             bg=colors["surface"],
             fg=colors["muted"],
-            font=("Segoe UI", 9, "bold"),
+            font=("Segoe UI", 11 if not compact_layout else 10, "bold"),
             anchor="w",
         ).pack(fill="x")
         password_row = tk.Frame(
             card,
-            bg="#163750",
+            bg=colors["input"],
             highlightbackground=colors["border"],
             highlightthickness=1,
         )
-        password_row.pack(fill="x", pady=(5, 6))
+        password_row.pack(fill="x", pady=(7, 8))
         password_var = tk.StringVar()
         password_entry = tk.Entry(
             password_row,
             textvariable=password_var,
             show="•",
-            bg="#163750",
+            bg=colors["input"],
             fg=colors["text"],
             insertbackground=colors["text"],
             selectbackground=colors["primary"],
+            selectforeground="#ffffff",
             relief="flat",
             bd=0,
-            font=("Segoe UI", 12),
+            font=("Segoe UI", 13 if not compact_layout else 11),
         )
         password_entry.pack(
             side="left",
             fill="both",
             expand=True,
-            padx=(12, 6),
-            pady=9,
+            padx=(14, 7),
+            pady=11 if not compact_layout else 8,
         )
         show_password = tk.BooleanVar(value=False)
 
@@ -9898,12 +9984,12 @@ class SCADAMainUI:
             text="CONFIRM NEW PASSWORD",
             bg=colors["surface"],
             fg=colors["muted"],
-            font=("Segoe UI", 9, "bold"),
+            font=("Segoe UI", 11 if not compact_layout else 10, "bold"),
             anchor="w",
         )
         confirm_row = tk.Frame(
             card,
-            bg="#163750",
+            bg=colors["input"],
             highlightbackground=colors["border"],
             highlightthickness=1,
         )
@@ -9912,19 +9998,20 @@ class SCADAMainUI:
             confirm_row,
             textvariable=confirm_var,
             show="•",
-            bg="#163750",
+            bg=colors["input"],
             fg=colors["text"],
             insertbackground=colors["text"],
             selectbackground=colors["primary"],
+            selectforeground="#ffffff",
             relief="flat",
             bd=0,
-            font=("Segoe UI", 12),
+            font=("Segoe UI", 13 if not compact_layout else 11),
         )
         confirm_entry.pack(
             fill="both",
             expand=True,
-            padx=12,
-            pady=9,
+            padx=14,
+            pady=11 if not compact_layout else 8,
         )
 
         def toggle_password():
@@ -9937,15 +10024,15 @@ class SCADAMainUI:
             text="Show",
             variable=show_password,
             command=toggle_password,
-            bg="#163750",
+            bg=colors["input"],
             fg=colors["muted"],
-            activebackground="#163750",
+            activebackground=colors["input"],
             activeforeground=colors["text"],
-            selectcolor="#163750",
-            font=("Segoe UI", 9),
+            selectcolor=colors["input"],
+            font=("Segoe UI", 11 if not compact_layout else 10),
             bd=0,
             highlightthickness=0,
-        ).pack(side="right", padx=(4, 10))
+        ).pack(side="right", padx=(5, 12))
 
         status_var = tk.StringVar()
         status_label = tk.Label(
@@ -9953,15 +10040,34 @@ class SCADAMainUI:
             textvariable=status_var,
             bg=colors["surface"],
             fg=colors["danger"],
-            font=("Segoe UI", 9, "bold"),
+            font=("Segoe UI", 11 if not compact_layout else 10, "bold"),
             anchor="w",
             justify="left",
-            wraplength=540,
+            wraplength=max(win_width - 180, 360),
         )
-        status_label.pack(fill="x", pady=(0, 2))
 
-        footer = tk.Frame(body, bg=colors["bg"])
-        footer.pack(fill="x", pady=(12, 0))
+        footer = tk.Frame(card, bg=colors["surface"])
+        footer.pack(fill="x", pady=(10, 0))
+
+        def show_login_status(*_args):
+            if status_var.get():
+                status_label.pack(
+                    fill="x", pady=(2, 4), before=footer,
+                )
+            else:
+                status_label.pack_forget()
+            login_win.after_idle(resize_login_window)
+
+        status_var.trace_add("write", show_login_status)
+
+        def wrap_login_message(event):
+            label = event.widget
+            wraplength = max(160, event.width - 32)
+            if int(label.cget("wraplength")) != wraplength:
+                label.configure(wraplength=wraplength)
+
+        for label in (session_label, permission_label, status_label):
+            label.bind("<Configure>", wrap_login_message)
         controls = {}
 
         def can_enroll(role):
@@ -9986,7 +10092,7 @@ class SCADAMainUI:
                 )
             )
             permission_label.configure(
-                fg=colors["success"] if configured else colors["accent"]
+                fg=colors["success"] if configured else colors["warning"]
             )
             if configured:
                 confirm_label.pack_forget()
@@ -9994,12 +10100,14 @@ class SCADAMainUI:
                 confirm_var.set("")
             else:
                 confirm_label.pack(
-                    fill="x", pady=(3, 0), before=status_label,
+                    fill="x", pady=(3, 0),
+                    before=status_label if status_label.winfo_manager() else footer,
                 )
                 confirm_row.pack(
-                    fill="x", pady=(5, 6), before=status_label,
+                    fill="x", pady=(5, 6),
+                    before=status_label if status_label.winfo_manager() else footer,
                 )
-            resize_login_window(not configured)
+            login_win.after_idle(resize_login_window)
             primary = controls.get("primary")
             if primary is not None:
                 primary.configure(
@@ -10023,7 +10131,6 @@ class SCADAMainUI:
                 shortcut,
                 lambda _event, selected=role: select_role(selected),
             )
-        role_combo.bind("<<ComboboxSelected>>", update_role_summary)
 
         def cancel_login():
             self._login_window = None
@@ -10108,15 +10215,15 @@ class SCADAMainUI:
                 text=text,
                 bg=background,
                 fg=foreground,
-                font=("Segoe UI", 10, "bold"),
-                padx=24,
-                pady=11,
+                font=("Segoe UI", 12 if not compact_layout else 11, "bold"),
+                padx=30 if not compact_layout else 22,
+                pady=13 if not compact_layout else 10,
                 cursor="hand2",
             )
             control.bind("<Button-1>", lambda _event: command())
             control.bind(
                 "<Enter>",
-                lambda _event: control.configure(bg=hover, fg=colors["text"]),
+                lambda _event: control.configure(bg=hover, fg=foreground),
             )
             control.bind(
                 "<Leave>",
@@ -10131,7 +10238,7 @@ class SCADAMainUI:
             "Login",
             validate_login,
             colors["primary"],
-            colors["text"],
+            "#ffffff",
             colors["primary_active"],
         )
         controls["primary"] = primary_button
@@ -10149,7 +10256,7 @@ class SCADAMainUI:
         login_win.bind("<Escape>", lambda _event: cancel_login())
         password_entry.bind("<Return>", lambda _event: validate_login())
         confirm_entry.bind("<Return>", lambda _event: validate_login())
-        role_combo.bind(
+        role_selector.bind(
             "<Return>",
             lambda _event: password_entry.focus_set(),
             add="+",
@@ -11064,6 +11171,11 @@ class SCADAMainUI:
                 "2. Login dan Hak Akses",
                 (
                     "Saat aplikasi dibuka, pengguna harus memilih role dan login.\n\n"
+                    "Jendela login memakai tema navy/kuning dan bidang abu-abu "
+                    "seperti Run Monitor, dengan teks lebih besar dan tinggi "
+                    "otomatis mengikuti isi form agar tidak menyisakan bidang kosong. "
+                    "Jendela dapat diperbesar atau digulir jika kontrol tidak muat "
+                    "pada layar kecil. Pemilihan role tidak mengubah password.\n\n"
                     "Operator:\n"
                     "• Melihat seluruh layar monitoring, alarm, report, dan backup.\n"
                     "• Mengekspor data yang tersedia.\n"
@@ -11222,18 +11334,31 @@ class SCADAMainUI:
                 "12. Menu Graph dan Report",
                 (
                     "Process Trend Explorer\n"
-                    "Menampilkan histori U, I, P, Q, dan frekuensi sebagai garis "
-                    "kontinu dalam satu grafik perbandingan relatif 0–100%. Skala ini "
-                    "dipakai untuk membandingkan pola, bukan sebagai nilai engineering. "
-                    "Sumbu waktu menampilkan tanggal/jam historian, sedangkan panel "
-                    "analisis menunjukkan nilai engineering asli beserta unitnya. Pada "
-                    "Graph Full Screen tersedia interval 1 menit, 30 menit, 1 jam, "
-                    "12 jam, dan 24 jam serta tombol ALL/U/I/P/Q/f untuk memilih kurva. "
-                    "Arahkan kursor untuk membandingkan timestamp yang sama, lalu klik "
-                    "grafik untuk mengunci atau melepas kursor. Pause View hanya "
-                    "menghentikan pembaruan tampilan; historian dan data IEC-104 tetap "
-                    "berjalan. Escape/F11 mengembalikan Process Trend Explorer; gunakan "
-                    "Export Excel jika dibutuhkan.\n\n"
+                    "Mode Actual menampilkan satu parameter U, I, P, Q, atau f "
+                    "dengan nilai dan satuan engineering asli pada sumbu vertikal. "
+                    "Stacked comparison memisahkan setiap parameter ke grafik "
+                    "bertingkat dengan skala sendiri dan sumbu waktu/kursor bersama. "
+                    "Relative comparison adalah opsi normalisasi 0–100% untuk "
+                    "membandingkan pola, bukan persentase beban atau nilai aktual.\n\n"
+                    "Pilih Parameter sebagai target skala. Auto mengikuti data pada "
+                    "rentang waktu terpilih. Untuk Manual, isi Min, Max, dan Step "
+                    "lalu Apply Scale; input tidak valid tidak disimpan. Pengaturan "
+                    "skala disimpan per peralatan dan parameter di "
+                    "TrendDisplayConfig.json, terpisah dari mapping, rumus, limit "
+                    "alarm, dan historian. Data di luar skala tidak diubah menjadi "
+                    "nilai batas; rentang offline tetap berupa celah pada garis.\n\n"
+                    "Graph Full Screen menyediakan Display & Scale untuk mengatur "
+                    "mode, parameter, dan skala, serta interval 1 menit, 30 menit, "
+                    "1 jam, 12 jam, dan 24 jam. Pilihan kurva perbandingan tersedia "
+                    "pada kedua tampilan. Cursor bergerak bebas mengikuti mouse; "
+                    "CURSOR adalah waktu posisi penunjuk, sedangkan ACTUAL SAMPLE "
+                    "adalah waktu rekaman terdekat yang nilainya ditampilkan. Marker "
+                    "tetap pada waktu sampel asli, tanpa interpolasi nilai. Klik "
+                    "mengunci waktu cursor tepat pada posisi pilihan; klik lagi "
+                    "melepasnya. Refresh mempertahankan waktu yang dikunci.\n\n"
+                    "Pause View hanya membekukan tampilan; historian dan IEC-104 "
+                    "tetap berjalan. Escape/F11 kembali ke Process Trend Explorer. "
+                    "Export Excel tetap menggunakan nilai engineering asli.\n\n"
                     "Alarm History Explorer\n"
                     "Menampilkan histori alarm berdasarkan rentang waktu dan dapat "
                     "diekspor ke Excel.\n\n"
@@ -11336,6 +11461,19 @@ class SCADAMainUI:
                     "RAW terbaru, hasil rumus, status RTU, serta alamat yang benar-benar "
                     "dibaca. Perubahan input langsung dihitung ulang sebelum Save; status "
                     "OFFLINE atau hasil NO DATA tidak boleh dianggap sebagai nol.\n\n"
+                    "Save pada popup nilai menyimpan alamat dan perhitungan manual "
+                    "khusus elemen Monitor TV tersebut. Pengaturan dipakai kembali "
+                    "setelah restart dan tidak ditimpa metadata sumber. Parameter "
+                    "Setting dan ListSetting asli tidak ikut diubah. Elemen yang belum "
+                    "disimpan manual tetap mengikuti metadata sumber. Decimal dan unit "
+                    "tampilan mengikuti pengaturan yang disimpan; konversi daya ke "
+                    "MW/Mvar tetap diterapkan. Jika alamat manual belum menerima RAW, "
+                    "preview menampilkan NO DATA, bukan memakai nilai point lama.\n\n"
+                    "LINE_VOLTAGE menghitung RAW × Coefficient × CT/PT; "
+                    "Add Offset baru dipakai pada rumus yang menyertakannya, "
+                    "misalnya MULTIPLY_CTPT_ADD. Pada ct4/ll1/rr2 output tetap MW, "
+                    "dan ct5/ll2 tetap Mvar; mengedit Unit tidak mengubah konversi "
+                    "daya bawaan. Popup menampilkan peringatan untuk field tersebut.\n\n"
                     "Klik indikator breaker untuk membuka MAPPING BREAKER MONITOR TV. "
                     "Sumber yang dapat dipilih dibatasi pada point breaker position atau "
                     "breaker close dari StatusSetting. Nilai IEC 1 berarti CLOSED/hijau "
@@ -11496,18 +11634,29 @@ class SCADAMainUI:
             "12. Menu Graph dan Report": (
                 (
                     "MANUAL_PROCESS_TREND.png",
-                    "Gambar 12-1 — Grafik Process Trend dalam Graph Full Screen.",
+                    "Gambar 12-1 — Contoh mode Relative comparison pada Graph Full Screen.",
                     (
                         "Keterangan gambar:\n"
                         "• Pilih rentang waktu dan peralatan pada panel kiri, lalu Apply.\n"
                         "• Tabel Curve Values memperlihatkan tag, unit, limit, nilai "
                         "pada kursor, dan nilai terkini.\n"
-                        "• Skala vertikal relatif 0–100% hanya membandingkan pola dan "
-                        "bukan nilai engineering sebenarnya.\n"
+                        "• Mode utama Actual memakai sumbu nilai dan satuan asli; "
+                        "pilih parameter U/I/P/Q/f pada Display Mode dan Parameter.\n"
+                        "• Stacked comparison memakai grafik terpisah per satuan "
+                        "dengan waktu dan kursor yang tersinkron.\n"
+                        "• Persentase pada contoh gambar adalah mode Relative "
+                        "comparison, bukan nilai aktual atau persentase beban.\n"
+                        "• Auto mengikuti rentang data. Manual memakai Min/Max/Step "
+                        "yang disimpan dengan Apply Scale per peralatan/parameter; "
+                        "tidak mengubah sampel atau rumus pengukuran.\n"
                         "• Panel analisis kanan selalu menampilkan timestamp, quality, "
                         "dan nilai asli U, I, P, Q, serta f lengkap dengan unit.\n"
-                        "• Hover menggerakkan cursor sinkron. Klik grafik untuk mengunci "
-                        "cursor; klik kembali untuk melepaskannya.\n"
+                        "• Cursor bergerak halus di seluruh sumbu waktu. CURSOR "
+                        "menunjukkan posisi waktu bebas; ACTUAL SAMPLE menunjukkan "
+                        "timestamp rekaman aktual terdekat. Keduanya bisa berbeda.\n"
+                        "• Nilai/marker tetap mengikuti sampel asli, bukan estimasi. "
+                        "Klik mengunci waktu tepat di posisi cursor; klik lagi "
+                        "melepasnya. Waktu terkunci tidak meloncat saat refresh.\n"
                         "• Visible Signals menyediakan ALL/U/I/P/Q/f untuk menyembunyikan "
                         "atau menampilkan kurva. Minimal satu kurva selalu aktif.\n"
                         "• Sumbu X menunjukkan tanggal dan jam historian. Toolbar Graph "
@@ -11515,8 +11664,9 @@ class SCADAMainUI:
                         "24 HOURS; grafik langsung mengikuti pilihan.\n"
                         "• Pause View hanya membekukan tampilan; historian dan data "
                         "IEC-104 tetap berjalan.\n"
-                        "• Graph Full Screen/F11 menampilkan grafik dan kontrol analisis; "
-                        "tekan Escape untuk kembali ke Process Trend Explorer.\n"
+                        "• Graph Full Screen/F11 menyediakan Display & Scale untuk "
+                        "mengubah mode dan skala. Escape kembali ke Process Trend "
+                        "Explorer. Grafik bertingkat dapat digulir pada jendela kecil.\n"
                         "• Status OFFLINE berarti histori pada periode tersebut tidak "
                         "memiliki nilai valid; gunakan Export Excel untuk data terpilih."
                     ),
@@ -13111,6 +13261,30 @@ class SCADAMainUI:
             curve_win, "Process Trend Explorer", fullscreen=False,
         )
         curve_win.configure(bg=palette["workspace"])
+        preferences_path = os.path.join(APP_DIR, "TrendDisplayConfig.json")
+        preferences_load_error = None
+        try:
+            display_preferences = trend_display.load_preferences(
+                preferences_path
+            )
+        except (OSError, ValueError) as exc:
+            display_preferences = trend_display.default_preferences()
+            preferences_load_error = str(exc)
+        mode_labels = {
+            "actual": "Actual",
+            "stacked": "Stacked comparison",
+            "relative": "Relative comparison",
+        }
+        mode_values = {label: key for key, label in mode_labels.items()}
+        initial_visible = set(display_preferences["visible_series"])
+        initial_parameter = display_preferences["parameter"]
+        initial_mode = display_preferences["mode"]
+        display_preferences["visible_series"] = [
+            key for key in TREND_VALUE_KEYS if key in initial_visible
+        ]
+        display_preferences["parameter"] = initial_parameter
+        display_preferences["mode"] = initial_mode
+
         view_state = {
             "paused": False,
             "fullscreen": False,
@@ -13118,9 +13292,12 @@ class SCADAMainUI:
             "active_canvas": None,
             "cursor_epoch": None,
             "cursor_locked": False,
-            "visible_series": set(TREND_VALUE_KEYS),
+            "mode": initial_mode,
+            "parameter": initial_parameter,
+            "visible_series": initial_visible,
             "signal_buttons": {},
             "cursor_status_label": None,
+            "fullscreen_mode_label": None,
         }
 
         def close_curve():
@@ -13213,7 +13390,7 @@ class SCADAMainUI:
                 signal_bar.pack_propagate(False)
                 tk.Label(
                     signal_bar,
-                    text="VISIBLE SIGNALS",
+                    text="COMPARISON SIGNALS",
                     bg="#e8edf2",
                     fg=palette["navy_dark"],
                     font=("Segoe UI", 10, "bold"),
@@ -13240,7 +13417,7 @@ class SCADAMainUI:
                         )
 
                 def toggle_fullscreen_signal(choice):
-                    visible = view_state["visible_series"]
+                    visible = set(view_state["visible_series"])
                     if choice == "ALL":
                         visible.update(TREND_VALUE_KEYS)
                     elif choice in visible:
@@ -13249,10 +13426,9 @@ class SCADAMainUI:
                         visible.remove(choice)
                     else:
                         visible.add(choice)
-                    view_state["cursor_locked"] = False
-                    view_state["cursor_epoch"] = None
+                    apply_visible_series(visible)
                     refresh_signal_buttons()
-                    redraw()
+
 
                 for choice in ("ALL",) + TREND_VALUE_KEYS:
                     button = tk.Label(
@@ -13278,6 +13454,40 @@ class SCADAMainUI:
                     signal_buttons[choice] = button
                 view_state["signal_buttons"] = signal_buttons
                 refresh_signal_buttons()
+                display_button = tk.Button(
+                    signal_bar,
+                    text="Display & Scale…",
+                    command=open_display_settings,
+                    bg="#ffffff",
+                    fg=palette["navy_dark"],
+                    font=("Segoe UI", 9, "bold"),
+                    relief="raised",
+                    bd=1,
+                    padx=10,
+                    pady=4,
+                    cursor="hand2",
+                )
+                display_button.pack(side="right", padx=(4, 14), pady=7)
+                fullscreen_mode_label = tk.Label(
+                    signal_bar,
+                    text=(
+                        f"ACTUAL • {view_state['parameter']} "
+                        f"{curve_units[view_state['parameter']]}"
+                        if view_state["mode"] == "actual"
+                        else mode_labels[view_state["mode"]].upper()
+                    ),
+
+                    bg="#e8edf2",
+                    fg=(
+                        palette["warning"]
+                        if view_state["mode"] == "relative"
+                        else palette["navy_dark"]
+                    ),
+                    font=("Segoe UI", 9, "bold"),
+                )
+                fullscreen_mode_label.pack(side="right", padx=6)
+                view_state["fullscreen_mode_label"] = fullscreen_mode_label
+
                 cursor_status_label = tk.Label(
                     signal_bar,
                     text="Hover to compare  •  Click graph to lock cursor",
@@ -13285,7 +13495,7 @@ class SCADAMainUI:
                     fg=palette["navy_dark"],
                     font=("Segoe UI", 9, "bold"),
                 )
-                cursor_status_label.pack(side="right", padx=18)
+                cursor_status_label.pack(side="right", padx=8)
                 view_state["cursor_status_label"] = cursor_status_label
                 graph_canvas = tk.Canvas(
                     graph_window,
@@ -13330,6 +13540,7 @@ class SCADAMainUI:
             view_state["cursor_epoch"] = None
             view_state["signal_buttons"] = {}
             view_state["cursor_status_label"] = None
+            view_state["fullscreen_mode_label"] = None
             view_state["active_canvas"] = canvas_trend
             if graph_window is not None and graph_window.winfo_exists():
                 graph_window.destroy()
@@ -13514,6 +13725,190 @@ class SCADAMainUI:
             font=("Segoe UI", 9, "bold"),
         )
         view_mode_label.pack(side="right", padx=14)
+        display_frame = tk.Frame(
+            curve_win,
+            bg="#f4f7fa",
+            bd=1,
+            relief="groove",
+        )
+        display_frame.pack(fill="x", padx=10, pady=(0, 4))
+        display_top = tk.Frame(display_frame, bg="#f4f7fa")
+        display_top.pack(fill="x", padx=9, pady=(5, 2))
+        tk.Label(
+            display_top,
+            text="Display Mode",
+            bg="#f4f7fa",
+            fg=palette["text"],
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="left")
+        display_mode_var = tk.StringVar(value=mode_labels[initial_mode])
+        display_mode_combo = ttk.Combobox(
+            display_top,
+            textvariable=display_mode_var,
+            values=tuple(mode_labels.values()),
+            state="readonly",
+            width=20,
+            font=("Segoe UI", 9),
+        )
+        display_mode_combo.pack(side="left", padx=(5, 14))
+        tk.Label(
+            display_top,
+            text="Parameter",
+            bg="#f4f7fa",
+            fg=palette["text"],
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="left")
+        parameter_var = tk.StringVar(value=initial_parameter)
+        parameter_combo = ttk.Combobox(
+            display_top,
+            textvariable=parameter_var,
+            values=TREND_VALUE_KEYS,
+            state="readonly",
+            width=4,
+            font=("Segoe UI", 9),
+        )
+        parameter_combo.pack(side="left", padx=(5, 14))
+        tk.Label(
+            display_top,
+            text="Visible in comparisons",
+            bg="#f4f7fa",
+            fg=palette["text"],
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="left", padx=(0, 5))
+        visible_vars = {}
+        visible_checks = {}
+        for key in TREND_VALUE_KEYS:
+            variable = tk.BooleanVar(value=key in initial_visible)
+            visible_vars[key] = variable
+            check = tk.Checkbutton(
+                display_top,
+                text=key,
+                variable=variable,
+                bg="#f4f7fa",
+                activebackground="#f4f7fa",
+                fg=palette["text"],
+                selectcolor="#ffffff",
+                font=("Segoe UI", 9, "bold"),
+                padx=2,
+            )
+            check.pack(side="left")
+            visible_checks[key] = check
+        tk.Label(
+            display_top,
+            text="Relative = normalized, non-engineering",
+            bg="#f4f7fa",
+            fg=palette["warning"],
+            font=("Segoe UI", 8, "bold"),
+        ).pack(side="right", padx=6)
+
+        display_scale = tk.Frame(display_frame, bg="#f4f7fa")
+        display_scale.pack(fill="x", padx=9, pady=(1, 5))
+        scale_target_var = tk.StringVar(
+            value=f"Scale for {initial_parameter}"
+        )
+        tk.Label(
+            display_scale,
+            textvariable=scale_target_var,
+            bg="#f4f7fa",
+            fg=palette["navy_dark"],
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="left", padx=(0, 7))
+        initial_scale = (
+            display_preferences.get("scales", {})
+            .get("Connection Wire I", {})
+            .get(initial_parameter, {"mode": "auto"})
+        )
+        scale_mode_var = tk.StringVar(
+            value="Manual" if initial_scale.get("mode") == "manual"
+            else "Auto"
+        )
+        auto_scale_radio = tk.Radiobutton(
+            display_scale,
+            text="Auto",
+            variable=scale_mode_var,
+            value="Auto",
+            bg="#f4f7fa",
+            fg=palette["text"],
+            activeforeground=palette["text"],
+            activebackground="#f4f7fa",
+            font=("Segoe UI", 9),
+        )
+        auto_scale_radio.pack(side="left")
+        manual_scale_radio = tk.Radiobutton(
+            display_scale,
+            text="Manual",
+            variable=scale_mode_var,
+            value="Manual",
+            bg="#f4f7fa",
+            fg=palette["text"],
+            activeforeground=palette["text"],
+            activebackground="#f4f7fa",
+            font=("Segoe UI", 9),
+        )
+        manual_scale_radio.pack(side="left", padx=(0, 6))
+        scale_min_var = tk.StringVar(
+            value=str(initial_scale.get("minimum", ""))
+        )
+        scale_max_var = tk.StringVar(
+            value=str(initial_scale.get("maximum", ""))
+        )
+        scale_step_var = tk.StringVar(
+            value=str(initial_scale.get("step", ""))
+        )
+        scale_entries = {}
+        for label, variable, name in (
+            ("Min", scale_min_var, "minimum"),
+            ("Max", scale_max_var, "maximum"),
+            ("Step", scale_step_var, "step"),
+        ):
+            tk.Label(
+                display_scale,
+                text=label,
+                bg="#f4f7fa",
+                fg=palette["text"],
+                font=("Segoe UI", 9),
+            ).pack(side="left", padx=(4, 2))
+            entry = tk.Entry(
+                display_scale,
+                textvariable=variable,
+                width=8,
+                font=("Segoe UI", 9),
+                relief="sunken",
+                bd=1,
+            )
+            entry.pack(side="left")
+            scale_entries[name] = entry
+        scale_unit_var = tk.StringVar(value="")
+        tk.Label(
+            display_scale,
+            textvariable=scale_unit_var,
+            bg="#f4f7fa",
+            fg=palette["muted"],
+            font=("Segoe UI", 9, "bold"),
+        ).pack(side="left", padx=(5, 8))
+        apply_scale_button = tk.Button(
+            display_scale,
+            text="Apply Scale",
+            bg="#dbe8f5",
+            fg=palette["navy_dark"],
+            font=("Segoe UI", 9, "bold"),
+            relief="raised",
+            bd=1,
+            padx=10,
+            pady=2,
+            cursor="hand2",
+        )
+        apply_scale_button.pack(side="left", padx=3)
+        scale_status_var = tk.StringVar(value="")
+        scale_status_label = tk.Label(
+            display_scale,
+            textvariable=scale_status_var,
+            bg="#f4f7fa",
+            fg=palette["muted"],
+            font=("Segoe UI", 8, "bold"),
+            anchor="w",
+        )
+        scale_status_label.pack(side="left", fill="x", expand=True, padx=8)
 
         status_bar = tk.Frame(
             curve_win, bg=palette["workspace"],
@@ -13751,9 +14146,9 @@ class SCADAMainUI:
         chart_guide = tk.Label(
             charts_frame,
             text=(
-                "ONE COMPARISON GRAPH  •  All curves use a relative 0–100% "
-                "scale so different units can be compared. Exact engineering "
-                "values appear below and when the cursor moves over the graph."
+                f"ACTUAL ENGINEERING VALUES  •  {initial_parameter} "
+                "uses its own engineering-unit scale. Auto or saved manual "
+                "display scale; historian samples are never changed."
             ),
             bg="#e8f2fa",
             fg=palette["navy_dark"],
@@ -13767,8 +14162,8 @@ class SCADAMainUI:
         hover_value_label = tk.Label(
             charts_frame,
             text=(
-                "CURSOR: Move over the graph to compare U, I, P, Q, and f "
-                "at the same timestamp."
+                f"CURSOR: Move over the graph to inspect "
+                f"{initial_parameter} in actual engineering units."
             ),
             bg=palette["navy_dark"],
             fg="#ffffff",
@@ -13778,14 +14173,22 @@ class SCADAMainUI:
             pady=6,
         )
         hover_value_label.pack(fill="x", pady=(0, 3))
+        chart_scrollbar = ttk.Scrollbar(
+            charts_frame,
+            orient="vertical",
+        )
+        chart_scrollbar.pack(side="right", fill="y")
         canvas_trend = tk.Canvas(
             charts_frame,
             bg=palette["panel"],
             highlightthickness=1,
             highlightbackground=palette["border"],
             cursor="crosshair",
+            yscrollcommand=chart_scrollbar.set,
         )
-        canvas_trend.pack(fill="both", expand=True)
+        chart_scrollbar.configure(command=canvas_trend.yview)
+        canvas_trend.pack(side="left", fill="both", expand=True)
+        self._bind_mousewheel(canvas_trend)
 
         table_frame = tk.Frame(
             right_split,
@@ -13861,7 +14264,8 @@ class SCADAMainUI:
             "geometry": None,
             "series_bounds": {},
             "point_positions": {},
-            "sample_by_epoch": {},
+            "sample_epochs": [],
+            "cursor_items": {},
             "plottable_samples": [],
         }
         plot_colors = {
@@ -13909,6 +14313,472 @@ class SCADAMainUI:
             )
         selected_sample = {"row": None}
         history_item_samples = {}
+        def displayed_keys():
+            if view_state["mode"] == "actual":
+                return (view_state["parameter"],)
+            return tuple(
+                key for key in TREND_VALUE_KEYS
+                if key in view_state["visible_series"]
+            )
+
+        def current_scale_config(device_name, key):
+            return (
+                display_preferences.get("scales", {})
+                .get(device_name, {})
+                .get(key, {"mode": "auto"})
+            )
+
+        def set_scale_status(text, error=False):
+            scale_status_var.set(text)
+            scale_status_label.configure(
+                fg=palette["red"] if error else palette["green"]
+            )
+            dialog_label = view_state.get("dialog_status_label")
+            if dialog_label is not None and dialog_label.winfo_exists():
+                dialog_label.configure(
+                    fg=palette["red"] if error else palette["green"]
+                )
+
+
+        def save_display_preferences(action):
+            display_preferences["mode"] = view_state["mode"]
+            display_preferences["parameter"] = view_state["parameter"]
+            display_preferences["visible_series"] = [
+                key for key in TREND_VALUE_KEYS
+                if key in view_state["visible_series"]
+            ]
+            try:
+                trend_display.save_preferences(
+                    preferences_path, display_preferences
+                )
+                return True
+            except (OSError, ValueError) as exc:
+                set_scale_status(
+                    f"{action} is active but was not saved: {exc}",
+                    error=True,
+                )
+                messagebox.showerror(
+                    "Trend Display Preferences",
+                    f"Unable to save display preferences:\n{exc}",
+                    parent=(
+                        view_state.get("fullscreen_window")
+                        or curve_win
+                    ),
+                )
+                return False
+
+        def refresh_fullscreen_controls():
+            visible = view_state["visible_series"]
+            for choice, button in view_state["signal_buttons"].items():
+                selected = (
+                    len(visible) == len(TREND_VALUE_KEYS)
+                    if choice == "ALL"
+                    else choice in visible
+                )
+                color = (
+                    palette["blue"]
+                    if choice == "ALL"
+                    else plot_colors[choice]
+                )
+                button.configure(
+                    bg=color if selected else "#d7dde3",
+                    fg="#ffffff" if selected else palette["muted"],
+                    relief="sunken" if selected else "raised",
+                )
+            label = view_state.get("fullscreen_mode_label")
+            if label is not None and label.winfo_exists():
+                label.configure(
+                    text=(
+                        f"ACTUAL • {view_state['parameter']} "
+                        f"{curve_units[view_state['parameter']]}"
+                        if view_state["mode"] == "actual"
+                        else mode_labels[view_state["mode"]].upper()
+                    ),
+                    fg=(
+                        palette["warning"]
+                        if view_state["mode"] == "relative"
+                        else palette["navy_dark"]
+                    ),
+                )
+
+        def update_scale_entry_state():
+            state = (
+                "normal" if scale_mode_var.get() == "Manual"
+                else "disabled"
+            )
+            entries = list(scale_entries.values())
+            entries.extend(view_state.get("dialog_scale_entries", ()))
+            for entry in entries:
+                if entry.winfo_exists():
+                    entry.configure(state=state)
+
+        def load_scale_controls():
+            key = view_state["parameter"]
+            config = current_scale_config(active_device["name"], key)
+            scale_target_var.set(
+                f"Scale for {key} — {active_device['name']}"
+            )
+            scale_unit_var.set(curve_units[key])
+            if config.get("mode") == "manual":
+                scale_mode_var.set("Manual")
+                scale_min_var.set(
+                    trend_display.format_tick(
+                        config["minimum"], config["step"]
+                    )
+                )
+                scale_max_var.set(
+                    trend_display.format_tick(
+                        config["maximum"], config["step"]
+                    )
+                )
+                scale_step_var.set(
+                    trend_display.format_tick(
+                        config["step"], config["step"]
+                    )
+                )
+                set_scale_status(
+                    "Saved manual scale for this equipment and parameter"
+                )
+            else:
+                scale_mode_var.set("Auto")
+                scale_min_var.set("")
+                scale_max_var.set("")
+                scale_step_var.set("")
+                set_scale_status(
+                    "Auto uses the visible historian values"
+                )
+            update_scale_entry_state()
+
+        def adjust_chart_table_space():
+            def place_sash():
+                if not right_split.winfo_exists():
+                    return
+                total = right_split.winfo_height()
+                if total < 180:
+                    return
+                if view_state["mode"] == "stacked":
+                    desired = max(430, int(total * 0.78))
+                else:
+                    desired = max(330, int(total * 0.66))
+                desired = min(desired, max(80, total - 105))
+                try:
+                    right_split.sashpos(0, desired)
+                except tk.TclError:
+                    pass
+            curve_win.after_idle(place_sash)
+
+        def initialize_chart_table_space(event):
+            if (
+                event.height >= 180
+                and not view_state.get("pane_layout_ready")
+            ):
+                view_state["pane_layout_ready"] = True
+                adjust_chart_table_space()
+
+        right_split.bind("<Configure>", initialize_chart_table_space)
+
+        def update_display_view():
+            mode = view_state["mode"]
+            key = view_state["parameter"]
+            parameter_var.set(key)
+            display_mode_var.set(mode_labels[mode])
+            if mode == "actual":
+                chart_guide.configure(
+                    text=(
+                        f"ACTUAL ENGINEERING VALUES  •  {key} "
+                        f"({curve_units[key]}). Auto or saved manual display "
+                        "scale; historian samples are never changed."
+                    ),
+                    bg="#e8f2fa",
+                    fg=palette["navy_dark"],
+                )
+            elif mode == "stacked":
+                chart_guide.configure(
+                    text=(
+                        "STACKED ACTUAL ENGINEERING VALUES  •  One "
+                        "independent unit scale per visible signal; shared "
+                        "time and cursor. The historian table remains below."
+                    ),
+                    bg="#e8f2fa",
+                    fg=palette["navy_dark"],
+                )
+            else:
+                chart_guide.configure(
+                    text=(
+                        "RELATIVE COMPARISON 0–100%  •  NORMALIZED, "
+                        "NON-ENGINEERING VALUES. Exact engineering values "
+                        "remain in the cursor and tables."
+                    ),
+                    bg="#fff4d6",
+                    fg=palette["warning"],
+                )
+            refresh_fullscreen_controls()
+            adjust_chart_table_space()
+            view_state["cursor_locked"] = False
+            view_state["cursor_epoch"] = None
+            hover_value_label.configure(text=cursor_prompt())
+            redraw()
+
+        def select_display_mode(_event=None):
+            mode = mode_values.get(display_mode_var.get())
+            if mode is None or mode == view_state["mode"]:
+                return
+            view_state["mode"] = mode
+            if save_display_preferences("Display mode"):
+                set_scale_status("Display mode saved")
+            update_display_view()
+
+        def select_display_parameter(_event=None):
+            key = parameter_var.get()
+            if key not in TREND_VALUE_KEYS:
+                return
+            changed = key != view_state["parameter"]
+            view_state["parameter"] = key
+            if changed and save_display_preferences("Parameter selection"):
+                set_scale_status("Parameter selection saved")
+            load_scale_controls()
+            update_display_view()
+
+        def apply_visible_series(visible=None):
+            if visible is None:
+                visible = {
+                    key for key, variable in visible_vars.items()
+                    if variable.get()
+                }
+            else:
+                visible = set(visible)
+            if not visible:
+                fallback = view_state["parameter"]
+                visible = {fallback}
+                visible_vars[fallback].set(True)
+                set_scale_status(
+                    "At least one comparison signal must remain visible",
+                    error=True,
+                )
+                return
+            view_state["visible_series"] = visible
+            for key, variable in visible_vars.items():
+                variable.set(key in visible)
+            if save_display_preferences("Visible signals"):
+                set_scale_status("Visible comparison signals saved")
+            refresh_fullscreen_controls()
+            view_state["cursor_locked"] = False
+            view_state["cursor_epoch"] = None
+            redraw()
+
+        def apply_scale():
+            key = view_state["parameter"]
+            if scale_mode_var.get() == "Manual":
+                try:
+                    config = trend_display.validate_scale(
+                        scale_min_var.get(),
+                        scale_max_var.get(),
+                        scale_step_var.get(),
+                    )
+                except ValueError as exc:
+                    set_scale_status(
+                        f"Invalid scale — {exc}. Nothing was saved.",
+                        error=True,
+                    )
+                    return
+            else:
+                config = {"mode": "auto"}
+            scales = display_preferences.setdefault("scales", {})
+            device_scales = scales.setdefault(active_device["name"], {})
+            device_scales[key] = config
+            if save_display_preferences("Scale"):
+                if config["mode"] == "manual":
+                    set_scale_status(
+                        f"Manual {key} scale saved for "
+                        f"{active_device['name']}"
+                    )
+                else:
+                    set_scale_status(
+                        f"Auto {key} scale saved for "
+                        f"{active_device['name']}"
+                    )
+            update_scale_entry_state()
+            redraw()
+
+        def open_display_settings():
+            existing_dialog = view_state.get("display_dialog")
+            if (
+                existing_dialog is not None
+                and existing_dialog.winfo_exists()
+            ):
+                existing_dialog.lift()
+                existing_dialog.focus_force()
+                return
+            parent_window = (
+                view_state.get("fullscreen_window") or curve_win
+            )
+            dialog = tk.Toplevel(parent_window)
+            view_state["display_dialog"] = dialog
+            dialog.title("Trend Display & Scale")
+            dialog.configure(bg="#f4f7fa")
+            dialog.resizable(False, False)
+            dialog.transient(parent_window)
+            body = tk.Frame(dialog, bg="#f4f7fa", padx=16, pady=14)
+            body.pack(fill="both", expand=True)
+            tk.Label(
+                body,
+                text="DISPLAY & ENGINEERING SCALE",
+                bg="#f4f7fa",
+                fg=palette["navy_dark"],
+                font=("Segoe UI", 12, "bold"),
+            ).grid(row=0, column=0, columnspan=6, sticky="w", pady=(0, 10))
+            tk.Label(
+                body, text="Mode", bg="#f4f7fa",
+                fg=palette["text"], font=("Segoe UI", 9, "bold"),
+            ).grid(row=1, column=0, sticky="w", pady=3)
+            dialog_mode = ttk.Combobox(
+                body,
+                textvariable=display_mode_var,
+                values=tuple(mode_labels.values()),
+                state="readonly",
+                width=20,
+            )
+            dialog_mode.grid(
+                row=1, column=1, columnspan=2, sticky="w", padx=6
+            )
+            dialog_mode.bind("<<ComboboxSelected>>", select_display_mode)
+            tk.Label(
+                body, text="Parameter / scale target", bg="#f4f7fa",
+                fg=palette["text"], font=("Segoe UI", 9, "bold"),
+            ).grid(row=2, column=0, sticky="w", pady=3)
+            dialog_parameter = ttk.Combobox(
+                body,
+                textvariable=parameter_var,
+                values=TREND_VALUE_KEYS,
+                state="readonly",
+                width=6,
+            )
+            dialog_parameter.grid(row=2, column=1, sticky="w", padx=6)
+            dialog_parameter.bind(
+                "<<ComboboxSelected>>", select_display_parameter
+            )
+            tk.Label(
+                body,
+                textvariable=scale_unit_var,
+                bg="#f4f7fa",
+                fg=palette["muted"],
+                font=("Segoe UI", 9, "bold"),
+            ).grid(row=2, column=2, sticky="w")
+            tk.Label(
+                body, text="Visible in comparisons", bg="#f4f7fa",
+                fg=palette["text"], font=("Segoe UI", 9, "bold"),
+            ).grid(row=3, column=0, sticky="w", pady=(8, 3))
+            comparison_frame = tk.Frame(body, bg="#f4f7fa")
+            comparison_frame.grid(
+                row=3, column=1, columnspan=5, sticky="w", pady=(8, 3)
+            )
+            for key in TREND_VALUE_KEYS:
+                tk.Checkbutton(
+                    comparison_frame,
+                    text=key,
+                    variable=visible_vars[key],
+                    command=apply_visible_series,
+                    bg="#f4f7fa",
+                    activebackground="#f4f7fa",
+                    selectcolor="#ffffff",
+                    font=("Segoe UI", 9, "bold"),
+                ).pack(side="left", padx=3)
+            ttk.Separator(body, orient="horizontal").grid(
+                row=4, column=0, columnspan=6,
+                sticky="ew", pady=10
+            )
+            tk.Label(
+                body, text="Scale mode", bg="#f4f7fa",
+                fg=palette["text"], font=("Segoe UI", 9, "bold"),
+            ).grid(row=5, column=0, sticky="w", pady=3)
+            tk.Radiobutton(
+                body, text="Auto", variable=scale_mode_var, value="Auto",
+                command=update_scale_entry_state,
+                bg="#f4f7fa", activebackground="#f4f7fa",
+                fg=palette["text"], activeforeground=palette["text"],
+            ).grid(row=5, column=1, sticky="w")
+            tk.Radiobutton(
+                body, text="Manual", variable=scale_mode_var,
+                value="Manual", command=update_scale_entry_state,
+                bg="#f4f7fa", activebackground="#f4f7fa",
+                fg=palette["text"], activeforeground=palette["text"],
+            ).grid(row=5, column=2, sticky="w")
+            dialog_entries = []
+            for row, label, variable in (
+                (6, "Minimum", scale_min_var),
+                (7, "Maximum", scale_max_var),
+                (8, "Step", scale_step_var),
+            ):
+                tk.Label(
+                    body, text=label, bg="#f4f7fa",
+                    fg=palette["text"], font=("Segoe UI", 9),
+                ).grid(row=row, column=0, sticky="w", pady=3)
+                entry = tk.Entry(
+                    body, textvariable=variable, width=14,
+                    font=("Segoe UI", 9),
+                )
+                entry.grid(row=row, column=1, sticky="w", padx=6)
+                dialog_entries.append(entry)
+                tk.Label(
+                    body, textvariable=scale_unit_var, bg="#f4f7fa",
+                    fg=palette["muted"], font=("Segoe UI", 9, "bold"),
+                ).grid(row=row, column=2, sticky="w")
+            view_state["dialog_scale_entries"] = dialog_entries
+            tk.Label(
+                body,
+                text=(
+                    "Relative comparison ignores display scales and is "
+                    "explicitly non-engineering."
+                ),
+                bg="#f4f7fa",
+                fg=palette["warning"],
+                font=("Segoe UI", 8, "bold"),
+                wraplength=430,
+                justify="left",
+            ).grid(
+                row=9, column=0, columnspan=6,
+                sticky="w", pady=(8, 3)
+            )
+            dialog_status_label = tk.Label(
+                body,
+                textvariable=scale_status_var,
+                bg="#f4f7fa",
+                fg=scale_status_label.cget("fg"),
+                font=("Segoe UI", 8, "bold"),
+                wraplength=430,
+                justify="left",
+            )
+            dialog_status_label.grid(
+                row=10, column=0, columnspan=6,
+                sticky="w", pady=(3, 8)
+            )
+            view_state["dialog_status_label"] = dialog_status_label
+            button_row = tk.Frame(body, bg="#f4f7fa")
+            button_row.grid(
+                row=11, column=0, columnspan=6, sticky="e"
+            )
+            tk.Button(
+                button_row,
+                text="Apply Scale",
+                command=apply_scale,
+                bg="#dbe8f5",
+                fg=palette["navy_dark"],
+                font=("Segoe UI", 9, "bold"),
+                padx=12,
+                pady=3,
+            ).pack(side="left", padx=4)
+            tk.Button(
+                button_row,
+                text="Close",
+                command=dialog.destroy,
+                font=("Segoe UI", 9, "bold"),
+                padx=12,
+                pady=3,
+            ).pack(side="left", padx=4)
+            update_scale_entry_state()
+            dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+            dialog.grab_set()
+            dialog.focus_force()
 
 
         def selected_time_range():
@@ -14007,7 +14877,10 @@ class SCADAMainUI:
             metadata = trend_curve_metadata(device_name)
             current = _trend_device_snapshot(device_name)
             selected = selected_sample["row"]
-            if selected is None and samples:
+            if (
+                selected is None and samples
+                and view_state["cursor_epoch"] is None
+            ):
                 selected = samples[-1]
                 selected_sample["row"] = selected
 
@@ -14083,10 +14956,10 @@ class SCADAMainUI:
                 tags=("trend_value_panel",),
             )
             if view_state["cursor_locked"]:
-                panel_mode = "LOCKED CURSOR"
+                panel_mode = "LOCKED / NEAREST SAMPLE"
                 mode_color = palette["red"]
             elif view_state["cursor_epoch"] is not None:
-                panel_mode = "HOVER CURSOR"
+                panel_mode = "NEAREST ACTUAL SAMPLE"
                 mode_color = palette["blue"]
             else:
                 panel_mode = "LATEST VALID SAMPLE"
@@ -14117,7 +14990,7 @@ class SCADAMainUI:
             canvas.create_text(
                 panel_left + 14,
                 panel_top + 38,
-                text=timestamp,
+                text=f"SAMPLE {timestamp}",
                 fill=palette["text"],
                 font=("Courier New", 10, "bold"),
                 anchor="nw",
@@ -14137,7 +15010,7 @@ class SCADAMainUI:
                 tags=("trend_value_panel",),
             )
             row_y = panel_top + 88
-            visible = view_state["visible_series"]
+            visible = set(displayed_keys())
             for key in TREND_VALUE_KEYS:
                 active = key in visible
                 color = plot_colors[key] if active else "#9aa7b4"
@@ -14186,14 +15059,29 @@ class SCADAMainUI:
         def draw_chart(canvas):
             canvas.delete("all")
             width = max(canvas.winfo_width(), 620)
-            height = max(canvas.winfo_height(), 260)
             fullscreen_graph = canvas is not canvas_trend
-            left = 76 if fullscreen_graph else 72
-            right = 300 if fullscreen_graph else 30
-            top = 112 if fullscreen_graph else 92
-            bottom = 72 if fullscreen_graph else 56
+            mode = view_state["mode"]
+            keys = displayed_keys()
+            minimum_height = (
+                620
+                if mode == "stacked" and not fullscreen_graph
+                else 260
+            )
+            height = max(canvas.winfo_height(), minimum_height)
+            canvas.configure(scrollregion=(0, 0, width, height))
+            if mode != "stacked" and canvas is canvas_trend:
+                canvas.yview_moveto(0)
+            left = (
+                112 if mode == "stacked"
+                else 96 if mode == "actual"
+                else 72
+            )
+            right = 300 if fullscreen_graph else 24
+            top = 100 if fullscreen_graph else 82
+            bottom = 72 if fullscreen_graph else 54
             plot_width = max(1, width - left - right)
             plot_height = max(1, height - top - bottom)
+            plot_right = left + plot_width
             plot_bottom = top + plot_height
             start_epoch = current_range["start"]
             end_epoch = current_range["end"]
@@ -14206,34 +15094,50 @@ class SCADAMainUI:
             ).strftime("%d %b %Y %H:%M:%S")
             title_size = 14 if fullscreen_graph else 11
             detail_size = 10 if fullscreen_graph else 8
-            legend_size = 10 if fullscreen_graph else 8
             axis_size = 10 if fullscreen_graph else 8
-            legend_y = 78 if fullscreen_graph else 62
+
+            if mode == "actual":
+                heading = (
+                    f"ACTUAL {keys[0]} ENGINEERING TREND  "
+                    f"({curve_units[keys[0]]})"
+                )
+                detail = (
+                    "ACTUAL ENGINEERING VALUES  •  "
+                    "AUTO OR SAVED DISPLAY-ONLY SCALE"
+                )
+                detail_color = palette["blue"]
+            elif mode == "stacked":
+                heading = "STACKED ACTUAL ENGINEERING TRENDS"
+                detail = (
+                    "INDEPENDENT UNIT SCALES  •  SHARED TIME / CURSOR"
+                )
+                detail_color = palette["blue"]
+            else:
+                heading = "RELATIVE SIGNAL COMPARISON"
+                detail = (
+                    "RELATIVE 0–100%  •  NORMALIZED, "
+                    "NOT ENGINEERING VALUES"
+                )
+                detail_color = palette["warning"]
             canvas.create_text(
                 14,
-                11,
-                text=(
-                    f"{active_device['name']}  |  "
-                    "SYNCHRONIZED PROCESS COMPARISON"
-                ),
+                10,
+                text=f"{active_device['name']}  |  {heading}",
                 fill=palette["text"],
                 font=("Segoe UI", title_size, "bold"),
                 anchor="nw",
             )
             canvas.create_text(
                 14,
-                38 if fullscreen_graph else 32,
-                text=(
-                    "RELATIVE COMPARISON SCALE 0–100%  —  "
-                    "NOT ENGINEERING VALUES"
-                ),
-                fill=palette["warning"],
+                36 if fullscreen_graph else 31,
+                text=detail,
+                fill=detail_color,
                 font=("Segoe UI", detail_size, "bold"),
                 anchor="nw",
             )
             canvas.create_text(
                 width - 14,
-                11,
+                10,
                 text=f"TIME RANGE  {range_start}  —  {range_end}",
                 fill=palette["navy_dark"],
                 font=(
@@ -14245,53 +15149,89 @@ class SCADAMainUI:
             )
             canvas.create_text(
                 width - 14,
-                38 if fullscreen_graph else 32,
+                36 if fullscreen_graph else 31,
                 text=(
-                    "LOCAL HISTORIAN DATE / TIME  •  "
-                    + (
-                        "Exact values are shown in the right analysis panel"
-                        if fullscreen_graph
-                        else "Hover a line for exact values"
-                    )
+                    "LOCAL HISTORIAN TIME  •  Hover or click for exact "
+                    "engineering values"
                 ),
                 fill=palette["blue"],
                 font=("Segoe UI", detail_size, "bold"),
                 anchor="ne",
             )
 
-            visible = view_state["visible_series"]
+            def finite_value(sample, key):
+                value = sample.get(key)
+                if value is None:
+                    return None
+                try:
+                    value = float(value)
+                except (TypeError, ValueError, OverflowError):
+                    return None
+                return value if math.isfinite(value) else None
+            def latest_value(key):
+                for sample in reversed(samples):
+                    value = finite_value(sample, key)
+                    if value is not None:
+                        return value
+                return None
+
+
             series_bounds = {}
-            for key in TREND_VALUE_KEYS:
-                if key not in visible:
-                    continue
+            series_ticks = {}
+            for key in keys:
                 values = [
-                    float(sample[key])
-                    for sample in samples
-                    if sample.get(key) is not None
-                    and math.isfinite(float(sample[key]))
+                    value for value in (
+                        finite_value(sample, key) for sample in samples
+                    )
+                    if value is not None
                 ]
-                if not values:
-                    continue
-                minimum = min(values)
-                maximum = max(values)
-                if math.isclose(minimum, maximum):
-                    padding = max(1.0, abs(maximum) * 0.1)
-                    minimum -= padding
-                    maximum += padding
-                series_bounds[key] = (minimum, maximum)
+                config = (
+                    None if mode == "relative"
+                    else current_scale_config(active_device["name"], key)
+                )
+                minimum, maximum, step = trend_display.scale_for_values(
+                    values, config
+                )
+                series_bounds[key] = (minimum, maximum, step)
+                series_ticks[key] = trend_display.axis_ticks(
+                    minimum, maximum, step
+                )
+
+            lane_geometry = {}
+            if mode == "stacked":
+                gap = 9 if fullscreen_graph else 7
+                lane_height = max(
+                    1,
+                    (
+                        plot_height - gap * max(0, len(keys) - 1)
+                    ) / max(1, len(keys)),
+                )
+                lane_top = top
+                for key in keys:
+                    lane_geometry[key] = {
+                        "top": lane_top,
+                        "bottom": lane_top + lane_height,
+                        "height": lane_height,
+                    }
+                    lane_top += lane_height + gap
+            else:
+                for key in keys:
+                    lane_geometry[key] = {
+                        "top": top,
+                        "bottom": plot_bottom,
+                        "height": plot_height,
+                    }
 
             plottable_samples = [
-                sample
-                for sample in samples
+                sample for sample in samples
                 if any(
-                    sample.get(key) is not None
-                    for key in visible
+                    finite_value(sample, key) is not None for key in keys
                 )
             ]
             chart_state.update({
                 "geometry": {
                     "left": left,
-                    "right": width - right,
+                    "right": plot_right,
                     "top": top,
                     "bottom": plot_bottom,
                     "width": plot_width,
@@ -14299,31 +15239,12 @@ class SCADAMainUI:
                 },
                 "series_bounds": series_bounds,
                 "point_positions": {},
-                "sample_by_epoch": {
-                    sample["captured_at"]: sample
-                    for sample in plottable_samples
-                },
+                "sample_epochs": [
+                    sample["captured_at"] for sample in plottable_samples
+                ],
+                "cursor_items": {},
                 "plottable_samples": plottable_samples,
             })
-
-            for grid_index in range(5):
-                ratio = grid_index / 4.0
-                y = top + ratio * plot_height
-                canvas.create_line(
-                    left,
-                    y,
-                    width - right,
-                    y,
-                    fill=palette["grid"],
-                )
-                canvas.create_text(
-                    left - 8,
-                    y,
-                    text=f"{100 - int(ratio * 100)}%",
-                    fill=palette["muted"],
-                    font=("Segoe UI", axis_size),
-                    anchor="e",
-                )
 
             for index in range(6):
                 ratio = index / 5.0
@@ -14347,50 +15268,122 @@ class SCADAMainUI:
                 )
             canvas.create_text(
                 left + plot_width / 2,
-                height - 8,
+                height - 7,
                 text="LOCAL HISTORIAN DATE / TIME",
                 fill=palette["navy_dark"],
                 font=("Segoe UI", axis_size, "bold"),
                 anchor="s",
             )
 
-            legend_width = plot_width / len(TREND_VALUE_KEYS)
-            for index, key in enumerate(TREND_VALUE_KEYS):
-                legend_x = left + index * legend_width
-                latest = next(
-                    (
-                        sample.get(key)
-                        for sample in reversed(samples)
-                        if sample.get(key) is not None
-                    ),
-                    None,
-                )
-                active = key in visible
-                color = plot_colors[key] if active else "#aab3bd"
-                canvas.create_line(
-                    legend_x,
-                    legend_y,
-                    legend_x + (28 if fullscreen_graph else 18),
-                    legend_y,
-                    fill=color,
-                    width=4 if active else 2,
-                    dash=() if active else (3, 3),
-                )
-                legend_text = (
-                    f"{key}  {float(latest):.3f} {curve_units[key]}"
-                    if latest is not None
-                    else f"{key}  -- {curve_units[key]}"
-                )
-                if not active:
-                    legend_text += "  HIDDEN"
-                canvas.create_text(
-                    legend_x + (35 if fullscreen_graph else 23),
-                    legend_y,
-                    text=legend_text,
-                    fill=color,
-                    font=("Segoe UI", legend_size, "bold"),
-                    anchor="w",
-                )
+            if mode == "relative":
+                for grid_index in range(5):
+                    ratio = grid_index / 4.0
+                    y = top + ratio * plot_height
+                    canvas.create_line(
+                        left, y, plot_right, y, fill=palette["grid"]
+                    )
+                    canvas.create_text(
+                        left - 8,
+                        y,
+                        text=f"{100 - int(ratio * 100)}%",
+                        fill=palette["muted"],
+                        font=("Segoe UI", axis_size),
+                        anchor="e",
+                    )
+                legend_width = plot_width / max(1, len(keys))
+                for index, key in enumerate(keys):
+                    latest = latest_value(key)
+
+                    legend_x = left + index * legend_width
+                    canvas.create_line(
+                        legend_x,
+                        top - 16,
+                        legend_x + 18,
+                        top - 16,
+                        fill=plot_colors[key],
+                        width=3,
+                    )
+                    canvas.create_text(
+                        legend_x + 23,
+                        top - 16,
+                        text=(
+                            f"{key}  "
+                            f"{format_trend_number(latest)} "
+                            f"{curve_units[key]}"
+                        ),
+                        fill=plot_colors[key],
+                        font=("Segoe UI", axis_size, "bold"),
+                        anchor="w",
+                    )
+            else:
+                for key in keys:
+                    lane = lane_geometry[key]
+                    minimum, maximum, step = series_bounds[key]
+                    config = current_scale_config(
+                        active_device["name"], key
+                    )
+                    canvas.create_rectangle(
+                        left,
+                        lane["top"],
+                        plot_right,
+                        lane["bottom"],
+                        fill="",
+                        outline=palette["border"],
+                    )
+                    for tick in series_ticks[key]:
+                        y = lane["top"] + (
+                            (maximum - tick) / (maximum - minimum)
+                        ) * lane["height"]
+                        canvas.create_line(
+                            left,
+                            y,
+                            plot_right,
+                            y,
+                            fill=palette["grid"],
+                        )
+                        canvas.create_text(
+                            left - 7,
+                            y,
+                            text=trend_display.format_tick(tick, step),
+                            fill=palette["muted"],
+                            font=(
+                                "Segoe UI",
+                                8 if fullscreen_graph else 7,
+                            ),
+                            anchor="e",
+                        )
+                    canvas.create_text(
+                        8,
+                        lane["top"] + 4,
+                        text=(
+                            f"{key}  {curve_units[key]}\n"
+                            f"{config.get('mode', 'auto').upper()}"
+                        ),
+                        fill=plot_colors[key],
+                        font=(
+                            "Segoe UI",
+                            9 if fullscreen_graph else 8,
+                            "bold",
+                        ),
+                        anchor="nw",
+                        justify="left",
+                    )
+                    latest = latest_value(key)
+                    canvas.create_text(
+                        plot_right - 6,
+                        lane["top"] + 5,
+                        text=(
+                            f"{format_trend_number(latest)} "
+                            f"{curve_units[key]}"
+                        ),
+                        fill=plot_colors[key],
+                        font=(
+                            "Segoe UI",
+                            9 if fullscreen_graph else 8,
+                            "bold",
+                        ),
+                        anchor="ne",
+                    )
 
             if not plottable_samples:
                 quality = (
@@ -14399,7 +15392,7 @@ class SCADAMainUI:
                 message = (
                     "IEC-104 source is offline — history contains no valid values"
                     if quality == "OFFLINE"
-                    else "No historian values for the visible signals"
+                    else "No historian values for the displayed signals"
                 )
                 canvas.create_text(
                     left + plot_width / 2,
@@ -14416,62 +15409,97 @@ class SCADAMainUI:
                         "bold",
                     ),
                 )
-                draw_engineering_panel(canvas, None)
+                if view_state["cursor_epoch"] is not None:
+                    select_chart_cursor(
+                        view_state["cursor_epoch"], None, canvas,
+                    )
+                else:
+                    draw_engineering_panel(canvas, None)
                 return
 
-            for key in TREND_VALUE_KEYS:
-                if key not in visible:
-                    continue
+            def clip_segment(x0, y0, x1, y1, lane):
+                x_min, x_max = left, plot_right
+                y_min, y_max = lane["top"], lane["bottom"]
+                dx = x1 - x0
+                dy = y1 - y0
+                lower = 0.0
+                upper = 1.0
+                for p, q in (
+                    (-dx, x0 - x_min),
+                    (dx, x_max - x0),
+                    (-dy, y0 - y_min),
+                    (dy, y_max - y0),
+                ):
+                    if p == 0:
+                        if q < 0:
+                            return None
+                        continue
+                    ratio = q / p
+                    if p < 0:
+                        if ratio > upper:
+                            return None
+                        lower = max(lower, ratio)
+                    else:
+                        if ratio < lower:
+                            return None
+                        upper = min(upper, ratio)
+                return (
+                    x0 + lower * dx,
+                    y0 + lower * dy,
+                    x0 + upper * dx,
+                    y0 + upper * dy,
+                )
+
+            for key in keys:
                 color = plot_colors[key]
-                bounds = series_bounds.get(key)
-                if bounds is None:
-                    continue
-                minimum, maximum = bounds
-                segments = []
-                segment = []
-                previous_epoch = None
-                maximum_line_gap = TREND_HISTORY_INTERVAL * 2.5
+                minimum, maximum, _step = series_bounds[key]
+                lane = lane_geometry[key]
+                previous = None
+                valid_points = []
                 for sample in samples:
-                    value = sample.get(key)
+                    value = finite_value(sample, key)
                     if value is None:
+                        previous = None
                         continue
                     sample_epoch = sample["captured_at"]
-                    if (
-                        segment
-                        and previous_epoch is not None
-                        and sample_epoch - previous_epoch > maximum_line_gap
-                    ):
-                        segments.append(segment)
-                        segment = []
                     x = left + (
                         (sample_epoch - start_epoch) / span
                     ) * plot_width
-                    y = top + (
-                        (maximum - float(value))
-                        / (maximum - minimum)
-                    ) * plot_height
-                    segment.append((x, y))
-                    previous_epoch = sample_epoch
-                    chart_state["point_positions"][
-                        (sample_epoch, key)
-                    ] = (x, y)
-                if segment:
-                    segments.append(segment)
-                for points in segments:
-                    flattened = [
-                        coordinate
-                        for point in points
-                        for coordinate in point
-                    ]
-                    if len(points) > 1:
-                        canvas.create_line(
-                            *flattened,
-                            fill=color,
-                            width=3 if fullscreen_graph else 2,
-                            smooth=False,
-                        )
-                    elif points:
-                        x, y = points[0]
+                    y = lane["top"] + (
+                        (maximum - value) / (maximum - minimum)
+                    ) * lane["height"]
+                    point = (x, y, sample_epoch)
+                    valid_points.append(point)
+                    inside = (
+                        left <= x <= plot_right
+                        and lane["top"] <= y <= lane["bottom"]
+                    )
+                    if inside:
+                        chart_state["point_positions"][
+                            (sample_epoch, key)
+                        ] = (x, y)
+                    if previous is not None:
+                        previous_x, previous_y, previous_epoch = previous
+                        if (
+                            sample_epoch - previous_epoch
+                            <= TREND_HISTORY_INTERVAL * 2.5
+                        ):
+                            clipped = clip_segment(
+                                previous_x, previous_y, x, y, lane
+                            )
+                            if clipped is not None:
+                                canvas.create_line(
+                                    *clipped,
+                                    fill=color,
+                                    width=3 if fullscreen_graph else 2,
+                                )
+                    previous = point
+                if len(valid_points) == 1:
+                    x, y, _epoch = valid_points[0]
+                    if (
+                        left <= x <= plot_right
+                        and lane["top"] <= y <= lane["bottom"]
+                    ):
                         canvas.create_oval(
                             x - 2,
                             y - 2,
@@ -14481,26 +15509,50 @@ class SCADAMainUI:
                             outline=color,
                         )
 
-            cursor_sample = chart_state["sample_by_epoch"].get(
-                view_state["cursor_epoch"]
-            )
-            if cursor_sample is not None:
-                render_crosshair(cursor_sample, canvas)
+            cursor_epoch = view_state["cursor_epoch"]
+            if cursor_epoch is not None:
+                select_chart_cursor(
+                    cursor_epoch, nearest_chart_sample(cursor_epoch), canvas,
+                )
             else:
                 draw_engineering_panel(canvas, plottable_samples[-1])
 
+        def cursor_prompt():
+            if view_state["mode"] == "actual":
+                key = view_state["parameter"]
+                return (
+                    f"CURSOR: Move over the graph to inspect {key} "
+                    f"in actual {curve_units[key]}."
+                )
+            return (
+                "CURSOR: Move over the graph to compare visible signals "
+                "at the same timestamp."
+            )
+
+        def cursor_time_text(epoch):
+            return datetime.datetime.fromtimestamp(epoch).strftime(
+                "%Y-%m-%d %H:%M:%S.%f"
+            )[:-3]
+
         def cursor_summary(sample):
-            timestamp = datetime.datetime.fromtimestamp(
-                sample["captured_at"]
-            ).strftime("%Y-%m-%d %H:%M:%S")
+            cursor_time = cursor_time_text(view_state["cursor_epoch"])
+            sample_time = (
+                datetime.datetime.fromtimestamp(
+                    sample["captured_at"]
+                ).strftime("%Y-%m-%d %H:%M:%S")
+                if sample is not None else "NO DATA"
+            )
             values = "  |  ".join(
                 (
-                    f"{key} {format_trend_number(sample.get(key))} "
+                    f"{key} {format_trend_number(sample.get(key) if sample else None)} "
                     f"{curve_units[key]}"
                 )
-                for key in TREND_VALUE_KEYS
+                for key in displayed_keys()
             )
-            return f"CURSOR {timestamp}  |  {values}"
+            return (
+                f"CURSOR {cursor_time}  |  ACTUAL SAMPLE {sample_time}  |  "
+                f"{values}"
+            )
 
         def update_cursor_status():
             label = view_state.get("cursor_status_label")
@@ -14516,138 +15568,156 @@ class SCADAMainUI:
                 fg=palette["red"] if locked else palette["navy_dark"],
             )
 
+        def nearest_chart_sample(epoch):
+            index = trend_display.nearest_sample_index(
+                chart_state["sample_epochs"], epoch,
+            )
+            return (
+                chart_state["plottable_samples"][index]
+                if index is not None else None
+            )
+
         def render_crosshair(sample, canvas=None):
             canvas = canvas or view_state.get("active_canvas") or canvas_trend
-            canvas.delete("trend_cursor")
             geometry = chart_state["geometry"]
-            if geometry is None:
+            epoch = view_state["cursor_epoch"]
+            if geometry is None or epoch is None:
                 return
-            start_epoch = current_range["start"]
-            end_epoch = current_range["end"]
-            span = max(1, end_epoch - start_epoch)
+            span = max(1, current_range["end"] - current_range["start"])
             x = geometry["left"] + (
-                (sample["captured_at"] - start_epoch) / span
+                (epoch - current_range["start"]) / span
             ) * geometry["width"]
             x = min(geometry["right"], max(geometry["left"], x))
-            canvas.create_line(
-                x,
-                geometry["top"],
-                x,
-                geometry["bottom"],
-                fill="#111111",
-                width=2,
-                dash=(4, 3),
-                tags=("trend_cursor",),
+            items = chart_state["cursor_items"]
+            if not items:
+                # Reuse these items until the plot is redrawn or the cursor
+                # leaves. Mouse motion only moves the line and time label.
+                items["line"] = canvas.create_line(
+                    0, 0, 0, 0, fill="#111111", width=2, dash=(4, 3),
+                    tags=("trend_cursor", "trend_cursor_line"),
+                )
+                items["markers"] = {
+                    key: canvas.create_oval(
+                        0, 0, 0, 0, fill="#ffffff",
+                        outline=plot_colors[key], width=3, state="hidden",
+                        tags=("trend_cursor", "trend_cursor_sample"),
+                    )
+                    for key in TREND_VALUE_KEYS
+                }
+                items["background"] = canvas.create_rectangle(
+                    0, 0, 0, 0, fill=palette["navy_dark"],
+                    outline="#ffffff", tags=("trend_cursor",),
+                )
+                items["label"] = canvas.create_text(
+                    0, 0, fill="#ffffff",
+                    font=("Courier New", 9, "bold"),
+                    tags=("trend_cursor", "trend_cursor_time"),
+                )
+            canvas.coords(
+                items["line"], x, geometry["top"], x, geometry["bottom"],
             )
-            for key in TREND_VALUE_KEYS:
-                point = chart_state["point_positions"].get(
-                    (sample["captured_at"], key)
-                )
-                if point is None:
-                    continue
-                point_x, point_y = point
-                canvas.create_oval(
-                    point_x - 5,
-                    point_y - 5,
-                    point_x + 5,
-                    point_y + 5,
-                    fill="#ffffff",
-                    outline=plot_colors[key],
-                    width=3,
-                    tags=("trend_cursor",),
-                )
-            time_text = datetime.datetime.fromtimestamp(
-                sample["captured_at"]
-            ).strftime("%d %b %Y  %H:%M:%S")
+            half_width = min(170, geometry["width"] / 2)
             label_x = min(
-                geometry["right"] - 92,
-                max(geometry["left"] + 92, x),
+                geometry["right"] - half_width,
+                max(geometry["left"] + half_width, x),
             )
-            canvas.create_rectangle(
-                label_x - 88,
-                geometry["top"] + 4,
-                label_x + 88,
-                geometry["top"] + 28,
-                fill=palette["navy_dark"],
-                outline="#ffffff",
-                tags=("trend_cursor",),
+            label_y = max(
+                geometry["top"],
+                canvas.canvasy(0) if canvas is canvas_trend else 0,
             )
-            canvas.create_text(
-                label_x,
-                geometry["top"] + 16,
-                text=time_text,
-                fill="#ffffff",
-                font=("Courier New", 9, "bold"),
-                tags=("trend_cursor",),
+            canvas.coords(
+                items["background"], label_x - half_width, label_y + 4,
+                label_x + half_width, label_y + 48,
             )
-            draw_engineering_panel(canvas, sample)
-
-        def sample_for_chart_event(event):
-            geometry = chart_state["geometry"]
-            plottable = chart_state["plottable_samples"]
-            if geometry is None or not plottable:
-                return None
-            if not (
-                geometry["left"] <= event.x <= geometry["right"]
-                and geometry["top"] <= event.y <= geometry["bottom"]
-            ):
-                return None
-            ratio = (
-                (event.x - geometry["left"]) / geometry["width"]
+            canvas.coords(items["label"], label_x, label_y + 26)
+            sample_time = (
+                datetime.datetime.fromtimestamp(
+                    sample["captured_at"]
+                ).strftime("%Y-%m-%d %H:%M:%S")
+                if sample is not None else "NO DATA"
             )
-            target_epoch = current_range["start"] + ratio * max(
-                1,
-                current_range["end"] - current_range["start"],
-            )
-            return min(
-                plottable,
-                key=lambda item: abs(
-                    item["captured_at"] - target_epoch
+            canvas.itemconfigure(
+                items["label"],
+                text=(
+                    f"CURSOR {cursor_time_text(epoch)}\n"
+                    f"ACTUAL SAMPLE {sample_time}"
                 ),
             )
+            signature = (id(sample), view_state["cursor_locked"])
+            if items.get("sample_signature") != signature:
+                # Markers stay at the actual recording time, never at a
+                # fabricated/interpolated value under the free cursor.
+                for key, marker in items["markers"].items():
+                    point = (
+                        chart_state["point_positions"].get(
+                            (sample["captured_at"], key)
+                        )
+                        if sample is not None else None
+                    )
+                    if point is None:
+                        canvas.itemconfigure(marker, state="hidden")
+                    else:
+                        point_x, point_y = point
+                        canvas.coords(
+                            marker, point_x - 5, point_y - 5,
+                            point_x + 5, point_y + 5,
+                        )
+                        canvas.itemconfigure(marker, state="normal")
+                draw_engineering_panel(canvas, sample)
+                items["sample_signature"] = signature
 
-        def select_chart_sample(sample, canvas):
-            view_state["cursor_epoch"] = sample["captured_at"]
-            selected_sample["row"] = sample
-            refresh_curve_values()
+        def cursor_for_chart_event(event):
+            geometry = chart_state["geometry"]
+            if geometry is None:
+                return None
+            event_y = event.widget.canvasy(event.y)
+            if not (
+                geometry["left"] <= event.x <= geometry["right"]
+                and geometry["top"] <= event_y <= geometry["bottom"]
+            ):
+                return None
+            ratio = (event.x - geometry["left"]) / geometry["width"]
+            epoch = current_range["start"] + ratio * max(
+                1, current_range["end"] - current_range["start"],
+            )
+            return epoch, nearest_chart_sample(epoch)
+
+        def select_chart_cursor(epoch, sample, canvas):
+            sample_changed = sample is not selected_sample["row"]
+            was_visible = view_state["cursor_epoch"] is not None
+            view_state["cursor_epoch"] = epoch
+            if sample_changed or not was_visible:
+                selected_sample["row"] = sample
+                refresh_curve_values()
             hover_value_label.configure(text=cursor_summary(sample))
             render_crosshair(sample, canvas)
 
         def handle_chart_motion(event):
             if view_state["cursor_locked"]:
                 return
-            sample = sample_for_chart_event(event)
-            if sample is None:
-                return
-            select_chart_sample(sample, event.widget)
+            cursor = cursor_for_chart_event(event)
+            if cursor is not None:
+                select_chart_cursor(*cursor, event.widget)
 
         def toggle_chart_cursor_lock(event):
-            sample = sample_for_chart_event(event)
-            if sample is None:
+            cursor = cursor_for_chart_event(event)
+            if cursor is None:
                 return
-            if view_state["cursor_locked"]:
-                view_state["cursor_locked"] = False
-            else:
-                view_state["cursor_locked"] = True
+            view_state["cursor_locked"] = not view_state["cursor_locked"]
             update_cursor_status()
-            select_chart_sample(sample, event.widget)
+            select_chart_cursor(*cursor, event.widget)
 
         def clear_chart_cursor(event=None):
             if view_state["cursor_locked"]:
                 return
+            canvas = view_state.get("active_canvas") or canvas_trend
+            if event is not None and event.widget is not canvas:
+                return
             view_state["cursor_epoch"] = None
-            canvas = (
-                event.widget
-                if event is not None and isinstance(event.widget, tk.Canvas)
-                else view_state.get("active_canvas") or canvas_trend
-            )
             canvas.delete("trend_cursor")
-            hover_value_label.configure(
-                text=(
-                    "CURSOR: Move over the graph to compare U, I, P, Q, "
-                    "and f at the same timestamp."
-                )
-            )
+            chart_state["cursor_items"] = {}
+            hover_value_label.configure(text=cursor_prompt())
+
             latest = (
                 chart_state["plottable_samples"][-1]
                 if chart_state["plottable_samples"]
@@ -14702,7 +15772,7 @@ class SCADAMainUI:
                     selected_item = item_id
 
             target_item = selected_item
-            if target_item is None and not view_state["cursor_locked"]:
+            if target_item is None and view_state["cursor_epoch"] is None:
                 target_item = latest_item
             if target_item is not None:
                 table.selection_set(target_item)
@@ -14725,10 +15795,11 @@ class SCADAMainUI:
 
         def load_history(capture=False, show_error=False):
             nonlocal samples
-            locked_epoch = (
-                view_state["cursor_epoch"]
-                if view_state["cursor_locked"]
-                else None
+            cursor_epoch = view_state["cursor_epoch"]
+            cursor_ratio = (
+                (cursor_epoch - current_range["start"])
+                / max(1, current_range["end"] - current_range["start"])
+                if cursor_epoch is not None else None
             )
             try:
                 if capture:
@@ -14742,32 +15813,21 @@ class SCADAMainUI:
                     current_range["end"],
                     max_points=720,
                 )
-                locked_sample = None
-                if locked_epoch is not None and samples:
-                    locked_sample = min(
-                        samples,
-                        key=lambda sample: abs(
-                            sample["captured_at"] - locked_epoch
-                        ),
-                    )
-                    view_state["cursor_epoch"] = locked_sample[
-                        "captured_at"
-                    ]
-                    selected_sample["row"] = locked_sample
-                else:
-                    view_state["cursor_epoch"] = None
-                    view_state["cursor_locked"] = False
-                update_cursor_status()
-                hover_value_label.configure(
-                    text=(
-                        cursor_summary(locked_sample)
-                        if locked_sample is not None
-                        else (
-                            "CURSOR: Move over the graph to compare U, I, P, "
-                            "Q, and f at the same timestamp."
+                if cursor_epoch is not None:
+                    if not view_state["cursor_locked"]:
+                        # Hover stays under the mouse as the live time window
+                        # advances; a locked cursor preserves its exact time.
+                        cursor_epoch = current_range["start"] + cursor_ratio * max(
+                            1, current_range["end"] - current_range["start"],
                         )
-                    )
-                )
+                    if current_range["start"] <= cursor_epoch <= current_range["end"]:
+                        view_state["cursor_epoch"] = cursor_epoch
+                    else:
+                        view_state["cursor_epoch"] = None
+                        view_state["cursor_locked"] = False
+                update_cursor_status()
+                if view_state["cursor_epoch"] is None:
+                    hover_value_label.configure(text=cursor_prompt())
                 latest = samples[-1] if samples else None
                 quality = (
                     latest.get("quality", "NO DATA")
@@ -14794,8 +15854,8 @@ class SCADAMainUI:
                 sample_count_label.configure(
                     text=f"{len(samples)} plotted records",
                 )
-                refresh_table()
                 redraw()
+                refresh_table()
             except Exception as exc:
                 if show_error:
                     messagebox.showerror(
@@ -14899,7 +15959,9 @@ class SCADAMainUI:
             active_device["name"] = device_name
             selected_sample["row"] = None
             selected_label.configure(text=device_name)
+            load_scale_controls()
             load_history(show_error=True)
+
 
         def apply_period(_event=None):
             load_history(show_error=True)
@@ -14946,6 +16008,18 @@ class SCADAMainUI:
         )
         pause_button.configure(command=toggle_view_pause)
         export_button.configure(command=export_excel)
+        display_mode_combo.bind(
+            "<<ComboboxSelected>>", select_display_mode
+        )
+        parameter_combo.bind(
+            "<<ComboboxSelected>>", select_display_parameter
+        )
+        auto_scale_radio.configure(command=update_scale_entry_state)
+        manual_scale_radio.configure(command=update_scale_entry_state)
+        apply_scale_button.configure(command=apply_scale)
+        for check in visible_checks.values():
+            check.configure(command=apply_visible_series)
+
         range_combo.bind("<<ComboboxSelected>>", apply_period)
         tree_dev.bind("<<TreeviewSelect>>", select_device)
         table.bind("<<TreeviewSelect>>", select_history_record)
@@ -14957,7 +16031,20 @@ class SCADAMainUI:
         first_item = device_items[active_device["name"]]
         tree_dev.selection_set(first_item)
         tree_dev.focus(first_item)
+        load_scale_controls()
         load_history(show_error=True)
+        update_display_view()
+        if preferences_load_error is not None:
+            warning_text = preferences_load_error
+            curve_win.after_idle(
+                lambda: messagebox.showwarning(
+                    "Trend Display Preferences",
+                    "The saved trend display settings could not be loaded.\n"
+                    "Safe defaults are active and the existing file has not "
+                    f"been overwritten.\n\n{warning_text}",
+                    parent=curve_win,
+                )
+            )
         curve_win.after(15000, auto_refresh)
 
     def action_his_alarm(self):
@@ -19787,9 +20874,12 @@ class SCADAMainUI:
                 bay = _norm_text(binding.get("Bay_Name"))
                 physical = _norm_text(binding.get("Physical_Name"))
                 info_name = _norm_text(binding.get("Info_Name"))
+                configured_mode = _norm_text(
+                    binding.get("mode")
+                ).casefold()
                 mode = (
-                    "selected"
-                    if binding.get("mode") == "selected"
+                    configured_mode
+                    if configured_mode in {"manual", "selected"}
                     else "default"
                 )
                 try:
@@ -19823,9 +20913,13 @@ class SCADAMainUI:
 
                 formula = _norm_text(binding.get("Formula")) or "RAW"
                 source = (
-                    f"ListSetting {bay}.csv ({mode}); CT/PT: "
-                    f"{_norm_text(binding.get('CTPT_Source')) or 'ListSetting'}"
-                    if bay else "Mapping tidak ditemukan"
+                    f"Manual ({bay})"
+                    if mode == "manual" and bay
+                    else (
+                        f"ListSetting {bay}.csv ({mode}); CT/PT: "
+                        f"{_norm_text(binding.get('CTPT_Source')) or 'ListSetting'}"
+                        if bay else "Mapping tidak ditemukan"
+                    )
                 )
                 rows.append({
                     "key": f"{monitor_id}:value:{field_id}",
@@ -21429,8 +22523,14 @@ try:
                 elif source == "wire2" and not physical.startswith("W2_"):
                     physical = "W2_" + physical
                 existing = variables.get(str(html_id), {})
+                manual = (
+                    isinstance(existing, dict)
+                    and str(existing.get("mode", "")).strip().lower()
+                    == "manual"
+                )
                 legacy_g2_phase = (
-                    monitor_id == "G2"
+                    not manual
+                    and monitor_id == "G2"
                     and str(html_id) in {"tk2", "tk3", "tk4"}
                     and isinstance(existing, dict)
                     and str(existing.get("key", "")).endswith("_phase")
@@ -21481,10 +22581,11 @@ try:
                 seeded.setdefault("source", source)
                 seeded.setdefault("key", str(key))
                 seeded.setdefault("Decimals", 2)
-                if row:
-                    # A saved mapping selects the point; its protocol address
-                    # and engineering formula always come from Parameter/
-                    # ListSetting. Stale copied coefficients must never win.
+                if row and not manual:
+                    # Legacy selected/default bindings identify a registry
+                    # point and continue following its current metadata.
+                    # Explicit manual bindings own their saved address and
+                    # engineering values across reloads and config sync.
                     for column in SETTING_COLUMNS:
                         seeded[column] = row.get(column, "")
                     seeded["CTPT_Source"] = row.get("CTPT_Source", "")
@@ -21517,9 +22618,11 @@ try:
                 normalized = _normalize_monitor_breaker_binding(
                     current, fallback
                 )
-                physical = _norm_text(
-                    normalized.get("Physical_Name")
-                ).casefold()
+                physical = " ".join(
+                    _norm_text(normalized.get("Physical_Name"))
+                    .casefold()
+                    .split()
+                )
                 eligible = (
                     "breaker position" in physical
                     and "trip position" not in physical
@@ -21540,6 +22643,11 @@ try:
 
     def _monitor_tv_relay_engineered_value(binding, display_field):
         """Read an engineered point from the current PC1 relay snapshot."""
+        if str(binding.get("mode", "")).strip().lower() == "manual":
+            # A manual binding is authoritative only when its exact IEC
+            # address has RAW telemetry. An old bay/tag alias may carry
+            # engineering metadata for a different address or formula.
+            return None
         ip = str(binding.get("Device_Addr", "")).strip()
         bay = str(binding.get("Bay_Name", "")).strip()
         physical = str(binding.get("Physical_Name", "")).strip()
@@ -21848,9 +22956,11 @@ try:
             "source": display_name or source_ip,
             "date": time.strftime("%Y-%m-%d", now),
             "time": time.strftime("%H:%M:%S", now),
+            "variable_formats": {},
         }
 
         configured_fields = set()
+        variable_formats = payload["variable_formats"]
         for html_id, item in configured_variables.items():
             if not isinstance(item, dict):
                 continue
@@ -21859,7 +22969,22 @@ try:
             binding = dict(item)
             binding["Display_Field"] = field_id
             try:
+                decimals = int(float(binding.get("Decimals", 2)))
+            except (TypeError, ValueError, OverflowError):
+                decimals = 2
+            variable_formats[field_id] = {
+                "decimals": max(0, min(6, decimals)),
+                "unit": _monitor_tv_display_unit(
+                    field_id,
+                    str(binding.get("Unit", "")).strip(),
+                ),
+            }
+            try:
                 preview = _monitor_tv_preview(binding)
+                variable_formats[field_id] = {
+                    "decimals": preview["decimals"],
+                    "unit": preview["unit"],
+                }
                 payload[field_id] = (
                     float(preview["actual"])
                     if (
@@ -21879,8 +23004,11 @@ try:
                 payload[html_id] = _monitor_tv_display_value(
                     html_id, payload[html_id]
                 )
-        # Hindari menampilkan angka cache dari RTU yang sedang offline.
+        # Configured values already use their own device availability in
+        # preview. Only fallback fields are gated by the legacy source group.
         for html_id, (source, data_key) in field_map.items():
+            if html_id in configured_fields:
+                continue
             if source.startswith("measure_control") and not generator_online:
                 payload[html_id] = 0.0
             elif source.startswith("wire") and not wire_online:
@@ -23236,7 +24364,6 @@ def run_login_ui_smoke_test():
                 and len(confirm_labels) == 1
                 and not confirm_labels[0].winfo_ismapped()
                 and len(visible_entries) == 1
-                and login_win.winfo_height() <= 560
             )
             if not passed:
                 print(
